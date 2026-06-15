@@ -28,12 +28,15 @@ import {
   CloseCircleOutlined,
   EditOutlined,
   PushpinOutlined,
+  FileOutlined,
+  FolderOpenOutlined,
 } from '@ant-design/icons'
 import { agentApi, groupApi,
   messageApi,
   type AgentDefinition,
   type Group,
   type GroupMember,
+  type GroupFile,
   type Message,
 } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
@@ -122,6 +125,14 @@ function getMemberDisplayName(member: GroupMember) {
   return member.alias || member.agent_name
 }
 
+/** 格式化文件大小 */
+function formatFileSize(size: number): string {
+  if (size < 1024) return `${size} B`
+  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
+  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(2)} MB`
+  return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
 export default function GroupPage() {
   const [groups, setGroups] = useState<Group[]>([])
   const [agents, setAgents] = useState<AgentDefinition[]>([])
@@ -146,6 +157,10 @@ export default function GroupPage() {
   const [groupSettingsOpen, setGroupSettingsOpen] = useState(false)
   const [groupSettingsForm] = Form.useForm()
   const [drawerOpen, setDrawerOpen] = useState(false)
+
+  // ── 群共享文件 ──
+  const [groupFiles, setGroupFiles] = useState<GroupFile[]>([])
+  const [filesLoading, setFilesLoading] = useState(false)
 
   // ── @mention 自动补全 ──
   const [mentionOpen, setMentionOpen] = useState(false)
@@ -205,11 +220,12 @@ export default function GroupPage() {
     fetchData()
   }, [])
 
-  // 切换群组时加载消息和成员
+  // 切换群组时加载消息、成员和文件
   useEffect(() => {
     if (chatGroupId) {
       loadMessages(chatGroupId)
       loadMembers(chatGroupId)
+      loadGroupFiles(chatGroupId)
       setDrawerOpen(false)
     }
   }, [chatGroupId])
@@ -223,6 +239,18 @@ export default function GroupPage() {
       setMembers([])
     } finally {
       setMembersLoading(false)
+    }
+  }
+
+  const loadGroupFiles = async (groupId: string) => {
+    setFilesLoading(true)
+    try {
+      const data = await groupApi.listFiles(groupId)
+      setGroupFiles(data)
+    } catch {
+      setGroupFiles([])
+    } finally {
+      setFilesLoading(false)
     }
   }
 
@@ -772,7 +800,44 @@ export default function GroupPage() {
 
             <Divider style={{ margin: '0' }} />
 
-            {/* 成员列表 */}
+            {/* 群共享文件 */}
+            <div style={{ padding: '12px 0' }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                <FolderOpenOutlined style={{ color: '#1677ff' }} />
+                群文件
+              </div>
+              {filesLoading ? (
+                <div style={{ textAlign: 'center', padding: 20 }}>
+                  <Spin size="small" />
+                </div>
+              ) : groupFiles.length === 0 ? (
+                <div style={{ fontSize: 13, color: '#999', background: '#f5f5f5', padding: '8px 12px', borderRadius: 4 }}>
+                  暂无文件
+                </div>
+              ) : (
+                <List
+                  size="small"
+                  dataSource={groupFiles}
+                  renderItem={(file: GroupFile) => (
+                    <List.Item style={{ padding: '6px 0' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
+                        <FileOutlined style={{ color: '#8c8c8c', fontSize: 14 }} />
+                        <div style={{ flex: 1, minWidth: 0 }}>
+                          <div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                            {file.name}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#999' }}>
+                            {formatFileSize(file.size)} · {new Date(file.modified_at * 1000).toLocaleDateString()}
+                          </div>
+                        </div>
+                      </div>
+                    </List.Item>
+                  )}
+                />
+              )}
+            </div>
+
+            <Divider style={{ margin: '0' }} />
             <div style={{ padding: '12px 0' }}>
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
                 <span style={{ fontSize: 14, fontWeight: 600 }}>

@@ -66,3 +66,12 @@ class GroupMemberWithAgentResponse(BaseModel):
     agent_role: str
 
     model_config = {"from_attributes": True}
+
+
+class GroupFileResponse(BaseModel):
+    """群共享文件响应"""
+    name: str = Field(..., description="文件名")
+    size: int = Field(..., description="文件大小（字节）")
+    modified_at: float = Field(..., description="修改时间戳（秒）")
+
+    model_config = {"from_attributes": True}

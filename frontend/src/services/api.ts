@@ -69,6 +69,12 @@ export interface GroupMember {
   agent_role: string
 }
 
+export interface GroupFile {
+  name: string
+  size: number
+  modified_at: number
+}
+
 export interface GroupCreatePayload {
   name: string
   coordinator_id?: string
@@ -92,6 +98,7 @@ export const groupApi = {
     }),
   removeMember: (id: string, memberId: string) =>
     request<{ success: boolean }>(`/groups/${id}/members/${memberId}`, { method: 'DELETE' }),
+  listFiles: (id: string) => request<GroupFile[]>(`/groups/${id}/files`),
 }
 
 // ── Tasks ──────────────────────────────────────────────────────

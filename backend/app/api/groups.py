@@ -11,6 +11,7 @@ from app.api.schemas.group import (
     GroupMemberAdd,
     GroupMemberResponse,
     GroupMemberWithAgentResponse,
+    GroupFileResponse,
 )
 from app.api.schemas.common import OK
 from app.core.database import get_db
@@ -98,4 +99,22 @@ async def remove_member(group_id: str, member_id: str, db: AsyncSession = Depend
     if engine:
         await registry.remove_engine(agent_id, group_id)
 
+    return OK()
+
+
+# ── GroupFile (群共享文件) ───────────────────────────────────────
+
+@router.get("/{group_id}/files", response_model=list[GroupFileResponse])
+async def list_group_files(group_id: str):
+    """列出群共享根目录下的所有文件（人类只读）"""
+    from app.services.group_file_service import list_files
+    files = list_files(group_id)
+    return files
+
+
+@router.post("/{group_id}/files/ensure_dir")
+async def ensure_group_dir(group_id: str):
+    """确保群共享目录存在（内部调用）"""
+    from app.services.group_file_service import ensure_group_dir as ensure_dir
+    ensure_dir(group_id)
     return OK()
