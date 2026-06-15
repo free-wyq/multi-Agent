@@ -28,11 +28,8 @@ import {
   CloseCircleOutlined,
   EditOutlined,
   PushpinOutlined,
-  TeamOutlined,
 } from '@ant-design/icons'
-import {
-  agentApi,
-  groupApi,
+import { agentApi, groupApi,
   messageApi,
   type AgentDefinition,
   type Group,
@@ -40,15 +37,55 @@ import {
   type Message,
 } from '../services/api'
 import { useWebSocket } from '../hooks/useWebSocket'
+import './GroupPage.css'
 
 const { Text } = Typography
 
-/** 获取发送者头像/图标 */
-function SenderIcon({ id, agents }: { id: string; agents: AgentDefinition[] }) {
-  if (id === 'user') return <UserOutlined style={{ fontSize: 20, color: '#1677ff' }} />
-  if (id === 'coordinator' || id === 'broadcast') return <RobotOutlined style={{ fontSize: 20, color: '#722ed1' }} />
+/** 获取智能体角色主题色 */
+function getAgentColor(id: string, agents: AgentDefinition[]): string {
+  const ROLE_COLORS: Record<string, string> = {
+    '后端开发工程师': '#6366f1',
+    '前端开发工程师': '#06b6d4',
+    '测试工程师': '#f59e0b',
+    'DevOps 工程师': '#10b981',
+    '产品经理': '#f43f5e',
+    '自定义': '#8b5cf6',
+  }
   const agent = agents.find((a) => a.id === id)
-  return agent ? <RobotOutlined style={{ fontSize: 20, color: '#1677ff' }} /> : <UserOutlined style={{ fontSize: 20, color: '#999' }} />
+  return agent ? (ROLE_COLORS[agent.role] ?? '#8b5cf6') : '#722ed1'
+}
+
+/** 聊天气泡头像 */
+function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
+  /* 基于 id 哈希生成随机延迟和周期，让每个智能体呼吸节奏不同 */
+  const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  const ringDelay = (hash % 3000)
+  const ringDuration = 2500 + (hash % 7) * 200
+  const bobDelay = (hash >> 4) % 4000
+  const bobDuration = 3000 + (hash >> 3) % 5 * 300
+
+  if (id === 'user') {
+    return (
+      <div className="chat-avatar chat-avatar--user">
+        <UserOutlined style={{ fontSize: 16, color: '#1677ff' }} />
+      </div>
+    )
+  }
+  const color = id === 'coordinator' || id === 'broadcast' ? '#722ed1' : getAgentColor(id, agents)
+  return (
+    <div className="chat-avatar" style={{ borderColor: color }}>
+      <img
+        src="/robot-avatar.png"
+        alt=""
+        className="chat-avatar-img"
+        style={{ animationDelay: `${bobDelay}ms`, animationDuration: `${bobDuration}ms` }}
+      />
+      <span
+        className="chat-avatar-ring"
+        style={{ borderColor: color, animationDelay: `${ringDelay}ms`, animationDuration: `${ringDuration}ms` }}
+      />
+    </div>
+  )
 }
 
 /** 获取发送者显示名 */
@@ -469,6 +506,9 @@ export default function GroupPage() {
                   background: chatGroupId === g.id ? '#e6f4ff' : 'transparent',
                   transition: 'background 0.2s',
                   marginBottom: 2,
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 10,
                 }}
                 onMouseEnter={(e) => {
                   if (chatGroupId !== g.id)
@@ -479,32 +519,41 @@ export default function GroupPage() {
                     (e.currentTarget as HTMLDivElement).style.background = 'transparent'
                 }}
               >
-                <div
-                  style={{
-                    fontWeight: chatGroupId === g.id ? 600 : 400,
-                    fontSize: 14,
-                    color: chatGroupId === g.id ? '#1677ff' : '#333',
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {g.name}
+                <div className="group-avatar-list-wrap" style={{ flexShrink: 0 }}>
+                  <img
+                    src="/group-avatar.png"
+                    alt=""
+                    className="group-avatar-list"
+                  />
                 </div>
-                {g.description && (
+                <div style={{ flex: 1, minWidth: 0 }}>
                   <div
                     style={{
-                      fontSize: 12,
-                      color: '#999',
-                      marginTop: 2,
+                      fontWeight: chatGroupId === g.id ? 600 : 400,
+                      fontSize: 14,
+                      color: chatGroupId === g.id ? '#1677ff' : '#333',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
                     }}
                   >
-                    {g.description}
+                    {g.name}
                   </div>
-                )}
+                  {g.description && (
+                    <div
+                      style={{
+                        fontSize: 12,
+                        color: '#999',
+                        marginTop: 2,
+                        overflow: 'hidden',
+                        textOverflow: 'ellipsis',
+                        whiteSpace: 'nowrap',
+                      }}
+                    >
+                      {g.description}
+                    </div>
+                  )}
+                </div>
               </div>
             ))
           )}
@@ -574,74 +623,36 @@ export default function GroupPage() {
           ) : chatMessages.length === 0 ? (
             <Empty description="暂无消息，开始对话吧" />
           ) : (
-            chatMessages.map((msg) => (
-              <div
-                key={msg.id}
-                style={{
-                  display: 'flex',
-                  gap: 10,
-                  marginBottom: 16,
-                  flexDirection: msg.sender_id === 'user' ? 'row-reverse' : 'row',
-                }}
-              >
-                {/* 头像 */}
+            chatMessages.map((msg) => {
+              const isUser = msg.sender_id === 'user'
+              return (
                 <div
-                  style={{
-                    width: 32,
-                    height: 32,
-                    borderRadius: '50%',
-                    background: msg.sender_id === 'user' ? '#e6f4ff' : '#f9f0ff',
-                    display: 'flex',
-                    alignItems: 'center',
-                    justifyContent: 'center',
-                    flexShrink: 0,
-                  }}
+                  key={msg.id}
+                  className="chat-msg"
+                  style={{ flexDirection: isUser ? 'row-reverse' : 'row' }}
                 >
-                  <SenderIcon id={msg.sender_id} agents={agents} />
-                </div>
+                  {/* 头像 */}
+                  <ChatAvatar id={msg.sender_id} agents={agents} />
 
-                {/* 消息气泡 */}
-                <div style={{ maxWidth: '70%' }}>
-                  <div
-                    style={{
-                      fontSize: 12,
-                      color: '#999',
-                      marginBottom: 2,
-                      textAlign: msg.sender_id === 'user' ? 'right' : 'left',
-                    }}
-                  >
-                    <SenderName id={msg.sender_id} agents={agents} />
-                  </div>
-                  <div
-                    style={{
-                      padding: '8px 12px',
-                      borderRadius: 12,
-                      background: msg.sender_id === 'user' ? '#1677ff' : '#f0f0f0',
-                      color: msg.sender_id === 'user' ? '#fff' : '#333',
-                      fontSize: 14,
-                      lineHeight: 1.5,
-                      wordBreak: 'break-word',
-                    }}
-                  >
-                    {msg.sender_id === 'user' ? (
-                      msg.content
-                    ) : (
-                      <HighlightMessage content={msg.content} members={members} />
-                    )}
-                  </div>
-                  <div
-                    style={{
-                      fontSize: 11,
-                      color: '#bbb',
-                      marginTop: 2,
-                      textAlign: msg.sender_id === 'user' ? 'right' : 'left',
-                    }}
-                  >
-                    {new Date(msg.created_at).toLocaleTimeString()}
+                  {/* 消息气泡 */}
+                  <div className="chat-bubble-wrap">
+                    <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
+                      <SenderName id={msg.sender_id} agents={agents} />
+                    </div>
+                    <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
+                      {isUser ? (
+                        msg.content
+                      ) : (
+                        <HighlightMessage content={msg.content} members={members} />
+                      )}
+                    </div>
+                    <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
+                      {new Date(msg.created_at).toLocaleTimeString()}
+                    </div>
                   </div>
                 </div>
-              </div>
-            ))
+              )
+            })
           )}
           <div ref={chatEndRef} />
         </div>
@@ -727,12 +738,17 @@ export default function GroupPage() {
           <div style={{ padding: '16px 16px 0' }}>
             {/* 群信息头部 */}
             <div style={{ textAlign: 'center', padding: '12px 0 20px' }}>
-              <Avatar
-                size={64}
-                src="/group-avatar.png"
-                shape="square"
-                style={{ borderRadius: 8 }}
-              />
+              <div
+                className="group-avatar-wrap"
+                style={{ width: 64, height: 64, borderRadius: 8, margin: '0 auto' }}
+              >
+                <img
+                  src="/group-avatar.png"
+                  alt="群聊头像"
+                  className="group-avatar-img"
+                  style={{ width: 64, height: 64, borderRadius: 8 }}
+                />
+              </div>
               <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>
                 {chatGroup.name}
               </div>

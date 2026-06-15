@@ -251,8 +251,18 @@ export default function AgentPage() {
                   {/* 头像 + 状态 */}
                   <div className="agent-card-header">
                     <div className="agent-card-avatar">
-                      <img src="/robot-avatar.png" alt={agent.name} className="agent-card-avatar-img" />
-                      <span className="agent-card-avatar-ring" style={{ borderColor: theme.color, color: theme.color }} />
+                      <img src="/robot-avatar.png" alt={agent.name} className="agent-card-avatar-img"
+                        style={{
+                          animationDelay: `${(agent.id.charCodeAt(0) * 37) % 4000}ms`,
+                          animationDuration: `${3000 + (agent.id.charCodeAt(1) ?? 0) % 5 * 300}ms`,
+                        }}
+                      />
+                      <span className="agent-card-avatar-ring" style={{
+                        borderColor: theme.color,
+                        color: theme.color,
+                        animationDelay: `${(agent.id.charCodeAt(0) * 53) % 3000}ms`,
+                        animationDuration: `${2500 + (agent.id.charCodeAt(2) ?? 0) % 7 * 200}ms`,
+                      }} />
                     </div>
                     <Badge status={statusInfo.dot as any} text={null} className="agent-card-status-badge" />
                   </div>
