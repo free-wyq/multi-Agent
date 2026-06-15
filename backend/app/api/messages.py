@@ -60,7 +60,7 @@ async def create_message(body: MessageCreate, db: AsyncSession = Depends(get_db)
         mentioned_agent_id = await _find_mention(db, body.group_id, body.content or "")
 
         # 后台异步处理回复，HTTP 立即返回
-        asyncio.create_task(_background_reply(body.group_id, mentioned_agent_id))
+        asyncio.create_task(_background_reply(body.group_id, mentioned_agent_id, body.content or "", body.sender_id))
 
     return obj
 
@@ -157,16 +157,16 @@ async def _find_mention(db: AsyncSession, group_id: str, content: str) -> str | 
 # ── 子智能体路由 ─────────────────────────────────────────────────
 
 
-async def _route_to_agent(db: AsyncSession, group_id: str, agent_id: str) -> None:
+async def _route_to_agent(db: AsyncSession, group_id: str, agent_id: str, content: str = "", sender_id: str = "user") -> None:
     """路由到子智能体引擎"""
-    logger.info("消息路由到子智能体: %s", agent_id[:8])
+    logger.info("消息路由到子智能体: %s (from: %s)", agent_id[:8], sender_id)
     try:
         from app.agent_engine import get_registry
         registry = get_registry()
         routed = await registry.route_message(agent_id, {
             "type": "chat",
-            "content": "",
-            "sender_id": "user",
+            "content": content,
+            "sender_id": sender_id,
             "group_id": group_id,
         }, group_id=group_id)
         if not routed:
