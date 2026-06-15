@@ -11,6 +11,7 @@ from app.api.groups import router as groups_router
 from app.api.tasks import router as tasks_router
 from app.api.messages import router as messages_router
 from app.api.coordinator import router as coordinator_router
+from app.api.runtime import router as runtime_router
 from app.core.database import engine, Base
 
 
@@ -43,6 +44,7 @@ app.include_router(groups_router, prefix="/api/v1")
 app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(messages_router, prefix="/api/v1")
 app.include_router(coordinator_router, prefix="/api/v1")
+app.include_router(runtime_router, prefix="/api/v1")
 
 
 @app.get("/api/v1/health")
