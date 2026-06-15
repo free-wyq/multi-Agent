@@ -1,0 +1,19 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(pip3 --version)",
+      "Bash(pip --version)",
+      "Bash(python3 -m pip install browser-use)",
+      "Bash(sudo apt-get update -qq)",
+      "Bash(sudo apt-get install -y -qq python3-pip)",
+      "Bash(python3 -m ensurepip)",
+      "Read(//home/wyq/.local/**)"
+    ],
+    "defaultMode": "bypassPermissions"
+  },
+  "thinking": {
+    "type": "disabled"
+  },
+  "skipDangerousModePermissionPrompt": true,
+  "skipDangerousModePrompt": true
+}
