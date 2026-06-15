@@ -458,6 +458,17 @@ export default function GroupPage() {
     }
   }
 
+  const handleClearMessages = async () => {
+    if (!chatGroupId) return
+    try {
+      await messageApi.clearByGroup(chatGroupId)
+      message.success('聊天记录已清空')
+      loadMessages(chatGroupId)
+    } catch {
+      message.error('清空失败')
+    }
+  }
+
   // 已加入的成员 agent_id 集合
   const existingMemberAgentIds = new Set(members.map((m) => m.agent_id))
   const availableAgents = agents.filter((a) => !existingMemberAgentIds.has(a.id))
@@ -992,6 +1003,17 @@ export default function GroupPage() {
               >
                 编辑群信息
               </Button>
+              <Popconfirm
+                title="确定要清空该群组的聊天记录吗？此操作不可恢复。"
+                onConfirm={handleClearMessages}
+                okText="清空"
+                okButtonProps={{ danger: true }}
+                cancelText="取消"
+              >
+                <Button block style={{ marginBottom: 8 }}>
+                  清空聊天记录
+                </Button>
+              </Popconfirm>
               <Popconfirm
                 title="确定要删除该群组吗？此操作不可恢复。"
                 onConfirm={handleDeleteGroup}

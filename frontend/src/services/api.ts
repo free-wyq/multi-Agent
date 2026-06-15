@@ -178,4 +178,6 @@ export const messageApi = {
     request<Message[]>(`/messages/task/${taskId}?limit=${limit}`),
   send: (body: MessageCreatePayload) =>
     request<Message>('/messages', { method: 'POST', body: JSON.stringify(body) }),
+  clearByGroup: (groupId: string) =>
+    request<{ success: boolean }>(`/messages/group/${groupId}/clear`, { method: 'DELETE' }),
 }

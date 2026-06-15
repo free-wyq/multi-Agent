@@ -17,6 +17,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.api.schemas.message import MessageCreate, MessageResponse
+from app.api.schemas.common import OK
 from app.core.database import get_db, async_session
 from app.services import message_service
 
@@ -101,12 +102,12 @@ async def _push_to_bus(
 # ── 后台回复任务 ─────────────────────────────────────────────────
 
 
-async def _background_reply(group_id: str, mentioned_agent_id: str | None) -> None:
+async def _background_reply(group_id: str, mentioned_agent_id: str | None, content: str = "", sender_id: str = "user") -> None:
     """后台异步生成回复并通过 WS 推送，不阻塞 HTTP 响应"""
     try:
         async with async_session() as db:
             if mentioned_agent_id:
-                await _route_to_agent(db, group_id, mentioned_agent_id)
+                await _route_to_agent(db, group_id, mentioned_agent_id, content=content, sender_id=sender_id)
             else:
                 await _coordinator_reply(db, group_id)
     except Exception as e:
@@ -251,15 +252,16 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
             f'{{\n'
             f'  "coordinator_content": "给用户的回复内容",\n'
             f'  "team_messages": [\n'
-            f'    {{"agent_id": "成员ID", "content": "该成员的发言"}}\n'
+            f'    {{"agent_id": "成员ID", "content": "该成员的发言，开头必须加 @成员名字 以便系统识别派发"}}\n'
             f'  ]\n'
             f'}}\n\n'
             f"要求：\n"
             f"1. coordinator_content 是你的回复\n"
-            f"2. 如果涉及开发任务，让对应团队成员在群里确认接收\n"
+            f"2. 如果涉及开发任务，让对应团队成员在群里确认接收，content 开头必须加 @成员名字\n"
             f"3. 如果只是日常对话，team_messages 留空数组 []\n"
             f"4. agent_id 必须使用上面提供的精确 ID\n"
-            f"5. team_messages 最多2条"
+            f"5. team_messages 最多2条\n"
+            f"6. 成员名字用上面列出的 name 字段"
         )
 
         reply_text = await llm.ainvoke(prompt)
@@ -279,7 +281,15 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
             if aid not in agent_names:
                 logger.warning("Unknown agent_id in team message: %s", aid)
                 continue
-            await _save_and_push(db, group_id, aid, "team_reply", tm.get("content", ""))
+            tm_content = tm.get("content", "")
+            # 确保 team_reply 带 @mention 格式，让前端也能高亮
+            agent_name = agent_names[aid]
+            mention_tag = f"@{agent_name}"
+            if mention_tag not in tm_content:
+                tm_content = f"{mention_tag} {tm_content}"
+            await _save_and_push(db, group_id, aid, "team_reply", tm_content)
+            # 路由到 AgentEngine，让子智能体真正参与对话
+            await _route_to_agent(db, group_id, aid, content=tm_content, sender_id=coordinator_id)
 
     except Exception as e:
         logger.warning("LLM auto-reply failed: %s", e)
@@ -321,3 +331,12 @@ async def list_group_messages(group_id: str, limit: int = 100, db: AsyncSession 
 @router.get("/task/{task_id}", response_model=list[MessageResponse])
 async def list_task_messages(task_id: str, limit: int = 100, db: AsyncSession = Depends(get_db)):
     return await message_service.list_messages_by_task(db, task_id, limit)
+
+
+@router.delete("/group/{group_id}/clear", response_model=OK)
+async def clear_group_messages(group_id: str, db: AsyncSession = Depends(get_db)):
+    """清空群组的聊天记录"""
+    deleted = await message_service.clear_messages_by_group(db, group_id)
+    await db.commit()
+    logger.info("Cleared %d messages for group %s", deleted, group_id[:8])
+    return OK()

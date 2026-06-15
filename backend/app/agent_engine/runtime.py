@@ -112,12 +112,18 @@ class AgentEngine:
         # 1. 加载上下文（最近 5 条记忆）
         context = self._build_context()
 
-        # 2. 调用大脑决策
+        # 2. 构建消息内容（如果是其他智能体发来的，标注来源）
+        if sender not in ("user", "coordinator"):
+            display_msg = f"[来自智能体 {sender}] {content}"
+        else:
+            display_msg = content
+
+        # 3. 调用大脑决策
         prompt = BRAIN_PROMPT.format(
             role=self.role,
             name=self.name,
             context=context,
-            message=content,
+            message=display_msg,
         )
 
         try:
@@ -268,7 +274,7 @@ class AgentEngine:
         task_id: str | None = None,
         parent_msg: dict | None = None,
     ) -> None:
-        """保存消息到 DB + 发布到 Redis"""
+        """保存消息到 DB + 发布到 Redis + 检查 @mention 路由到其他智能体"""
         msg_data = {
             "group_id": self.group_id,
             "sender_id": self.id,
@@ -306,6 +312,9 @@ class AgentEngine:
         except Exception as exc:
             logger.warning("发布消息失败: %s", exc)
 
+        # 检查 @mention 并路由到其他智能体
+        await self._route_mentions(content)
+
     def _build_context(self) -> str:
         """构建最近对话上下文"""
         recent = self._memory[-5:]
@@ -314,3 +323,78 @@ class AgentEngine:
             who = "用户" if m["role"] == "user" else self.name
             lines.append(f"{who}: {m['content']}")
         return "\n".join(lines) if lines else "（无历史对话）"
+
+    async def _route_mentions(self, content: str) -> None:
+        """检查回复中的 @mention，将消息路由到被 @ 的智能体"""
+        import re
+        import sqlalchemy as sa
+        from app.models.agent_definition import AgentDefinition
+        from app.models.group_member import GroupMember
+
+        mentions = re.findall(r"@(\S+)", content)
+        if not mentions:
+            return
+
+        # 防循环：记录最近 30s 内已路由过的 (target_id) ，同一目标不重复路由
+        now = asyncio.get_event_loop().time()
+        if not hasattr(self, '_recent_routes'):
+            self._recent_routes = {}  # target_id -> timestamp
+        # 清理过期的
+        self._recent_routes = {k: v for k, v in self._recent_routes.items() if now - v < 30}
+
+        try:
+            async with async_session() as db:
+                # 获取群成员
+                result = await db.execute(
+                    sa.select(GroupMember.agent_id, GroupMember.alias)
+                    .where(GroupMember.group_id == self.group_id)
+                )
+                members = {row[0]: row[1] for row in result.all()}
+                if not members:
+                    return
+
+                # 获取成员名字
+                result = await db.execute(
+                    sa.select(AgentDefinition.id, AgentDefinition.name)
+                    .where(AgentDefinition.id.in_(list(members.keys())))
+                )
+                name_map = {row[1]: row[0] for row in result.all()}
+
+                from app.agent_engine import get_registry
+                registry = get_registry()
+
+                for mention in mentions:
+                    # 不路由给自己
+                    if mention == self.id or mention == self.name:
+                        continue
+
+                    target_id = None
+                    if mention in members:
+                        target_id = mention
+                    elif mention in name_map:
+                        target_id = name_map[mention]
+                    else:
+                        # 模糊匹配 alias
+                        for aid, alias in members.items():
+                            if alias and mention in alias:
+                                target_id = aid
+                                break
+
+                    if not target_id or target_id == self.id:
+                        continue
+
+                    # 防循环：30s 内不重复路由同一目标
+                    if target_id in self._recent_routes:
+                        logger.info("防循环: 跳过重复路由 %s (30s内)", target_id[:8])
+                        continue
+                    self._recent_routes[target_id] = now
+
+                    logger.info("智能体 @mention 路由: %s -> %s", self.name, target_id[:8])
+                    await registry.route_message(target_id, {
+                        "type": "chat",
+                        "content": content,
+                        "sender_id": self.id,
+                        "group_id": self.group_id,
+                    }, group_id=self.group_id)
+        except Exception as exc:
+            logger.warning("@mention 路由失败: %s", exc)

@@ -12,6 +12,7 @@ class GroupCreate(BaseModel):
     coordinator_id: str = Field(..., description="群主智能体定义 ID")
     description: str | None = None
     config: dict | None = None
+    member_ids: list[str] = Field(..., min_length=1, description="初始成员智能体定义 ID 列表，至少1人")
 
 
 class GroupUpdate(BaseModel):

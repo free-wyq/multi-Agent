@@ -33,3 +33,12 @@ async def list_messages_by_task(db: AsyncSession, task_id: str, limit: int = 100
         .limit(limit)
     )
     return list(result.scalars().all())
+
+
+async def clear_messages_by_group(db: AsyncSession, group_id: str) -> int:
+    """清空群组的所有聊天记录，返回删除条数"""
+    from sqlalchemy import delete
+    result = await db.execute(
+        delete(Message).where(Message.group_id == group_id)
+    )
+    return result.rowcount or 0
