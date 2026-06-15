@@ -801,9 +801,18 @@ export default function GroupPage() {
             <Divider style={{ margin: '0' }} />
 
             {/* 群共享文件 */}
-            <div style={{ padding: '12px 0' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <FolderOpenOutlined style={{ color: '#1677ff' }} />
+            <div style={{ padding: '16px 12px', background: '#fafbfd', borderRadius: 8, margin: '12px 0' }}>
+              <div style={{
+                fontSize: 14, fontWeight: 700, marginBottom: 12,
+                display: 'flex', alignItems: 'center', gap: 8,
+                paddingLeft: 10, position: 'relative',
+              }}>
+                {/* 左侧蓝色竖条 accent line */}
+                <span style={{
+                  position: 'absolute', left: 0, top: 2, bottom: 2, width: 3,
+                  borderRadius: 2, background: '#1677ff',
+                }} />
+                <FolderOpenOutlined style={{ color: '#1677ff', fontSize: 16 }} />
                 群文件
               </div>
               {filesLoading ? (
@@ -811,29 +820,60 @@ export default function GroupPage() {
                   <Spin size="small" />
                 </div>
               ) : groupFiles.length === 0 ? (
-                <div style={{ fontSize: 13, color: '#999', background: '#f5f5f5', padding: '8px 12px', borderRadius: 4 }}>
-                  暂无文件
+                <div style={{
+                  fontSize: 13, color: '#b0b0b0',
+                  border: '1px dashed #d0d7de',
+                  padding: '14px 16px',
+                  borderRadius: 8, textAlign: 'center', display: 'flex',
+                  alignItems: 'center', justifyContent: 'center', gap: 8,
+                }}>
+                  <FileOutlined style={{ fontSize: 14, color: '#b0b0b0' }} />
+                  群组暂无共享文件
                 </div>
               ) : (
-                <List
-                  size="small"
-                  dataSource={groupFiles}
-                  renderItem={(file: GroupFile) => (
-                    <List.Item style={{ padding: '6px 0' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, minWidth: 0 }}>
-                        <FileOutlined style={{ color: '#8c8c8c', fontSize: 14 }} />
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                  {groupFiles.map((file: GroupFile) => {
+                    const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
+                    const isCode = ['py', 'js', 'ts', 'tsx', 'css', 'html', 'json', 'yaml', 'sql', 'md'].includes(ext)
+                    const isDoc = ['doc', 'docx', 'pdf', 'txt'].includes(ext)
+                    const iconColor = isCode ? '#10b981' : isDoc ? '#f59e0b' : '#8c8c8c'
+                    return (
+                      <div
+                        key={file.name}
+                        style={{
+                          display: 'flex', alignItems: 'center', gap: 10,
+                          padding: '8px 10px', borderRadius: 6, cursor: 'default',
+                          transition: 'background 0.18s ease',
+                        }}
+                        onMouseEnter={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.background = '#e6f4ff'
+                        }}
+                        onMouseLeave={(e) => {
+                          (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+                        }}
+                      >
+                        <div style={{
+                          width: 32, height: 32, borderRadius: 6,
+                          background: isCode ? '#d1fae5' : isDoc ? '#fef3c7' : '#f0f0f0',
+                          display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+                        }}>
+                          <FileOutlined style={{ color: iconColor, fontSize: 15 }} />
+                        </div>
                         <div style={{ flex: 1, minWidth: 0 }}>
-                          <div style={{ fontSize: 13, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                          <div style={{
+                            fontSize: 13, fontWeight: 500, color: '#1f2937',
+                            overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                          }}>
                             {file.name}
                           </div>
-                          <div style={{ fontSize: 11, color: '#999' }}>
+                          <div style={{ fontSize: 11, color: '#999', marginTop: 1 }}>
                             {formatFileSize(file.size)} · {new Date(file.modified_at * 1000).toLocaleDateString()}
                           </div>
                         </div>
                       </div>
-                    </List.Item>
-                  )}
-                />
+                    )
+                  })}
+                </div>
               )}
             </div>
 
