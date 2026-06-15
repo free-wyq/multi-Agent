@@ -65,6 +65,8 @@ export interface GroupMember {
   agent_id: string
   alias: string | null
   joined_at: string
+  agent_name: string
+  agent_role: string
 }
 
 export interface GroupCreatePayload {

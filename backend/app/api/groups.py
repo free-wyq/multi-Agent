@@ -10,6 +10,7 @@ from app.api.schemas.group import (
     GroupResponse,
     GroupMemberAdd,
     GroupMemberResponse,
+    GroupMemberWithAgentResponse,
 )
 from app.api.schemas.common import OK
 from app.core.database import get_db
@@ -76,9 +77,9 @@ async def add_member(group_id: str, body: GroupMemberAdd, db: AsyncSession = Dep
     return member
 
 
-@router.get("/{group_id}/members", response_model=list[GroupMemberResponse])
+@router.get("/{group_id}/members", response_model=list[GroupMemberWithAgentResponse])
 async def list_members(group_id: str, db: AsyncSession = Depends(get_db)):
-    return await group_service.list_members(db, group_id)
+    return await group_service.list_members_with_agent(db, group_id)
 
 
 @router.delete("/{group_id}/members/{member_id}", response_model=OK)

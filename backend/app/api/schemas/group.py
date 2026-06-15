@@ -53,3 +53,16 @@ class GroupMemberResponse(BaseModel):
     joined_at: datetime
 
     model_config = {"from_attributes": True}
+
+
+class GroupMemberWithAgentResponse(BaseModel):
+    """群组成员（含智能体详情）响应"""
+    id: str
+    group_id: str
+    agent_id: str
+    alias: str | None
+    joined_at: datetime
+    agent_name: str
+    agent_role: str
+
+    model_config = {"from_attributes": True}

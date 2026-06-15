@@ -68,3 +68,25 @@ async def remove_member(db: AsyncSession, member_id: str) -> bool:
 async def list_members(db: AsyncSession, group_id: str) -> list[GroupMember]:
     result = await db.execute(select(GroupMember).where(GroupMember.group_id == group_id))
     return list(result.scalars().all())
+
+
+async def list_members_with_agent(db: AsyncSession, group_id: str) -> list[dict]:
+    """查询群组成员，并 JOIN 智能体定义获取名称/角色"""
+    from app.models.agent_definition import AgentDefinition
+    result = await db.execute(
+        select(GroupMember, AgentDefinition.name, AgentDefinition.role)
+        .join(AgentDefinition, GroupMember.agent_id == AgentDefinition.id)
+        .where(GroupMember.group_id == group_id)
+    )
+    members = []
+    for member, name, role in result.all():
+        members.append({
+            "id": member.id,
+            "group_id": member.group_id,
+            "agent_id": member.agent_id,
+            "alias": member.alias,
+            "joined_at": member.joined_at,
+            "agent_name": name,
+            "agent_role": role,
+        })
+    return members
