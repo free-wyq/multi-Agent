@@ -49,7 +49,7 @@ def _get_llm(temperature: float = 0.3) -> BaseChatModel:
 
         return ChatOpenAI(
             model=model, api_key=api_key, base_url=base_url or None,
-            temperature=temperature, max_tokens=2048,
+            temperature=temperature, max_tokens=4096,
         )
     else:
         from langchain_anthropic import ChatAnthropic
@@ -57,7 +57,7 @@ def _get_llm(temperature: float = 0.3) -> BaseChatModel:
             model=model or _DEFAULT_MODEL,
             api_key=settings.ANTHROPIC_API_KEY,
             temperature=temperature,
-            max_tokens=2048,
+            max_tokens=4096,
         )
 
 

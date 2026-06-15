@@ -246,22 +246,19 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
             f"群聊最近的对话历史：\n{chat_history}\n\n"
             f"---\n\n"
             f"用户刚刚发来消息：{user_message}\n\n"
-            f"请以{coord_name}的身份回复用户。"
-            f"如果用户提出的需求涉及具体开发任务，你应该分派给对应的团队成员。\n\n"
+            f"请以{coord_name}的身份直接回复用户。"
+            f"注意：回复必须自然、口语化，就像微信群主一样，不要啰嗦。\n\n"
             f"请按以下 JSON 格式回复（不要加 markdown 代码块标记）：\n"
             f'{{\n'
-            f'  "coordinator_content": "给用户的回复内容",\n'
-            f'  "team_messages": [\n'
-            f'    {{"agent_id": "成员ID", "content": "该成员的发言，开头必须加 @成员名字 以便系统识别派发"}}\n'
-            f'  ]\n'
+            f'  "role": "coordinator",\n'
+            f'  "reply": "你的回复内容"\n'
             f'}}\n\n'
-            f"要求：\n"
-            f"1. coordinator_content 是你的回复\n"
-            f"2. 如果涉及开发任务，让对应团队成员在群里确认接收，content 开头必须加 @成员名字\n"
-            f"3. 如果只是日常对话，team_messages 留空数组 []\n"
-            f"4. agent_id 必须使用上面提供的精确 ID\n"
-            f"5. team_messages 最多2条\n"
-            f"6. 成员名字用上面列出的 name 字段"
+            f"规则（严格遵循）：\n"
+            f"1. 你只是群里的协调者，直接用你的口吻回复\n"
+            f"2. 如果用户明显是在随便打招呼、闲聊，你就正常聊，不要提队友\n"
+            f"3. 如果用户提了具体任务（比如'写代码''做页面''设计''review'），你才说'我来安排 @成员'\n"
+            f"4. **绝对不要**自己模拟成员发消息，那是自动化的恶心行为\n"
+            f"5. 回复最多50字，别长篇大论"
         )
 
         reply_text = await llm.ainvoke(prompt)
@@ -271,29 +268,14 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
         if json_match:
             data = json.loads(json_match.group())
         else:
-            data = {"coordinator_content": raw, "team_messages": []}
+            data = {"reply": raw}
 
-        coord_content = data.get("coordinator_content", raw)
+        coord_content = data.get("reply", raw)
         await _save_and_push(db, group_id, coordinator_id, "coordinator_reply", coord_content)
-
-        for tm in (data.get("team_messages") or []):
-            aid = tm.get("agent_id", "")
-            if aid not in agent_names:
-                logger.warning("Unknown agent_id in team message: %s", aid)
-                continue
-            tm_content = tm.get("content", "")
-            # 确保 team_reply 带 @mention 格式，让前端也能高亮
-            agent_name = agent_names[aid]
-            mention_tag = f"@{agent_name}"
-            if mention_tag not in tm_content:
-                tm_content = f"{mention_tag} {tm_content}"
-            await _save_and_push(db, group_id, aid, "team_reply", tm_content)
-            # 路由到 AgentEngine，让子智能体真正参与对话
-            await _route_to_agent(db, group_id, aid, content=tm_content, sender_id=coordinator_id)
 
     except Exception as e:
         logger.warning("LLM auto-reply failed: %s", e)
-        fallback = "收到你的消息，我来看看怎么安排。请详细描述需要完成的工作，我会协调团队成员来执行。"
+        fallback = "收到你的消息，我来看看怎么安排。"
         await _save_and_push(db, group_id, coordinator_id, "coordinator_reply", fallback)
 
 

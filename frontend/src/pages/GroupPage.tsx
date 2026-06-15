@@ -317,13 +317,17 @@ export default function GroupPage() {
     setChatMessages((prev) => [...prev, optimisticMsg])
 
     try {
-      await messageApi.send({
+      const sent = await messageApi.send({
         group_id: chatGroupId,
         sender_id: 'user',
         receiver_id: 'broadcast',
         type: 'user_input',
         content,
       })
+      // ✅ 乐观更新替换：用后端返回的真实消息替换 temp id
+      setChatMessages((prev) =>
+        prev.map((m) => (m.id === tempId ? sent : m)),
+      )
     } catch {
       setChatMessages((prev) => prev.filter((m) => m.id !== tempId))
       setChatInput(content)

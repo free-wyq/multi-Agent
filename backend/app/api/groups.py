@@ -24,25 +24,23 @@ router = APIRouter(prefix="/groups", tags=["群组"])
 
 @router.post("", response_model=GroupResponse, status_code=201)
 async def create_group(body: GroupCreate, db: AsyncSession = Depends(get_db)):
-    # member_ids 必填，至少1人（群主+成员 >= 2人才能建群）
-    if not body.member_ids:
-        raise HTTPException(400, "群组至少需要1个成员（不含群主）")
-    # 群主不能同时在成员列表中
-    if body.coordinator_id in body.member_ids:
-        raise HTTPException(400, "群主不能同时作为成员，群主自动在群内")
-
     obj = await group_service.create_group(db, body.model_dump(exclude={"member_ids"}))
 
-    # 自动添加成员 + 注册 AgentEngine
-    from app.agent_engine import get_registry
-    from app.services import agent_service
-    registry = get_registry()
-    for agent_id in body.member_ids:
-        await group_service.add_member(db, obj.id, agent_id)
-        agent_def = await agent_service.get_definition(db, agent_id)
-        if agent_def:
-            await registry.add_engine(agent_def, obj.id)
-    await db.flush()
+    # 如果传了 member_ids，自动添加成员 + 注册 AgentEngine
+    if body.member_ids:
+        # 群主不能同时在成员列表中
+        if body.coordinator_id in body.member_ids:
+            raise HTTPException(400, "群主不能同时作为成员，群主自动在群内")
+
+        from app.agent_engine import get_registry
+        from app.services import agent_service
+        registry = get_registry()
+        for agent_id in body.member_ids:
+            await group_service.add_member(db, obj.id, agent_id)
+            agent_def = await agent_service.get_definition(db, agent_id)
+            if agent_def:
+                await registry.add_engine(agent_def, obj.id)
+        await db.flush()
 
     return obj
 

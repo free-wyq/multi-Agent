@@ -30,7 +30,13 @@ async def lifespan(app: FastAPI):
     # 启动：加载并启动所有子智能体引擎（常驻）
     from app.agent_engine import get_registry
     registry = get_registry()
-    await registry.load_from_db()
+    try:
+        await registry.load_from_db()
+        print(f"[startup] AgentRegistry loaded, engines: {sum(len(v) for v in registry._engines.values())}")
+    except Exception as e:
+        print(f"[startup] AgentRegistry load_from_db FAILED: {e}")
+        import traceback
+        traceback.print_exc()
 
     yield
 
