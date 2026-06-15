@@ -729,9 +729,9 @@ export default function GroupPage() {
             <div style={{ textAlign: 'center', padding: '12px 0 20px' }}>
               <Avatar
                 size={64}
-                icon={<TeamOutlined />}
+                src="/group-avatar.png"
                 shape="square"
-                style={{ background: '#1677ff', borderRadius: 8, fontSize: 28 }}
+                style={{ borderRadius: 8 }}
               />
               <div style={{ fontSize: 16, fontWeight: 600, marginTop: 12 }}>
                 {chatGroup.name}
