@@ -252,7 +252,7 @@ export default function AgentPage() {
                   <div className="agent-card-header">
                     <div className="agent-card-avatar">
                       <img src="/robot-avatar.png" alt={agent.name} className="agent-card-avatar-img" />
-                      <span className="agent-card-avatar-ring" style={{ boxShadow: `0 0 0 2px ${theme.color}40, 0 0 12px ${theme.color}30` }} />
+                      <span className="agent-card-avatar-ring" style={{ borderColor: theme.color, color: theme.color }} />
                     </div>
                     <Badge status={statusInfo.dot as any} text={null} className="agent-card-status-badge" />
                   </div>
