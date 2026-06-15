@@ -47,8 +47,11 @@ export const agentApi = {
 export interface Group {
   id: string
   name: string
-  coordinator_agent_id: string | null
+  coordinator_id: string
+  description: string | null
+  status: string
   created_at: string
+  updated_at: string
 }
 
 export interface GroupWithDetails extends Group {
@@ -58,14 +61,16 @@ export interface GroupWithDetails extends Group {
 
 export interface GroupMember {
   id: string
+  group_id: string
   agent_id: string
   alias: string | null
-  agent?: AgentDefinition
+  joined_at: string
 }
 
 export interface GroupCreatePayload {
   name: string
-  coordinator_agent_id?: string
+  coordinator_id?: string
+  description?: string
 }
 
 export const groupApi = {
@@ -94,22 +99,31 @@ export type TaskStatus = 'submitted' | 'working' | 'completed' | 'failed' | 'can
 export interface Task {
   id: string
   group_id: string
-  agent_id: string | null
+  parent_task_id: string | null
   title: string
   description: string | null
   status: TaskStatus
-  depends_on: string[]
-  output_path: string | null
+  assigned_agent_id: string | null
+  instance_id: string | null
+  dependencies: string[]
+  artifact_path: string | null
+  artifact: Record<string, unknown> | null
+  exit_code: number | null
+  error_message: string | null
+  result_summary: string | null
+  dag_order: number | null
   created_at: string
-  updated_at: string
+  started_at: string | null
+  completed_at: string | null
 }
 
 export interface TaskCreatePayload {
   group_id: string
   title: string
   description?: string
-  agent_id?: string
-  depends_on?: string[]
+  assigned_agent_id?: string
+  dependencies?: string[]
+  dag_order?: number
 }
 
 export const taskApi = {
@@ -130,10 +144,22 @@ export interface Message {
   id: string
   group_id: string
   task_id: string | null
-  agent_id: string | null
-  content: string
-  msg_type: string
+  sender_id: string
+  receiver_id: string
+  type: string
+  content: string | null
+  data: Record<string, unknown> | null
   created_at: string
+}
+
+export interface MessageCreatePayload {
+  group_id: string
+  task_id?: string
+  sender_id: string
+  receiver_id: string
+  type: string
+  content?: string
+  data?: Record<string, unknown>
 }
 
 export const messageApi = {
@@ -141,4 +167,6 @@ export const messageApi = {
     request<Message[]>(`/messages/group/${groupId}?limit=${limit}`),
   listByTask: (taskId: string, limit = 100) =>
     request<Message[]>(`/messages/task/${taskId}?limit=${limit}`),
+  send: (body: MessageCreatePayload) =>
+    request<Message>('/messages', { method: 'POST', body: JSON.stringify(body) }),
 }

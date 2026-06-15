@@ -18,7 +18,7 @@ from app.core.database import engine, Base
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 启动：建表（开发阶段用，生产用 Alembic 迁移）
+    # 启动：建表
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
 
@@ -27,9 +27,16 @@ async def lifespan(app: FastAPI):
     bus = get_bus()
     await bus.connect()
 
+    # 启动：加载并启动所有子智能体引擎（常驻）
+    from app.agent_engine import get_registry
+    registry = get_registry()
+    await registry.load_from_db()
+
     yield
 
-    # 关闭：消息总线断开 Redis
+    # 关闭：先停 AgentEngine，再断 Redis
+    from app.agent_engine import get_registry
+    await get_registry().shutdown_all()
     await bus.disconnect()
 
 

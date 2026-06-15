@@ -338,14 +338,35 @@ class ClaudeCodeRuntime(AgentRuntime):
         logger.info("配置已写入卷: %s", vol_name)
 
     async def _write_executor_script(self) -> None:
-        """将引导脚本写入卷"""
+        """将引导脚本写入卷
+
+        注意：此方法可能在容器启动前调用（container_id 为 None），
+        此时通过临时 alpine 容器写文件 + chmod。
+        如果容器已启动，则通过 docker exec 操作。
+        """
         script = _executor_bootstrap()
         script_path = f"{CONTAINER_CONFIG_DIR}/run_task.sh"
         await self._write_file(script_path, script)
-        await self._docker.exec_command(
-            self.container_id,  # type: ignore[arg-type]
-            ["chmod", "+x", script_path],
-        )
+
+        # chmod +x：如果容器未启动，用临时 alpine 容器执行
+        if self.container_id and await self._docker.is_running(self.container_id):
+            await self._docker.exec_command(
+                self.container_id,
+                ["chmod", "+x", script_path],
+            )
+        else:
+            # 容器未启动，通过临时 alpine 容器 chmod
+            import base64
+            vol_name = self._docker.volume_name(self.group_id)
+            chmod_cmd = ["sh", "-c", f"chmod +x {script_path}"]
+            tmp_container = self._docker._docker.containers.run(
+                "alpine:latest",
+                command=chmod_cmd,
+                volumes={vol_name: {"bind": CONTAINER_WORKSPACE, "mode": "rw"}},
+                remove=True,
+                detach=True,
+            )
+            tmp_container.wait()
 
     async def _write_file(self, container_path: str, content: str) -> None:
         """通过 docker exec 在容器内写文件（如果容器未启动，用临时容器）"""

@@ -21,7 +21,7 @@ router = APIRouter(prefix="/agents", tags=["智能体"])
 
 @router.post("", response_model=AgentDefinitionResponse, status_code=201)
 async def create_agent(body: AgentDefinitionCreate, db: AsyncSession = Depends(get_db)):
-    obj = await agent_service.create_definition(db, body.model_dump(by_name=True))
+    obj = await agent_service.create_definition(db, body.model_dump(by_alias=True))
     return obj
 
 
@@ -40,7 +40,7 @@ async def get_agent(agent_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.patch("/{agent_id}", response_model=AgentDefinitionResponse)
 async def update_agent(agent_id: str, body: AgentDefinitionUpdate, db: AsyncSession = Depends(get_db)):
-    data = {k: v for k, v in body.model_dump(by_name=True).items() if v is not None}
+    data = {k: v for k, v in body.model_dump(by_alias=True).items() if v is not None}
     obj = await agent_service.update_definition(db, agent_id, data)
     if not obj:
         raise HTTPException(404, "智能体不存在")

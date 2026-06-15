@@ -43,7 +43,7 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
 function buildNodesEdges(tasks: Task[]): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = tasks.map((t, i) => ({
     id: t.id,
-    position: { x: i * 220, y: t.depends_on.length * 100 },
+    position: { x: i * 220, y: (t.dependencies || []).length * 100 },
     data: {
       label: (
         <div style={{ textAlign: 'center' }}>
@@ -63,7 +63,7 @@ function buildNodesEdges(tasks: Task[]): { nodes: Node[]; edges: Edge[] } {
 
   const edges: Edge[] = []
   tasks.forEach((t) => {
-    t.depends_on.forEach((dep) => {
+    (t.dependencies || []).forEach((dep) => {
       edges.push({ id: `${dep}->${t.id}`, source: dep, target: t.id, animated: true })
     })
   })
@@ -154,7 +154,7 @@ export default function TaskPage() {
                 </p>
                 <p style={{ margin: '0 0 4px' }}>
                   智能体：
-                  {t.agent_id ?? '待分配'}
+                  {t.assigned_agent_id ?? '待分配'}
                 </p>
                 <Button
                   size="small"
@@ -171,15 +171,15 @@ export default function TaskPage() {
 
       {/* 交付物 */}
       <Card title="交付物">
-        {tasks.filter((t) => t.output_path).length === 0 ? (
+        {tasks.filter((t) => t.artifact_path).length === 0 ? (
           <Empty description="暂无交付物" />
         ) : (
           <Space wrap>
             {tasks
-              .filter((t) => t.output_path)
+              .filter((t) => t.artifact_path)
               .map((t) => (
                 <Button key={t.id} type="link">
-                  📦 {t.title} - {t.output_path}
+                  📦 {t.title} - {t.artifact_path}
                 </Button>
               ))}
           </Space>

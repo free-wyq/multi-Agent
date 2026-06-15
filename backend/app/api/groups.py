@@ -63,7 +63,17 @@ async def add_member(group_id: str, body: GroupMemberAdd, db: AsyncSession = Dep
     group = await group_service.get_group(db, group_id)
     if not group:
         raise HTTPException(404, "群组不存在")
-    return await group_service.add_member(db, group_id, body.agent_id, body.alias)
+    member = await group_service.add_member(db, group_id, body.agent_id, body.alias)
+
+    # 同步注册 AgentEngine 常驻协程
+    from app.agent_engine import get_registry
+    from app.services import agent_service
+    registry = get_registry()
+    agent_def = await agent_service.get_definition(db, body.agent_id)
+    if agent_def:
+        await registry.add_engine(agent_def, group_id)
+
+    return member
 
 
 @router.get("/{group_id}/members", response_model=list[GroupMemberResponse])
@@ -73,7 +83,18 @@ async def list_members(group_id: str, db: AsyncSession = Depends(get_db)):
 
 @router.delete("/{group_id}/members/{member_id}", response_model=OK)
 async def remove_member(group_id: str, member_id: str, db: AsyncSession = Depends(get_db)):
-    ok = await group_service.remove_member(db, member_id)
-    if not ok:
+    member = await db.get(__import__('app.models.group_member', fromlist=['GroupMember']).GroupMember, member_id)
+    if not member:
         raise HTTPException(404, "成员不存在")
+
+    agent_id = member.agent_id
+    ok = await group_service.remove_member(db, member_id)
+
+    # 同步停止 AgentEngine
+    from app.agent_engine import get_registry
+    registry = get_registry()
+    engine = registry.get_engine(agent_id, group_id)
+    if engine:
+        await registry.remove_engine(agent_id, group_id)
+
     return OK()

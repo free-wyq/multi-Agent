@@ -15,8 +15,14 @@ class Settings(BaseSettings):
     # Redis
     REDIS_URL: str = "redis://localhost:6379/0"
 
-    # Anthropic
+    # Anthropic（兼容代理）
     ANTHROPIC_API_KEY: str = ""
+    ANTHROPIC_BASE_URL: str = ""
+
+    # LLM 配置（可选覆盖）
+    LLM_PROVIDER: str = "auto"  # auto / openai / anthropic
+    LLM_MODEL: str = ""  # 留空自动选择
+    OPENAI_BASE_URL: str = ""  # OpenAI 兼容端点
 
     # Docker
     DOCKER_HOST: str = "unix:///var/run/docker.sock"

@@ -57,9 +57,19 @@ async def _handle_task_event(message: dict) -> None:
 
 async def analyze(state: CoordinatorState) -> dict:
     """意图分析节点：理解用户需求，识别涉及的角色"""
+    # 获取群组内可用角色列表
+    available_roles = await _get_group_roles(state["group_id"])
+    roles_hint = ""
+    if available_roles:
+        roles_hint = "\n\n可用角色（必须从中选择）：\n" + "\n".join(
+            f"- {r['role']}: {r['name']}" for r in available_roles
+        )
+
     analyzer = get_intent_analyzer()
     result = await analyzer.ainvoke(
         f"分析以下需求，识别涉及的智能体角色：\n\n{state['requirement']}"
+        f"{roles_hint}\n\n"
+        f"注意：involved_roles 必须是角色标识（如 backend-engineer），不要使用中文描述。"
     )
     return {
         "intent_analysis": result.analysis,
@@ -71,24 +81,35 @@ async def decompose(state: CoordinatorState) -> dict:
     """任务拆解节点：将需求拆解为子任务 DAG"""
     decomposer = get_task_decomposer()
 
-    # 构建角色上下文：告诉 LLM 群组中有哪些角色可用
-    roles_context = _build_roles_context(state["involved_roles"])
+    # 获取群组内可用角色列表
+    available_roles = await _get_group_roles(state["group_id"])
+    roles_context = ""
+    if available_roles:
+        roles_context = "\n".join(
+            f"- {r['role']}: {r['name']}" for r in available_roles
+        )
+    else:
+        roles_context = _build_roles_context(state["involved_roles"])
 
     prompt = (
         f"用户需求：{state['requirement']}\n\n"
         f"意图分析：{state['intent_analysis']}\n\n"
-        f"可用角色：\n{roles_context}\n\n"
-        f"请将需求拆解为子任务，指定每个任务的执行角色和依赖关系。"
+        f"可用角色（assigned_role 必须使用角色标识）：\n{roles_context}\n\n"
+        f"请将需求拆解为子任务，指定每个任务的执行角色和依赖关系。\n"
+        f"注意：assigned_role 必须是角色标识（如 backend-engineer），不要使用中文描述。\n"
+        f"注意：depends_on 是前置子任务的 0-based 序号，第1个子任务的序号是0。"
     )
     result = await decomposer.ainvoke(prompt)
 
     # 将 SubTaskDef 列表转换为 state 中的 subtasks 格式
     subtasks = []
     for st in result.subtasks:
+        # 规范化角色标识：如果 LLM 返回了中文描述，尝试模糊匹配
+        role_id = _normalize_role(st.assigned_role, available_roles)
         subtasks.append({
             "title": st.title,
             "description": st.description,
-            "assigned_agent_id": st.assigned_role,  # 暂用角色标识，dispatch 时解析为真实 ID
+            "assigned_agent_id": role_id,
             "dependencies": st.depends_on,
         })
 
@@ -434,3 +455,106 @@ async def _resolve_role_mapping(
         role_map[role] = agent_id
 
     return role_map
+
+
+async def _get_group_roles(group_id: str) -> list[dict]:
+    """获取群组内可用角色列表
+
+    Returns:
+        [{"role": "backend-engineer", "name": "后端工程师", "id": "xxx"}, ...]
+    """
+    async with async_session() as db:
+        result = await db.execute(
+            sa.select(GroupMember.agent_id)
+            .where(GroupMember.group_id == group_id)
+        )
+        member_ids = [row[0] for row in result.all()]
+        if not member_ids:
+            return []
+
+        result = await db.execute(
+            sa.select(AgentDefinition.id, AgentDefinition.role, AgentDefinition.name)
+            .where(AgentDefinition.id.in_(member_ids))
+        )
+        return [
+            {"id": row[0], "role": row[1], "name": row[2]}
+            for row in result.all()
+        ]
+
+
+def _normalize_role(role_str: str, available_roles: list[dict]) -> str:
+    """规范化 LLM 返回的角色标识
+
+    LLM 可能返回 '后端开发智能体' 或 'Backend Developer Agent'，
+    需要将其映射为标准角色标识如 'backend-engineer'。
+
+    匹配优先级：
+    1. 精确匹配 role 字段
+    2. role 标识包含在返回字符串中
+    3. 返回字符串包含 role 或 name 的任意关键词
+    """
+    if not role_str or not available_roles:
+        return role_str
+
+    lower_str = role_str.lower()
+
+    # 1. 精确匹配
+    for r in available_roles:
+        if role_str == r["role"]:
+            return r["role"]
+
+    # 2. 模糊匹配：角色标识是否在返回字符串中
+    for r in available_roles:
+        if r["role"].lower() in lower_str:
+            return r["role"]
+
+    # 3. 关键词反向匹配：从 role 和 name 字段自动提取关键词
+    def _extract_keywords(role_val: str, name_val: str | None) -> set[str]:
+        """从 role 和 name 提取可用于匹配的关键词"""
+        keywords: set[str] = set()
+
+        # 从 role 标识提取（backend-engineer → backend, engineer）
+        if role_val:
+            keywords.update(
+                kw.strip()
+                for kw in role_val.lower().replace("_", "-").split("-")
+                if len(kw.strip()) > 1
+            )
+
+        # 从 name 字段提取（如 "后端工程师" → {"后端", "端工", "工程", "程师", "后", "端", "工", "程", "师"}）
+        if name_val:
+            import re
+            # 提取英文单词
+            keywords.update(re.findall(r"[a-z]{2,}", name_val.lower()))
+            # 提取中文字符（连续 CJK 字符）
+            cjk = re.findall(r"[一-鿿]+", name_val)
+            for seg in cjk:
+                # 2-gram
+                if len(seg) >= 2:
+                    keywords.update(seg[i : i + 2] for i in range(len(seg) - 1))
+                # 单字（长度合适时才加入，避免极端长串）
+                if 2 <= len(seg) <= 6:
+                    keywords.update(seg)
+
+        return keywords
+
+    # 构建动态关键词表
+    role_keywords: dict[str, set[str]] = {}
+    for r in available_roles:
+        role_id = r["role"]
+        role_keywords[role_id] = _extract_keywords(role_id, r.get("name"))
+
+    best_match: str | None = None
+    best_score = 0
+
+    for role_id, keywords in role_keywords.items():
+        hits = sum(1 for kw in keywords if kw in lower_str)
+        if hits > best_score:
+            best_score = hits
+            best_match = role_id
+
+    if best_match and best_score > 0:
+        return best_match
+
+    # 都匹配不上，返回原始值（dispatch 阶段会进一步处理或报错）
+    return role_str

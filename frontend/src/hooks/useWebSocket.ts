@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react'
 
 export interface LogEntry {
+  id: string
   agentId: string
   agentName: string
   taskId: string
@@ -68,6 +69,7 @@ export function useWebSocket(groupId: string | null) {
         // 转换为 LogEntry
         if (d.content) {
           const entry: LogEntry = {
+            id: d.id || `ws-${Date.now()}`,
             agentId: d.sender_id,
             agentName: d.sender_id, // 前端可后续映射为可读名称
             taskId: d.task_id || '',

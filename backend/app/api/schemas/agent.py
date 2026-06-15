@@ -61,7 +61,7 @@ class AgentDefinitionResponse(BaseModel):
     model: str
     max_turns: int
     description: str | None
-    metadata_: dict | None = Field(None, alias="metadata")
+    metadata: dict | None = Field(None, validation_alias="metadata_", serialization_alias="metadata")
     created_at: datetime
     updated_at: datetime
 
@@ -80,7 +80,7 @@ class AgentInstanceResponse(BaseModel):
     status: str
     current_task_id: str | None
     work_dir: str | None
-    metadata_: dict | None = Field(None, alias="metadata")
+    metadata: dict | None = Field(None, validation_alias="metadata_", serialization_alias="metadata")
     created_at: datetime
     stopped_at: datetime | None
 
