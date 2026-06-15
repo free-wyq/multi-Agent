@@ -101,16 +101,61 @@ async def execute_task(
     task: str,
     *,
     task_id: str | None = None,
+    group_id: str | None = None,
     timeout: float = 600.0,
     pool: ContainerInstancePool | None = None,
 ) -> AgentResult:
-    """下发任务到指定实例"""
+    """下发任务到指定实例，执行完成后发布事件到消息总线"""
     runtime = _active_runtimes.get(instance_id)
     if not runtime:
         raise ValueError(f"实例未运行: {instance_id}")
 
     logger.info("下发任务: instance=%s task=%s", instance_id[:8], task[:40])
     result = await runtime.execute(task, task_id=task_id, timeout=timeout)
+
+    # 更新 Task DB 记录 + 发布消息总线事件
+    if task_id and group_id:
+        try:
+            from app.core.database import async_session
+            from app.services import task_service
+            from app.bus.core import get_bus, CHANNEL_PREFIX
+
+            async with async_session() as db:
+                update_data: dict = {
+                    "exit_code": result.exit_code,
+                    "error_message": result.error_message,
+                    "result_summary": result.output[:500] if result.output else None,
+                }
+                if result.success:
+                    update_data["status"] = "completed"
+                    if result.artifact_paths:
+                        update_data["artifact_path"] = result.artifact_paths[0]
+                else:
+                    update_data["status"] = "failed"
+                await task_service.update_task(db, task_id, update_data)
+                await db.commit()
+
+            # 发布 task_complete / task_failed 事件
+            bus = get_bus()
+            channel = f"{CHANNEL_PREFIX}{group_id}"
+            msg_type = "task_complete" if result.success else "task_failed"
+            await bus.publish_and_persist(
+                channel,
+                group_id=group_id,
+                task_id=task_id,
+                sender_id=runtime.definition_id if hasattr(runtime, 'definition_id') else instance_id,
+                receiver_id="coordinator",
+                type=msg_type,
+                content=f"任务{'完成' if result.success else '失败'}: {result.output[:200] if result.output else ''}",
+                data={
+                    "exit_code": result.exit_code,
+                    "artifact_paths": result.artifact_paths,
+                    "success": result.success,
+                },
+            )
+            logger.info("Published %s for task=%s group=%s", msg_type, task_id[:8], group_id[:8])
+        except Exception as exc:
+            logger.error("Failed to update task / publish event: %s", exc)
 
     # 根据策略释放（MVP 默认 on_demand 直接销毁）
     if pool and runtime._agent_def:

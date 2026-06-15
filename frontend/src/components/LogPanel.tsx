@@ -1,14 +1,15 @@
 import { useEffect, useRef } from 'react'
 import { Tag } from 'antd'
-import { useMockWebSocket } from '../hooks/useWebSocket'
+import { useWebSocket } from '../hooks/useWebSocket'
 
 interface LogPanelProps {
   taskId?: string
   agentId?: string
+  groupId?: string
 }
 
-export default function LogPanel({ taskId, agentId }: LogPanelProps) {
-  const { logs } = useMockWebSocket(true)
+export default function LogPanel({ taskId, agentId, groupId }: LogPanelProps) {
+  const { logs } = useWebSocket(groupId || null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const filtered = logs.filter((l) => {

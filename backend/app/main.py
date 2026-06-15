@@ -12,6 +12,7 @@ from app.api.tasks import router as tasks_router
 from app.api.messages import router as messages_router
 from app.api.coordinator import router as coordinator_router
 from app.api.runtime import router as runtime_router
+from app.ws.routes import router as ws_router
 from app.core.database import engine, Base
 
 
@@ -20,7 +21,16 @@ async def lifespan(app: FastAPI):
     # 启动：建表（开发阶段用，生产用 Alembic 迁移）
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+
+    # 启动：消息总线连接 Redis
+    from app.bus.core import get_bus
+    bus = get_bus()
+    await bus.connect()
+
     yield
+
+    # 关闭：消息总线断开 Redis
+    await bus.disconnect()
 
 
 app = FastAPI(
@@ -45,6 +55,8 @@ app.include_router(tasks_router, prefix="/api/v1")
 app.include_router(messages_router, prefix="/api/v1")
 app.include_router(coordinator_router, prefix="/api/v1")
 app.include_router(runtime_router, prefix="/api/v1")
+# WebSocket 路由（无 /api/v1 前缀）
+app.include_router(ws_router)
 
 
 @app.get("/api/v1/health")

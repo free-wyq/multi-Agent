@@ -6,10 +6,11 @@
 
 - analyze:    接收用户需求，分析意图和涉及的角色
 - decompose:  将需求拆解为子任务 DAG
-- dispatch:   按拓扑序派发无依赖任务，创建 Task 记录
-- monitor:    监听任务完成事件，推进下游任务
+- dispatch:   按拓扑序派发无依赖任务，创建 Task 记录，发布 task_dispatch 消息
+- monitor:    监听任务完成事件（消息总线驱动），推进下游任务
 - summarize:  所有任务完成后，汇总结果
 """
+import asyncio
 from datetime import datetime, timezone
 from typing import Literal
 
@@ -26,6 +27,29 @@ from app.services import task_service
 
 import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
+
+
+# ── 任务事件追踪（monitor 节点用）────────────────────────────────
+
+_task_events: dict[str, asyncio.Event] = {}
+
+
+def _get_task_event(task_id: str) -> asyncio.Event | None:
+    return _task_events.get(task_id)
+
+
+def _clear_task_event(task_id: str) -> None:
+    _task_events.pop(task_id, None)
+
+
+async def _handle_task_event(message: dict) -> None:
+    """Bus handler：收到 task_complete/task_failed 时设置 asyncio.Event"""
+    task_id = message.get("task_id")
+    if not task_id:
+        return
+    event = _task_events.get(task_id)
+    if event:
+        event.set()
 
 
 # ── 节点函数 ────────────────────────────────────────────────────────
@@ -79,7 +103,7 @@ async def decompose(state: CoordinatorState) -> dict:
 
 
 async def dispatch(state: CoordinatorState) -> dict:
-    """调度派发节点：按 DAG 拓扑序创建 Task 记录，派发无依赖任务"""
+    """调度派发节点：按 DAG 拓扑序创建 Task 记录，派发无依赖任务，发布 task_dispatch 消息"""
     group_id = state["group_id"]
     subtasks = state["subtasks"]
     pending_task_ids = list(state.get("pending_task_ids", []))
@@ -116,6 +140,28 @@ async def dispatch(state: CoordinatorState) -> dict:
                 await task_service.update_task(db, task_id, {"status": "working"})
                 running_task_ids.append(task_id)
 
+    # 发布 task_dispatch 消息到消息总线
+    try:
+        from app.bus.core import get_bus, CHANNEL_PREFIX
+        bus = get_bus()
+        channel = f"{CHANNEL_PREFIX}{group_id}"
+        for idx, st in enumerate(subtasks):
+            if not st.get("dependencies"):
+                task_id = task_id_map[idx]
+                await bus.publish_and_persist(
+                    channel,
+                    group_id=group_id,
+                    task_id=task_id,
+                    sender_id="coordinator",
+                    receiver_id=st.get("assigned_agent_id", "broadcast"),
+                    type="task_dispatch",
+                    content=f"任务已派发: {st['title']}",
+                    data={"task_id": task_id, "agent_id": st.get("assigned_agent_id")},
+                )
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning("Failed to publish task_dispatch events: %s", exc)
+
     return {
         "pending_task_ids": pending_task_ids,
         "running_task_ids": running_task_ids,
@@ -123,10 +169,13 @@ async def dispatch(state: CoordinatorState) -> dict:
 
 
 async def monitor(state: CoordinatorState) -> dict:
-    """状态监控节点：检查运行中的任务，更新状态，推进下游任务
+    """状态监控节点：监听消息总线事件，等待任务完成，推进下游任务
 
-    此节点在 task-007 消息总线实现后完善，
-    目前提供基础逻辑：检查数据库中任务状态变更。
+    基于 asyncio.Event 的事件驱动模式：
+    - 为每个 running task 创建 Event，等待任一触发
+    - Bus handler 收到 task_complete/task_failed 时 set Event
+    - 30 秒超时兜底（防止消息丢失时无限等待）
+    - 事件触发后从 DB 读取权威状态并推进下游任务
     """
     group_id = state["group_id"]
     running_task_ids = list(state.get("running_task_ids", []))
@@ -134,6 +183,41 @@ async def monitor(state: CoordinatorState) -> dict:
     failed_task_ids = list(state.get("failed_task_ids", []))
     pending_task_ids = list(state.get("pending_task_ids", []))
 
+    if not running_task_ids:
+        return {
+            "running_task_ids": running_task_ids,
+            "completed_task_ids": completed_task_ids,
+            "failed_task_ids": failed_task_ids,
+            "pending_task_ids": pending_task_ids,
+        }
+
+    # 订阅 bus handler（幂等，已订阅则不重复）
+    try:
+        from app.bus.core import get_bus, CHANNEL_PREFIX
+        bus = get_bus()
+        channel = f"{CHANNEL_PREFIX}{group_id}"
+        await bus.subscribe(channel, _handle_task_event)
+    except Exception:
+        pass  # bus 不可用时仍可走超时兜底
+
+    # 为 running tasks 创建/复用 Event
+    events: dict[str, asyncio.Event] = {}
+    for tid in running_task_ids:
+        if tid not in _task_events:
+            _task_events[tid] = asyncio.Event()
+        events[tid] = _task_events[tid]
+
+    # 等待任一任务事件触发（30s 超时兜底）
+    done, pending_waits = await asyncio.wait(
+        [e.wait() for e in events.values()],
+        timeout=30.0,
+        return_when=asyncio.FIRST_COMPLETED,
+    )
+    # 取消未完成的等待
+    for task in pending_waits:
+        task.cancel()
+
+    # 从 DB 读取权威状态
     async with async_session() as db:
         for tid in list(running_task_ids):
             task = await task_service.get_task(db, tid)
@@ -142,9 +226,11 @@ async def monitor(state: CoordinatorState) -> dict:
             if task.status == "completed":
                 running_task_ids.remove(tid)
                 completed_task_ids.append(tid)
+                _clear_task_event(tid)
             elif task.status == "failed":
                 running_task_ids.remove(tid)
                 failed_task_ids.append(tid)
+                _clear_task_event(tid)
             elif task.status == "input-required":
                 # 子智能体请求澄清，暂时标记但不移出 running
                 pass
@@ -155,6 +241,23 @@ async def monitor(state: CoordinatorState) -> dict:
             if rt.id not in running_task_ids and rt.id not in completed_task_ids:
                 await task_service.update_task(db, rt.id, {"status": "working"})
                 running_task_ids.append(rt.id)
+                # 发布下游任务的 task_dispatch 事件
+                try:
+                    from app.bus.core import get_bus, CHANNEL_PREFIX
+                    bus = get_bus()
+                    channel = f"{CHANNEL_PREFIX}{group_id}"
+                    await bus.publish_and_persist(
+                        channel,
+                        group_id=group_id,
+                        task_id=rt.id,
+                        sender_id="coordinator",
+                        receiver_id=rt.assigned_agent_id or "broadcast",
+                        type="task_dispatch",
+                        content=f"下游任务已派发: {rt.title}",
+                        data={"task_id": rt.id},
+                    )
+                except Exception:
+                    pass
 
     return {
         "running_task_ids": running_task_ids,

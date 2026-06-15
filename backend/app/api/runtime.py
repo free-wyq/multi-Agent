@@ -45,6 +45,7 @@ class StartAgentResponse(BaseModel):
 class ExecuteRequest(BaseModel):
     task: str = Field(..., min_length=1, description="任务指令")
     task_id: str | None = Field(None, description="可选的任务 ID")
+    group_id: str | None = Field(None, description="群组 ID（用于消息总线事件发布）")
     timeout: float = Field(default=600.0, description="超时秒数")
 
 
@@ -114,6 +115,7 @@ async def execute_task(instance_id: str, body: ExecuteRequest):
             instance_id=instance_id,
             task=body.task,
             task_id=body.task_id,
+            group_id=body.group_id,
             timeout=body.timeout,
             pool=get_pool(),
         )

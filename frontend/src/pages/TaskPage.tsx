@@ -162,7 +162,7 @@ export default function TaskPage() {
                 >
                   {expandedTask === t.id ? '收起日志 ▲' : '查看日志 ▼'}
                 </Button>
-                {expandedTask === t.id && <LogPanel taskId={t.id} />}
+                {expandedTask === t.id && <LogPanel taskId={t.id} groupId={selectedGroup ?? undefined} />}
               </Card>
             ))}
           </Space>
