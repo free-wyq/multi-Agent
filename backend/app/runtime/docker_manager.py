@@ -7,7 +7,6 @@
 import asyncio
 import logging
 from dataclasses import dataclass
-from typing import Literal
 
 import docker
 from docker.errors import DockerException, NotFound
@@ -61,37 +60,35 @@ class DockerContainerManager:
         """创建（并可选启动）容器，返回容器信息字典"""
 
         host_config_kwargs: dict = {}
+        binds = None
 
-        # 卷挂载
         if config.volumes:
             binds = []
             for host_path, vconfig in config.volumes.items():
                 mode = vconfig.get("mode", "rw")
                 binds.append(f"{host_path}:{vconfig['bind']}:{mode}")
-            host_config_kwargs["binds"] = binds
 
-        # 资源限制
         if config.cpus:
-            host_config_kwargs["cpu_quota"] = config.cpus * 100000  # 1 CPU = 100000
+            host_config_kwargs["cpu_quota"] = config.cpus * 100000
         if config.memory:
             host_config_kwargs["mem_limit"] = config.memory
-
-        # 网络
         if config.network:
             host_config_kwargs["network_mode"] = config.network
 
-        # host_config
-        host_config = self._docker.api.create_host_config(**host_config_kwargs)
-
-        container = self._docker.containers.create(
+        container_id = self._docker.api.create_container(
             image=config.image,
             name=config.name,
             environment=config.env,
             labels=config.labels or {},
             entrypoint=config.entrypoint,
             command=config.command,
-            host_config=host_config,
-        )
+            host_config=self._docker.api.create_host_config(
+                binds=binds,
+                **host_config_kwargs,
+            ),
+        )["Id"]
+
+        container = self._docker.containers.get(container_id)
 
         info = {
             "id": container.id,
@@ -142,7 +139,7 @@ class DockerContainerManager:
             container.remove(force=force)
             logger.info("容器已删除: %s", container_id[:12])
         except NotFound:
-            pass  # 已删除
+            pass
 
     # ── 容器内操作 ────────────────────────────────────────────────────
 
@@ -314,15 +311,11 @@ class DockerContainerManager:
 
     async def cleanup_group(self, group_id: str) -> None:
         """清理群组所有资源（容器、卷、网络）"""
-        # 停删容器
         containers = self.list_group_containers(group_id)
         for c in containers:
             await self.stop(c["id"], remove=True)
 
-        # 删卷
         self.remove_volume(group_id)
-
-        # 删网络
         self.remove_network(group_id)
 
         logger.info("群组 %s 资源已清理", group_id)

@@ -39,7 +39,7 @@ CLAUDE_MD_TEMPLATE = """# {name} 的角色定义
 
 完成子任务后：
 1. 将产出文件复制到 /workspace/shared/
-2. 生成简要 summary 文件到 /workspace/shared/.summary-{task_id}.json
+2. 生成简要 summary 文件到 /workspace/shared/.summary-$TASK_ID.json
 3. 退出码 0 表示成功，非 0 表示失败
 """
 
