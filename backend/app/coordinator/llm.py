@@ -107,9 +107,12 @@ def _get_llm(temperature: float = 0.0) -> BaseChatModel:
     else:
         from langchain_anthropic import ChatAnthropic
 
+        base_url = settings.ANTHROPIC_BASE_URL or os.environ.get("ANTHROPIC_BASE_URL", "")
+
         return ChatAnthropic(
             model=model or _DEFAULT_ANTHROPIC_MODEL,
             api_key=settings.ANTHROPIC_API_KEY,
+            base_url=base_url or None,
             temperature=temperature,
             max_tokens=4096,
         )

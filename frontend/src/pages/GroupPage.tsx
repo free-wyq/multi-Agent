@@ -147,7 +147,7 @@ export default function GroupPage() {
   const [chatGroupId, setChatGroupId] = useState<string | null>(null)
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
-  const [sending] = useState(false)
+  const [sending, setSending] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
 
@@ -177,10 +177,11 @@ export default function GroupPage() {
   // WebSocket 实时消息
   const { logs } = useWebSocket(chatGroupId)
 
-  // WebSocket 新消息追加到末尾
+  // WebSocket 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）
   useEffect(() => {
     if (logs.length === 0) return
     const lastLog = logs[logs.length - 1]
+    if (lastLog.agentId === 'user') return
     setChatMessages((prev) => {
       const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
       if (prev.some((m) => m.id === wsMsgId)) return prev
@@ -298,6 +299,7 @@ export default function GroupPage() {
 
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chatGroupId || sending) return
+    setSending(true)
     const content = chatInput.trim()
     setChatInput('')
     setMentionOpen(false)
@@ -324,14 +326,18 @@ export default function GroupPage() {
         type: 'user_input',
         content,
       })
-      // ✅ 乐观更新替换：用后端返回的真实消息替换 temp id
-      setChatMessages((prev) =>
-        prev.map((m) => (m.id === tempId ? sent : m)),
-      )
+      // ✅ 乐观更新替换：如果 WS 已经插入过真实消息，只删 temp；否则替换
+      setChatMessages((prev) => {
+        const alreadyExists = prev.some((m) => m.id === sent.id)
+        if (alreadyExists) return prev.filter((m) => m.id !== tempId)
+        return prev.map((m) => (m.id === tempId ? sent : m))
+      })
     } catch {
       setChatMessages((prev) => prev.filter((m) => m.id !== tempId))
       setChatInput(content)
       message.error('发送失败')
+    } finally {
+      setSending(false)
     }
   }
 
@@ -378,6 +384,19 @@ export default function GroupPage() {
   }, [chatInput, inputCursor])
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      // @ 补全开着且有候选 → 选择候选，不发送
+      if (mentionOpen && mentionCandidates.length > 0) {
+        e.preventDefault()
+        const candidate = mentionCandidates[mentionIndex]
+        if (candidate) insertMention(candidate)
+        return
+      }
+      // 否则直接发送（替代 onPressEnter，避免 onPressEnter 在 onKeyDown 之前触发的时序问题）
+      e.preventDefault()
+      handleSendMessage()
+      return
+    }
     if (!mentionOpen) return
     if (e.key === 'ArrowDown') {
       e.preventDefault()
@@ -385,10 +404,6 @@ export default function GroupPage() {
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
       setMentionIndex((idx) => (idx - 1 + mentionCandidates.length) % mentionCandidates.length)
-    } else if (e.key === 'Enter') {
-      e.preventDefault()
-      const candidate = mentionCandidates[mentionIndex]
-      if (candidate) insertMention(candidate)
     } else if (e.key === 'Escape') {
       setMentionOpen(false)
     }
@@ -752,7 +767,6 @@ export default function GroupPage() {
                 value={chatInput}
                 onChange={handleInputChange}
                 onKeyDown={handleInputKeyDown}
-                onPressEnter={handleSendMessage}
                 placeholder="输入消息... 使用 @ 点名成员"
                 disabled={sending}
                 size="large"

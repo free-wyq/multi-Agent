@@ -104,14 +104,20 @@ async def _push_to_bus(
 
 async def _background_reply(group_id: str, mentioned_agent_id: str | None, content: str = "", sender_id: str = "user") -> None:
     """后台异步生成回复并通过 WS 推送，不阻塞 HTTP 响应"""
+    import sys
+    print(f"[DEBUG] _background_reply called: group={group_id[:8]} mention={mentioned_agent_id} sender={sender_id}", file=sys.stderr, flush=True)
     try:
         async with async_session() as db:
             if mentioned_agent_id:
+                print(f"[DEBUG] routing to agent: {mentioned_agent_id[:8]}", file=sys.stderr, flush=True)
                 await _route_to_agent(db, group_id, mentioned_agent_id, content=content, sender_id=sender_id)
             else:
+                print(f"[DEBUG] falling back to coordinator_reply", file=sys.stderr, flush=True)
                 await _coordinator_reply(db, group_id)
     except Exception as e:
-        logger.error("Background reply failed: %s", e)
+        import traceback
+        print(f"[DEBUG] _background_reply FAILED: {e}", file=sys.stderr, flush=True)
+        traceback.print_exc(file=sys.stderr)
 
 
 # ── @解析 ─────────────────────────────────────────────────────────
@@ -160,16 +166,21 @@ async def _find_mention(db: AsyncSession, group_id: str, content: str) -> str | 
 
 async def _route_to_agent(db: AsyncSession, group_id: str, agent_id: str, content: str = "", sender_id: str = "user") -> None:
     """路由到子智能体引擎"""
+    import sys
     logger.info("消息路由到子智能体: %s (from: %s)", agent_id[:8], sender_id)
     try:
         from app.agent_engine import get_registry
         registry = get_registry()
+        print(f"[DEBUG] registry engines: {list(registry._engines.keys())[:3]}... total={sum(len(v) for v in registry._engines.values())}", file=sys.stderr, flush=True)
+        engine = registry.get_engine(agent_id, group_id=group_id)
+        print(f"[DEBUG] get_engine result: {engine}", file=sys.stderr, flush=True)
         routed = await registry.route_message(agent_id, {
             "type": "chat",
             "content": content,
             "sender_id": sender_id,
             "group_id": group_id,
         }, group_id=group_id)
+        print(f"[DEBUG] route_message result: {routed}", file=sys.stderr, flush=True)
         if not routed:
             logger.warning("AgentEngine 不在线，群主兜底")
             await _coordinator_reply(db, group_id)
@@ -254,14 +265,31 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
             f'  "reply": "你的回复内容"\n'
             f'}}\n\n'
             f"规则（严格遵循）：\n"
-            f"1. 你只是群里的协调者，直接用你的口吻回复\n"
-            f"2. 如果用户明显是在随便打招呼、闲聊，你就正常聊，不要提队友\n"
-            f"3. 如果用户提了具体任务（比如'写代码''做页面''设计''review'），你才说'我来安排 @成员'\n"
-            f"4. **绝对不要**自己模拟成员发消息，那是自动化的恶心行为\n"
-            f"5. 回复最多50字，别长篇大论"
+            f"1. 你只是群里的协调者，负责转达和安排，**不要代替成员回答问题**\n"
+            f"2. 如果用户明显是在随便打招呼、闲聊，你就正常聊\n"
+            f"3. **如果用户点名找某个成员**（如'喊后端'、'叫前端'、'让小张做'），你直接 @ 该成员即可，不要说'在呢有啥事'，那是成员的事不是你的事\n"
+            f"4. 如果用户提了具体任务（比如'写代码''做页面''设计''review'），你说'我来安排 @成员名'\n"
+            f"5. 切记：@后面必须跟上实际的成员名字（当前团队成员：{', '.join(m.name for m in members)}），系统会根据 @ 自动路由消息给该成员\n"
+            f"6. **绝对不要**自己模拟成员发消息，那是自动化的恶心行为\n"
+            f"7. 回复最多50字，别长篇大论"
         )
 
-        reply_text = await llm.ainvoke(prompt)
+        # 带重试的 LLM 调用（应对临时 API 不稳定）
+        import asyncio
+        last_error = None
+        for attempt in range(3):
+            try:
+                reply_text = await llm.ainvoke(prompt)
+                last_error = None
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("LLM 调用失败(第%d次): %s", attempt + 1, e)
+                if attempt < 2:
+                    await asyncio.sleep(1 + attempt)  # 1s, 2s backoff
+        if last_error:
+            raise last_error  # 3次都失败，走外层 catch
+
         raw = reply_text.content if hasattr(reply_text, "content") else str(reply_text)
 
         json_match = re.search(r'\{.*\}', raw, re.DOTALL)
@@ -274,7 +302,9 @@ async def _coordinator_reply(db: AsyncSession, group_id: str) -> None:
         await _save_and_push(db, group_id, coordinator_id, "coordinator_reply", coord_content)
 
     except Exception as e:
-        logger.warning("LLM auto-reply failed: %s", e)
+        logger.error("LLM auto-reply 最终失败: %s", e)
+        import traceback
+        traceback.print_exc(file=sys.stderr)
         fallback = "收到你的消息，我来看看怎么安排。"
         await _save_and_push(db, group_id, coordinator_id, "coordinator_reply", fallback)
 
@@ -300,6 +330,74 @@ async def _save_and_push(
 
     # 通过 bus → WS 推送
     await _push_to_bus(group_id, msg_id, sender_id, msg_type, content)
+
+    # 检查 @mention 并路由到其他智能体（群主回复中引用的成员）
+    await _route_mentions_from_reply(group_id, sender_id, content)
+
+
+async def _route_mentions_from_reply(group_id: str, sender_id: str, content: str) -> None:
+    """解析回复中的 @mention，路由消息到被 @ 的智能体"""
+    import re
+    import sqlalchemy as sa
+    from app.models.agent_definition import AgentDefinition
+    from app.models.group_member import GroupMember
+
+    mentions = re.findall(r"@(\S+)", content)
+    if not mentions:
+        return
+
+    try:
+        async with async_session() as db:
+            # 获取群成员
+            result = await db.execute(
+                sa.select(GroupMember.agent_id, GroupMember.alias)
+                .where(GroupMember.group_id == group_id)
+            )
+            members = {row[0]: row[1] for row in result.all()}
+            if not members:
+                return
+
+            # 获取成员名字映射
+            result = await db.execute(
+                sa.select(AgentDefinition.id, AgentDefinition.name)
+                .where(AgentDefinition.id.in_(list(members.keys())))
+            )
+            name_map = {row[1]: row[0] for row in result.all()}
+
+            from app.agent_engine import get_registry
+            registry = get_registry()
+
+            for mention in mentions:
+                # 不路由给自己
+                if mention == sender_id:
+                    continue
+
+                target_id = None
+                if mention in members:
+                    target_id = mention
+                elif mention in name_map:
+                    target_id = name_map[mention]
+                else:
+                    # 模糊匹配 alias
+                    for aid, alias in members.items():
+                        if alias and mention in alias:
+                            target_id = aid
+                            break
+
+                if not target_id or target_id == sender_id:
+                    continue
+
+                logger.info("回复 @mention 路由: %s -> %s", sender_id[:8], target_id[:8])
+                routed = await registry.route_message(target_id, {
+                    "type": "chat",
+                    "content": content,
+                    "sender_id": sender_id,
+                    "group_id": group_id,
+                }, group_id=group_id)
+                if not routed:
+                    logger.warning("@mention 路由失败: 引擎 %s 不在线", target_id[:8])
+    except Exception as exc:
+        logger.warning("@mention 路由异常: %s", exc)
 
 
 # ── 查询 ─────────────────────────────────────────────────────────

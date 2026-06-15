@@ -14,7 +14,7 @@ import logging
 import uuid
 from datetime import datetime, timezone
 
-from app.agent_engine.brain import get_brain, BRAIN_PROMPT
+from app.agent_engine.brain import get_brain, brain_decide, BRAIN_PROMPT
 from app.agent_engine.capability_base import CapabilityResult
 from app.bus.core import get_bus, CHANNEL_PREFIX
 from app.core.database import async_session
@@ -126,11 +126,10 @@ class AgentEngine:
             message=display_msg,
         )
 
-        try:
-            decision = await self._brain.ainvoke(prompt)
-        except Exception as exc:
-            logger.error("大脑决策失败: %s", exc)
-            await self._reply("抱歉，我这边有点卡壳，能再说一遍吗？", parent_msg=msg)
+        decision = await brain_decide(self._brain, prompt)
+        if decision.reasoning == "parse_failed":
+            logger.error("大脑决策失败: %s", self.name)
+            await self._reply(decision.content, parent_msg=msg)
             self.status = "idle"
             return
 

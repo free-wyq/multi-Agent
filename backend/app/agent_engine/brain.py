@@ -53,17 +53,39 @@ def _get_llm(temperature: float = 0.3) -> BaseChatModel:
         )
     else:
         from langchain_anthropic import ChatAnthropic
+        base_url = settings.ANTHROPIC_BASE_URL or os.environ.get("ANTHROPIC_BASE_URL", "")
         return ChatAnthropic(
             model=model or _DEFAULT_MODEL,
             api_key=settings.ANTHROPIC_API_KEY,
+            base_url=base_url or None,
             temperature=temperature,
             max_tokens=4096,
         )
 
 
 def get_brain() -> BaseChatModel:
-    """获取带结构化输出的大脑 LLM"""
-    return _get_llm(temperature=0.3).with_structured_output(BrainDecision)
+    """获取大脑 LLM（不用结构化输出，改为纯文本 + 自己解析 JSON）"""
+    return _get_llm(temperature=0.3)
+
+
+async def brain_decide(llm: BaseChatModel, prompt: str) -> BrainDecision:
+    """调用大脑并解析结果为 BrainDecision"""
+    import json, re
+    try:
+        resp = await llm.ainvoke(prompt)
+        raw = resp.content if hasattr(resp, "content") else str(resp)
+        # 提取 JSON 块
+        json_match = re.search(r'\{.*\}', raw, re.DOTALL)
+        if json_match:
+            data = json.loads(json_match.group())
+            return BrainDecision(
+                action=data.get("action", "chat"),
+                content=data.get("content", ""),
+                reasoning=data.get("reasoning", ""),
+            )
+    except Exception as e:
+        logger.warning("大脑解析失败: %s", e)
+    return BrainDecision(action="chat", content="抱歉，我这边有点卡壳，能再说一遍吗？", reasoning="parse_failed")
 
 
 BRAIN_PROMPT = """你是一名专业的 {role}，名字叫 {name}。
@@ -86,5 +108,10 @@ BRAIN_PROMPT = """你是一名专业的 {role}，名字叫 {name}。
 重要：如果你需要请求其他团队成员协助，在回复中用 @对方名字 的方式提及对方，系统会自动将消息路由给他们。
 例如：@后端工程师 请提供登录API接口
 
-你的回答：
+请严格按照以下 JSON 格式回复（不要用 markdown 代码块标记，只输出纯 JSON）：
+{{
+  "action": "chat | execute | ask",
+  "content": "你的回复或任务指令",
+  "reasoning": "决策理由"
+}}
 """
