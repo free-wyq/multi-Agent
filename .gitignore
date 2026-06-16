@@ -1,15 +1,10 @@
-# Python
-__pycache__/
-*.py[cod]
-*.egg-info/
+# Build
+dist-electron/
 dist/
-.venv/
-venv/
+release/
 
 # Node
 node_modules/
-dist-electron/
-release/
 
 # IDE
 .vscode/
@@ -25,7 +20,3 @@ Thumbs.db
 
 # Data
 data/
-
-# Database
-*.db
-*.sqlite3

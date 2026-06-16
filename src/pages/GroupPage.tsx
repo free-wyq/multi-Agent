@@ -41,7 +41,7 @@ import { agentApi, groupApi,
   type GroupFile,
   type Message,
 } from '../services/api'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useBusEvent } from '../hooks/useBusEvent'
 import './GroupPage.css'
 
 const { Text } = Typography
@@ -174,10 +174,10 @@ export default function GroupPage() {
 
   const chatGroup = groups.find((g) => g.id === chatGroupId)
 
-  // WebSocket 实时消息
-  const { logs } = useWebSocket(chatGroupId)
+  // IPC 实时消息
+  const { logs } = useBusEvent(chatGroupId)
 
-  // WebSocket 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）
+  // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）
   useEffect(() => {
     if (logs.length === 0) return
     const lastLog = logs[logs.length - 1]

@@ -1,6 +1,6 @@
 import { useEffect, useRef } from 'react'
 import { Tag } from 'antd'
-import { useWebSocket } from '../hooks/useWebSocket'
+import { useBusEvent } from '../hooks/useBusEvent'
 
 interface LogPanelProps {
   taskId?: string
@@ -9,7 +9,7 @@ interface LogPanelProps {
 }
 
 export default function LogPanel({ taskId, agentId, groupId }: LogPanelProps) {
-  const { logs } = useWebSocket(groupId || null)
+  const { logs } = useBusEvent(groupId || null)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const filtered = logs.filter((l) => {

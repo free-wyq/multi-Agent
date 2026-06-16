@@ -1,7 +1,6 @@
 /**
  * 进程管理 + Claude Code CLI 跨平台检测
  *
- * 替代 Docker 容器管理：
  * - 检测 Claude Code CLI 路径
  * - 跨平台支持（macOS / Windows / Linux）
  */

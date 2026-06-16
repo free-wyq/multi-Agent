@@ -9,7 +9,7 @@
 - **主进程**：Node.js/TS — 状态管理、进程管理、LLM 调用
 - **子智能体**：本地 Claude Code CLI 实例（child_process.spawn）
 - **数据持久化**：内存 Map + JSON 文件
-- **事件总线**：进程内 EventEmitter（替代 Redis）
+- **事件总线**：进程内 EventEmitter
 - **LLM 调用**：直接 HTTP API（OpenAI 兼容端点）
 
 ## 快速开始
@@ -22,7 +22,7 @@ npm install
 npm run dev
 
 # 打包
-npm run electron:build
+npm run build
 ```
 
 ## 项目结构
@@ -35,7 +35,7 @@ src/                     # Renderer 进程（React 前端）
   pages/                 # 页面组件
   components/            # 通用组件
   services/api.ts        # IPC API 调用层
-  hooks/useWebSocket.ts  # 实时事件 hook
+  hooks/useBusEvent.ts    # 实时事件 hook
   ipc/                   # IPC 通道定义 + 类型
 main/                    # 主进程业务逻辑
   store/                 # 内存状态 + JSON 持久化

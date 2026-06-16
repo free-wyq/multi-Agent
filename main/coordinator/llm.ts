@@ -1,7 +1,6 @@
 /**
  * OpenAI 兼容 HTTP 客户端
  *
- * 替代 LangChain：
  * - 直接 HTTP 调 /v1/chat/completions
  * - 支持 JSON mode 结构化输出
  * - 支持 OpenAI / DeepSeek / 其他兼容端点

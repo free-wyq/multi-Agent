@@ -1,7 +1,5 @@
 /**
  * Coordinator 状态定义
- *
- * 对应原 Python CoordinatorState TypedDict
  */
 
 export interface SubTask {
@@ -32,6 +30,9 @@ export interface CoordinatorState {
   running_task_ids: string[]
   completed_task_ids: string[]
   failed_task_ids: string[]
+
+  // 子任务序号 -> task ID 映射（用于 monitor 阶段查找下游依赖）
+  taskIdMap?: Record<number, string>
 
   // 结果汇总
   summary: string

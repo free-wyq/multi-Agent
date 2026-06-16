@@ -1,19 +1,22 @@
 /**
- * Coordinator 工作流
+ * Coordinator 工作流（A2A 架构改造后）
  *
- * 替代 LangGraph 状态图：
- * - LangGraph 5 节点 → 简单 async 方法 + while 循环
- * - analyze → decompose → dispatch → monitor(循环) → summarize
+ * 核心变化：
+ * 1. dispatch() 不再直接调用 store.createTask() + eventBus.publishAndPersist()
+ *    改为通过 sharedState.pushTask() 向各 agent 的收件箱投递任务
+ * 2. monitor() 改为轮询 sharedState 的 notifyQueue，而非直接读 store.tasks
+ * 3. summarize() 完成后通过 sharedState.pushNotify() 发布结果通知
+ * 4. 仍然在主进程内运行（coordinator 不走 CLI spawn）
  */
 
 import { store } from '../store/store'
+import { sharedState } from '../store/shared-state'
 import { eventBus, CHANNEL_PREFIX } from '../bus/event-bus'
 import { chatCompletion, structuredInvoke, getDefaultConfig } from './llm'
 import {
   buildAnalyzePrompt, buildDecomposePrompt, buildSummarizePrompt,
-  buildRolesHint, buildRolesContext, buildRolesHint as _unused,
+  buildRolesHint, buildRolesContext,
   INTENT_ANALYSIS_SCHEMA, TASK_DECOMPOSITION_SCHEMA,
-  ROLE_DESCRIPTIONS,
 } from './prompts'
 import { initialState } from './state'
 import type { CoordinatorState, SubTask } from './state'
@@ -32,10 +35,10 @@ export class CoordinatorWorkflow {
       // 2. 拆解任务
       await this.decompose(state)
 
-      // 3. 派发任务
+      // 3. 派发任务（通过 SharedStateCenter 扔字条）
       await this.dispatch(state)
 
-      // 4. 监控循环
+      // 4. 监控循环（轮询 notifyQueue）
       while (this.shouldContinue(state) === 'monitor') {
         await this.monitor(state)
       }
@@ -83,7 +86,6 @@ export class CoordinatorWorkflow {
       TASK_DECOMPOSITION_SCHEMA,
     )
 
-    // 将 SubTaskDef 转为 SubTask，并规范化角色
     const subtasks: SubTask[] = result.subtasks.map(st => ({
       title: st.title,
       description: st.description,
@@ -91,7 +93,6 @@ export class CoordinatorWorkflow {
       dependencies: st.depends_on,
     }))
 
-    // 构建 DAG 可视化结构
     const { dag_nodes, dag_edges } = this.buildDagStructure(subtasks)
 
     state.subtasks = subtasks
@@ -105,15 +106,12 @@ export class CoordinatorWorkflow {
     const groupId = state.group_id
     const subtasks = state.subtasks
     const roleToAgentId = store.resolveRoleMapping(groupId)
-    const channel = `${CHANNEL_PREFIX}${groupId}`
 
-    // 为所有子任务创建 Task 记录
+    // 同时也在 store 中创建 Task 记录（供前端 DAG 展示）
     const taskIdMap: Record<number, string> = {}
     for (let idx = 0; idx < subtasks.length; idx++) {
       const st = subtasks[idx]
       const agentId = roleToAgentId[st.assigned_agent_id]
-
-      // 解析依赖：子任务序号 → 真实 task ID
       const depIds = st.dependencies
         .filter(d => d in taskIdMap)
         .map(d => taskIdMap[d])
@@ -129,22 +127,35 @@ export class CoordinatorWorkflow {
       taskIdMap[idx] = task.id
     }
 
-    // 派发无依赖的任务（状态改为 working）
+    state.taskIdMap = taskIdMap  // 保存映射供 monitor 使用
+
+    // 派发无依赖的任务：通过 SharedStateCenter 向各 agent 扔字条
     for (let idx = 0; idx < subtasks.length; idx++) {
       if (!subtasks[idx].dependencies.length) {
         const taskId = taskIdMap[idx]
+        const agentId = roleToAgentId[subtasks[idx].assigned_agent_id]
+
         store.updateTask(taskId, { status: 'working' })
         state.running_task_ids.push(taskId)
 
-        // 发布 task_dispatch 事件
-        eventBus.publishAndPersist(channel, {
+        // A2A：扔字条到 sharedState
+        sharedState.pushTask({
+          group_id: groupId,
+          sender_id: 'coordinator',
+          receiver_id: agentId || 'broadcast',
+          content: subtasks[idx].description || subtasks[idx].title,
+          data: { task_id: taskId, dag_order: idx, title: subtasks[idx].title },
+        })
+
+        // 同时广播通知给前端
+        eventBus.publishAndPersist(`${CHANNEL_PREFIX}${groupId}`, {
           group_id: groupId,
           task_id: taskId,
           sender_id: 'coordinator',
-          receiver_id: subtasks[idx].assigned_agent_id || 'broadcast',
+          receiver_id: agentId || 'broadcast',
           type: 'task_dispatch',
           content: `任务已派发: ${subtasks[idx].title}`,
-          data: { task_id: taskId, agent_id: subtasks[idx].assigned_agent_id },
+          data: { task_id: taskId, agent_id: agentId },
         })
       }
     }
@@ -154,55 +165,106 @@ export class CoordinatorWorkflow {
 
   private async monitor(state: CoordinatorState): Promise<void> {
     const groupId = state.group_id
-    const channel = `${CHANNEL_PREFIX}${groupId}`
-
     if (!state.running_task_ids.length) return
 
-    // 轮询等待（每 2s 检查一次，30s 超时）
     const startTime = Date.now()
-    const TIMEOUT = 30_000
+    const TIMEOUT = 60_000    // 延长到 60s（CLI 执行可能较慢）
     const POLL_INTERVAL = 2_000
 
     while (Date.now() - startTime < TIMEOUT) {
       await this.sleep(POLL_INTERVAL)
 
-      // 检查每个 running task 的状态
+      // 轮询 notifyQueue：查找 task_complete / task_failed 通知
+      const { notifies } = sharedState.pollInbox(groupId, 'coordinator')
+      const taskNotifies = notifies.filter(
+        n => n.type === 'task_complete' || n.type === 'task_failed',
+      )
+
       const stillRunning: string[] = []
       for (const taskId of state.running_task_ids) {
-        const task = store.getTask(taskId)
-        if (!task) continue
-
-        if (task.status === 'completed') {
-          state.completed_task_ids.push(taskId)
-        } else if (task.status === 'failed') {
-          state.failed_task_ids.push(taskId)
+        const notify = taskNotifies.find(n => n.data?.task_id === taskId)
+        if (notify) {
+          if (notify.type === 'task_complete') {
+            state.completed_task_ids.push(taskId)
+            // 同步更新 store 中的 task 状态
+            const task = store.getTask(taskId)
+            if (task) {
+              store.updateTask(taskId, {
+                status: 'completed',
+                result_summary: notify.content,
+              })
+            }
+          } else {
+            state.failed_task_ids.push(taskId)
+            const task = store.getTask(taskId)
+            if (task) {
+              store.updateTask(taskId, {
+                status: 'failed',
+                result_summary: notify.content,
+              })
+            }
+          }
         } else {
-          stillRunning.push(taskId)
+          // 还在 running，检查 store 中是否已有状态更新
+          const task = store.getTask(taskId)
+          if (task?.status === 'completed') {
+            state.completed_task_ids.push(taskId)
+          } else if (task?.status === 'failed') {
+            state.failed_task_ids.push(taskId)
+          } else {
+            stillRunning.push(taskId)
+          }
         }
       }
 
       state.running_task_ids = stillRunning
 
-      // 检查是否有新的可派发任务
-      const readyTasks = store.getReadyTasks(groupId)
-      for (const rt of readyTasks) {
-        if (!state.running_task_ids.includes(rt.id) && !state.completed_task_ids.includes(rt.id)) {
-          store.updateTask(rt.id, { status: 'working' })
-          state.running_task_ids.push(rt.id)
+      // 检查是否有新的可派发任务（依赖已完成的下游任务）
+      for (let idx = 0; idx < state.subtasks.length; idx++) {
+        const st = state.subtasks[idx]
+        const taskId = state.taskIdMap?.[idx]
+        if (!taskId) continue
 
-          eventBus.publishAndPersist(channel, {
+        // 如果已在运行/完成/失败，跳过
+        if (state.running_task_ids.includes(taskId)) continue
+        if (state.completed_task_ids.includes(taskId)) continue
+        if (state.failed_task_ids.includes(taskId)) continue
+
+        // 检查依赖是否全部完成
+        const depsDone = st.dependencies.every(depIdx => {
+          const depTaskId = state.taskIdMap?.[depIdx]
+          return depTaskId ? state.completed_task_ids.includes(depTaskId) : true
+        })
+
+        if (depsDone) {
+          const roleToAgentId = store.resolveRoleMapping(groupId)
+          const agentId = roleToAgentId[st.assigned_agent_id]
+
+          store.updateTask(taskId, { status: 'working' })
+          state.running_task_ids.push(taskId)
+
+          // A2A：扔字条
+          sharedState.pushTask({
             group_id: groupId,
-            task_id: rt.id,
             sender_id: 'coordinator',
-            receiver_id: rt.assigned_agent_id || 'broadcast',
+            receiver_id: agentId || 'broadcast',
+            content: st.description || st.title,
+            data: { task_id: taskId, dag_order: idx, title: st.title },
+          })
+
+          eventBus.publishAndPersist(`${CHANNEL_PREFIX}${groupId}`, {
+            group_id: groupId,
+            task_id: taskId,
+            sender_id: 'coordinator',
+            receiver_id: agentId || 'broadcast',
             type: 'task_dispatch',
-            content: `下游任务已派发: ${rt.title}`,
-            data: { task_id: rt.id },
+            content: `下游任务已派发: ${st.title}`,
+            data: { task_id: taskId },
           })
         }
       }
 
-      // 没有 running 任务了，退出轮询
+      // 没有 running 了，退出轮询
       if (!state.running_task_ids.length) break
     }
   }
@@ -236,6 +298,16 @@ export class CoordinatorWorkflow {
 
     state.summary = summaryText
     state.artifacts = artifacts
+
+    // A2A：通过 notifyQueue 发布结果
+    sharedState.pushNotify({
+      group_id: state.group_id,
+      type: 'coordinator_reply',
+      sender_id: 'coordinator',
+      receiver_id: 'broadcast',
+      content: summaryText,
+      data: { artifacts },
+    })
   }
 
   // ── 条件判断 ──────────────────────────────────────────────
@@ -244,13 +316,10 @@ export class CoordinatorWorkflow {
     const { running_task_ids, completed_task_ids, failed_task_ids, subtasks } = state
 
     if (!subtasks.length) return 'end'
-
     if (running_task_ids.length) return 'monitor'
-
     if (completed_task_ids.length + failed_task_ids.length >= subtasks.length) {
       return 'summarize'
     }
-
     return 'monitor'
   }
 
@@ -285,29 +354,24 @@ export class CoordinatorWorkflow {
 
     const lowerStr = roleStr.toLowerCase()
 
-    // 1. 精确匹配
     for (const r of availableRoles) {
       if (roleStr === r.role) return r.role
     }
 
-    // 2. 模糊匹配
     for (const r of availableRoles) {
       if (r.role.toLowerCase().includes(lowerStr) || lowerStr.includes(r.role.toLowerCase())) {
         return r.role
       }
     }
 
-    // 3. 关键词匹配
     let bestMatch = ''
     let bestScore = 0
 
     for (const r of availableRoles) {
       const keywords = new Set<string>()
-      // 从 role 标识提取关键词
       for (const kw of r.role.toLowerCase().replace(/_/g, '-').split('-')) {
         if (kw.length > 1) keywords.add(kw)
       }
-      // 从 name 提取
       if (r.name) {
         for (const kw of r.name.toLowerCase().split(/\s+/)) {
           if (kw.length > 1) keywords.add(kw)

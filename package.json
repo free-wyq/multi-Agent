@@ -6,11 +6,8 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
-    "preview": "vite preview",
-    "electron:dev": "vite",
-    "electron:build": "vite build && electron-builder",
-    "electron:preview": "vite build && electron ."
+    "build": "vite build && electron-builder",
+    "start": "vite build && electron ."
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.5",

@@ -61,7 +61,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   runtimeGetLogs: (instanceId: string) =>
     ipcRenderer.invoke('RUNTIME_GET_LOGS', instanceId),
 
-  // ── 实时事件（替代 WebSocket）─────────────────────────────
+  // ── 实时事件 ──────────────────────────────────────────────
   onBusEvent: (groupId: string, callback: (data: unknown) => void) => {
     const channel = `bus-event:${groupId}`
     const handler = (_event: Electron.IpcRendererEvent, data: unknown) => callback(data)

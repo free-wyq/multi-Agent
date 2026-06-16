@@ -1,9 +1,8 @@
 /**
  * 进程内事件总线
  *
- * 替代 Redis Pub/Sub：
  * - 基于 Node.js EventEmitter
- * - 频道命名保持 agenticx:group:{groupId}
+ * - 频道命名 agenticx:group:{groupId}
  * - 支持发布、订阅、取消订阅、发布+持久化
  * - 消息自动转发到 Electron Renderer 进程
  */
@@ -62,7 +61,7 @@ class EventBus {
 
   /**
    * 发布 + 持久化到 Message 表
-   * 即使 DB 写入失败，消息仍会发布
+   * 即使 store 写入失败，消息仍会发布
    */
   publishAndPersist(
     channel: string,

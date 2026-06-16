@@ -1,7 +1,6 @@
 /**
  * Claude Code Runtime
  *
- * 替代 Docker 容器内 Claude Code：
  * - spawn 本地 Claude Code CLI 进程
  * - 实时捕获 stdout/stderr 发布为日志
  * - 进程退出后更新任务状态

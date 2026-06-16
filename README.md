@@ -22,11 +22,11 @@
 │  │  └──────────┘  └──────────┘  └──────────┘  └──────────┘          │  │
 │  │  React + Ant Design + ReactFlow                                    │  │
 │  │  services/api.ts ──── IPC 调用 ────→ Main 进程                     │  │
-│  │  hooks/useWebSocket.ts ── IPC 事件 ←── Main 进程推送                │  │
+│  │  hooks/useBusEvent.ts ── IPC 事件 ←── Main 进程推送                │  │
 │  └────────────────────────────────────────────────────────────────────┘  │
 │                                    │                                     │
 │                              IPC 通信通道                                 │
-│                          invoke() / on() / send()                        │
+│                          invoke() / on()                                │
 │                                    │                                     │
 │  ┌────────────────────────────────────────────────────────────────────┐  │
 │  │                    Main 进程（Node.js / TypeScript）                │  │
@@ -39,13 +39,11 @@
 │  │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐            │  │
 │  │  │ 内存 Store    │  │ JSON 持久化   │  │ EventEmitter  │            │  │
 │  │  │ Map<id, T>   │  │ data/*.json  │  │   事件总线     │            │  │
-│  │  │ 替代 PostgreSQL│  │ 替代 DB 存储  │  │ 替代 Redis    │            │  │
 │  │  └──────────────┘  └──────────────┘  └──────────────┘            │  │
 │  │                                                                    │  │
 │  │  ┌─────────────────────────────────────────────────────────────┐  │  │
 │  │  │              群主 Coordinator（LLM API 直调）                   │  │  │
 │  │  │    analyze → decompose → dispatch → monitor → summarize       │  │  │
-│  │  │    async 方法 + while 循环（替代 LangGraph 状态图）              │  │  │
 │  │  └─────────────────────────────────────────────────────────────┘  │  │
 │  │                                                                    │  │
 │  │  ┌─────────────────────────────────────────────────────────────┐  │  │
@@ -75,11 +73,6 @@
 │   │  │  stdout → 实时日志推送    │  │  shared/ 交换区      │     │     │
 │   │  └──────────────────────────┘  │  output/ 交付物      │     │     │
 │   │                                 └───────────────────────┘     │     │
-│   └───────────────────────────────────────────────────────────────┘     │
-│                                                                          │
-│   ┌───────────────────────────────────────────────────────────────┐     │
-│   │  子智能体 B（测试工程师）            工作目录 group-1/            │     │
-│   │  同一工作目录，天然共享代码+依赖+产物，无需 Docker Volume       │     │
 │   └───────────────────────────────────────────────────────────────┘     │
 │                                                                          │
 │   group-2/ → 不同群组不同目录，天然隔离                                   │
@@ -182,7 +175,6 @@
     │                           │──────────────────────────→│
     │                           │                           │
     │                           │                    B跑测试  │
-    │                           │                    (无需重建)│
     │                           │                    进程结束   │
 ```
 
@@ -193,22 +185,21 @@
 | | 群主 | 子智能体 |
 |--|------|---------|
 | 本质 | LLM API 直调 | Claude Code CLI 进程 |
-| 需要沙箱 | ❌ | ❌ 本地进程 |
 | 职责 | 意图分析、任务拆解、DAG调度 | 开发、编译、测试 |
 | 运行位置 | Main 进程内 | child_process.spawn |
 | 成本 | 低 | 中 |
 
-### 2. 去掉 Docker
+### 2. 本地进程替代容器
 
-子智能体都是 Claude Code CLI 实例，不需要不同环境——只需要不同的 system prompt 和工作目录。本地进程比 Docker 容器启动更快，文件共享更简单（同一目录）。
+子智能体都是 Claude Code CLI 实例，只需要不同的 system prompt 和工作目录。本地进程启动更快，同一群组共享工作目录，天然支持文件交换和依赖复用。
 
-### 3. 去掉 PostgreSQL + Redis
+### 3. 内存 + JSON 文件存储
 
-单机桌面应用，数据全在内存，持久化用 JSON 文件。进程内 EventEmitter 替代 Redis Pub/Sub。不需要查询优化、事务、跨进程通信。
+单机桌面应用，数据全在内存，持久化用 JSON 文件。进程内 EventEmitter 做事件总线，无需查询优化、事务、跨进程通信。
 
-### 4. 去掉 LangGraph + LangChain
+### 4. 显式流程编排
 
-LangGraph 的状态图在单进程内无优势。改为显式 async 方法 + while 循环，更易调试。LLM 调用改为直接 HTTP 请求，去除 LangChain 封装层。
+Coordinator 采用显式 async 方法 + while 循环，5 步流水线（analyze → decompose → dispatch → monitor → summarize），逻辑清晰易调试。LLM 调用直接 HTTP 请求，去除框架封装层。
 
 ### 5. DAG 依赖感知调度
 
@@ -225,7 +216,7 @@ LangGraph 的状态图在单进程内无优势。改为显式 async 方法 + whi
 | 桌面框架 | Electron |
 | 前端 | React + Vite + Ant Design + ReactFlow |
 | 主进程 | Node.js / TypeScript |
-| 群主调度 | async 方法 + while 循环（替代 LangGraph） |
+| 群主调度 | async 方法 + while 循环 |
 | 群主 LLM | OpenAI 兼容 HTTP API 直调 |
 | 子智能体运行时 | 本地 Claude Code CLI（child_process.spawn） |
 | 数据存储 | 内存 Map + JSON 文件 |
@@ -254,7 +245,7 @@ npm install
 npm run dev
 
 # 打包桌面应用
-npm run electron:build
+npm run build
 ```
 
 ## 环境要求
@@ -274,7 +265,7 @@ multi-Agent/
     pages/                      # 页面组件
     components/                 # 通用组件
     services/api.ts             # IPC API 调用层
-    hooks/useWebSocket.ts       # 实时事件 hook
+    hooks/useBusEvent.ts        # 实时事件 hook
     ipc/                        # IPC 通道定义 + 类型
   main/                         # 主进程业务逻辑
     store/                      # 内存状态 + JSON 持久化

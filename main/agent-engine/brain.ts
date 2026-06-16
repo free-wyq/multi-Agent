@@ -1,7 +1,6 @@
 /**
  * Agent Engine 大脑
  *
- * 替代 Python agent_engine/brain.py：
  * - 用 LLM 判断消息类型：chat / execute / ask
  * - 解析 JSON 响应为 BrainDecision
  */

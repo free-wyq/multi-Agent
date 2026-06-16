@@ -1,7 +1,6 @@
 /**
  * Message IPC Handlers
  *
- * 替代 FastAPI messages 路由：
  * - 创建消息 + 事件总线发布
  * - 如果发送者是 user，触发自动回复（@mention 路由 / coordinator 回复）
  */

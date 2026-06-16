@@ -1,7 +1,5 @@
 /**
  * 提示词模板
- *
- * 从 Python coordinator/llm.py, agent_engine/brain.py, api/messages.py 提取
  */
 
 // ── 意图分析 ─────────────────────────────────────────────────

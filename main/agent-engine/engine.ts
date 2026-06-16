@@ -1,20 +1,25 @@
 /**
- * Agent Engine
+ * Agent Engine — 常驻智能体引擎（A2A 架构改造后）
  *
- * 替代 Python AgentEngine：
- * - 每个智能体一个实例，常驻运行
- * - 内部队列（数组 push/shift）替代 asyncio.Queue
- * - 主循环 setInterval 检查队列
- * - 大脑决策（chat/execute/ask）
- * - 执行时 spawn Claude Code CLI 进程
+ * 核心变化：
+ * 1. 不再使用私有 inbox 数组，而是轮询 SharedStateCenter 的"收件箱"
+ * 2. 任务执行改为非阻塞：spawn CLI 后不再 await，主循环继续消费消息
+ * 3. Coordinator 也走同样的 engine → inbox → brainDecide → execute 流程
+ * 4. 完全解耦：只与 SharedStateCenter 交互，不直接与其他 engine 通信
  */
 
 import { store } from '../store/store'
+import { sharedState } from '../store/shared-state'
 import { eventBus, CHANNEL_PREFIX } from '../bus/event-bus'
 import { brainDecide } from './brain'
 import { getDefaultConfig } from '../coordinator/llm'
 import { ClaudeCodeRuntime } from '../runtime/claude-code-runtime'
-import type { AgentDefinition, BrainDecision } from '../store/types'
+import { coordinatorWorkflow } from '../coordinator/workflow'
+import type {
+  AgentDefinition, BrainDecision, TaskQueueItem, NotifyQueueItem,
+} from '../store/types'
+
+export type EngineStatus = 'idle' | 'thinking' | 'executing' | 'offline'
 
 export class AgentEngine {
   id: string
@@ -23,15 +28,22 @@ export class AgentEngine {
   systemPrompt: string
   groupId: string
 
-  status: 'idle' | 'thinking' | 'executing' | 'offline' = 'idle'
+  status: EngineStatus = 'idle'
   currentTaskId: string | null = null
 
-  private inbox: Record<string, unknown>[] = []
   private intervalHandle: NodeJS.Timeout | null = null
   private shutdown = false
   private memory: { role: string; content: string; ts: string }[] = []
   private runtime: ClaudeCodeRuntime | null = null
+
+  /** 上次轮询时间戳（用于增量拉取通知） */
+  private lastPollAt = new Date(0).toISOString()
+
+  /** 防循环路由表：agentId -> 上次路由时间(秒) */
   private recentRoutes: Record<string, number> = {}
+
+  /** 正在处理的本地任务（防止重复消费） */
+  private processingTaskIds = new Set<string>()
 
   constructor(agentDef: AgentDefinition, groupId: string) {
     this.id = agentDef.id
@@ -47,9 +59,9 @@ export class AgentEngine {
     this.shutdown = false
     this.status = 'idle'
 
-    // 主循环：每 100ms 检查队列
+    // 主循环：每 100ms 轮询共享状态的收件箱
     this.intervalHandle = setInterval(() => {
-      this._processNextMessage()
+      this._pollLoop()
     }, 100)
   }
 
@@ -67,33 +79,160 @@ export class AgentEngine {
   }
 
   pushMessage(message: Record<string, unknown>): void {
-    this.inbox.push(message)
-  }
-
-  // ── 主循环 ────────────────────────────────────────────────
-
-  private _processNextMessage(): void {
-    if (this.shutdown || !this.inbox.length) return
-    if (this.status === 'executing') return // 正在执行，不处理新消息
-
-    const msg = this.inbox.shift()
-    if (!msg) return
-
-    // 异步处理
-    const type = msg.type as string
-    if (type === 'task_dispatch') {
-      this._doExecute(msg).catch(err => console.error(`AgentEngine execute error:`, err))
+    // 旧 API 兼容：将 pushMessage 转译为 SharedStateCenter 的 pushTask/pushNotify
+    if (message.type === 'task_dispatch') {
+      sharedState.pushTask({
+        group_id: this.groupId,
+        sender_id: (message.sender_id as string) || 'coordinator',
+        receiver_id: this.id,
+        content: (message.content as string) || '',
+        data: message.data as Record<string, unknown>,
+      })
     } else {
-      this._handleMessage(msg).catch(err => console.error(`AgentEngine handleMessage error:`, err))
+      sharedState.pushNotify({
+        group_id: this.groupId,
+        type: 'agent_reply',
+        sender_id: (message.sender_id as string) || 'user',
+        receiver_id: this.id,
+        content: (message.content as string) || '',
+        data: message.data as Record<string, unknown>,
+      })
     }
   }
 
-  // ── 消息处理 ──────────────────────────────────────────────
+  // ── 主循环：轮询共享收件箱 ────────────────────────────────
 
-  private async _handleMessage(msg: Record<string, unknown>): Promise<void> {
-    this.status = 'thinking'
-    const content = (msg.content as string) || ''
-    const sender = (msg.sender_id as string) || 'user'
+  private _pollLoop(): void {
+    if (this.shutdown) return
+
+    // 增量拉取：只取上次轮询之后的新消息
+    const inbox = sharedState.pollInbox(this.groupId, this.id, {
+      since: this.lastPollAt,
+    })
+    this.lastPollAt = new Date().toISOString()
+
+    // 先处理任务（如果不在 executing 状态）
+    if (this.status !== 'executing') {
+      for (const task of inbox.tasks) {
+        if (this.processingTaskIds.has(task.id)) continue
+        this.processingTaskIds.add(task.id)
+        this._claimAndExecute(task).catch(err => {
+          console.error(`[AgentEngine ${this.name}] 执行任务失败:`, err)
+          this.processingTaskIds.delete(task.id)
+        })
+        return // 一次只处理一个任务
+      }
+    }
+
+    // 再处理通知（聊天消息等）—— 即使 executing 也可以消费通知（但暂不处理新的聊天触发 execute）
+    for (const notify of inbox.notifies) {
+      this._handleNotify(notify).catch(err => {
+        console.error(`[AgentEngine ${this.name}] 处理通知失败:`, err)
+      })
+    }
+  }
+
+  // ── 任务执行（非阻塞）─────────────────────────────────────
+
+  private async _claimAndExecute(task: TaskQueueItem): Promise<void> {
+    const instance = store.listInstancesByGroup(this.groupId).find(i => i.definition_id === this.id)
+    const claimed = sharedState.claimTask(this.groupId, this.id, instance?.id || this.id)
+    if (!claimed || claimed.id !== task.id) {
+      this.processingTaskIds.delete(task.id)
+      return
+    }
+
+    this.status = 'executing'
+    this.currentTaskId = task.id
+
+    await this._publishLog(task.id, `▶ [${this.name}] 开始执行任务: ${task.content.substring(0, 50)}...`)
+
+    try {
+      if (this.role === 'coordinator') {
+        await this._executeCoordinator(task)
+      } else {
+        await this._executeNormal(task)
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      sharedState.completeTask(task.id, false, `❌ 执行异常: ${msg}`)
+      await this._publishLog(task.id, `❌ 执行异常: ${msg}`)
+      this._resetIdle()
+    }
+  }
+
+  private async _executeNormal(task: TaskQueueItem): Promise<void> {
+    const agentDef = store.getAgent(this.id)
+    if (!agentDef) {
+      sharedState.completeTask(task.id, false, '找不到智能体定义')
+      await this._publishLog(task.id, '❌ 找不到智能体定义')
+      this._resetIdle()
+      return
+    }
+
+    const runtime = new ClaudeCodeRuntime(this.groupId, agentDef)
+    this.runtime = runtime
+
+    await this._publishLog(task.id, `🚀 启动 Claude Code CLI...`)
+
+    // 非阻塞执行！不 await，用 then/catch/finally 收尾
+    runtime.execute(task.content, task.id)
+      .then(result => {
+        sharedState.completeTask(
+          task.id,
+          result.success,
+          result.output?.substring(0, 500),
+          { exit_code: result.exitCode, full_output: result.output },
+        )
+        if (result.success) {
+          this._reply(`任务完成 🎉\n${result.output?.substring(0, 200) || '已完成'}`)
+        } else {
+          this._reply(`执行出错了: ${result.output || '未知错误'}`)
+        }
+      })
+      .catch((err: Error) => {
+        sharedState.completeTask(task.id, false, `执行异常: ${err.message}`)
+        this._reply(`执行出错了: ${err.message}`)
+      })
+      .finally(() => {
+        runtime.stop()
+        this.runtime = null
+        this.currentTaskId = null
+        this.status = 'idle'
+        this.processingTaskIds.delete(task.id)
+      })
+  }
+
+  private async _executeCoordinator(task: TaskQueueItem): Promise<void> {
+    // Coordinator 调用工作流（不 spawn CLI），异步不阻塞
+    coordinatorWorkflow.run(this.groupId, task.content)
+      .then(state => {
+        sharedState.completeTask(
+          task.id,
+          true,
+          state.summary,
+          { artifacts: state.artifacts },
+        )
+        this._reply(`协调完成 🎉\n${state.summary?.substring(0, 300) || '已完成'}`)
+      })
+      .catch(err => {
+        sharedState.completeTask(task.id, false, `协调者工作流失败: ${err.message}`)
+        this._reply(`协调失败: ${err.message}`)
+      })
+      .finally(() => {
+        this.currentTaskId = null
+        this.status = 'idle'
+        this.processingTaskIds.delete(task.id)
+      })
+  }
+
+  // ── 通知处理（聊天消息）───────────────────────────────────
+
+  private async _handleNotify(notify: NotifyQueueItem): Promise<void> {
+    if (notify.sender_id === this.id) return
+
+    const content = notify.content
+    const sender = notify.sender_id
 
     const context = this._buildContext()
     const displayMsg = sender !== 'user' && sender !== 'coordinator'
@@ -103,139 +242,75 @@ export class AgentEngine {
     const config = getDefaultConfig()
     const decision = await brainDecide(config, this.role, this.name, context, displayMsg)
 
-    // 记忆
     this.memory.push({ role: 'user', content, ts: new Date().toISOString() })
 
     if (decision.action === 'chat') {
-      await this._reply(decision.content, msg)
+      await this._reply(decision.content)
       this.memory.push({ role: 'assistant', content: decision.content, ts: new Date().toISOString() })
     } else if (decision.action === 'execute') {
-      await this._reply(`收到，我来 ${decision.content.substring(0, 30)}...`, msg)
-      await this._doExecute({
-        type: 'task_dispatch',
-        task_id: `task-${crypto.randomUUID().substring(0, 8)}`,
+      await this._reply(`收到，我来 ${decision.content.substring(0, 30)}...`)
+      // 生成一个任务投递给自己（走 SharedStateCenter）
+      sharedState.pushTask({
+        group_id: this.groupId,
+        sender_id: this.id,
+        receiver_id: this.id,
         content: decision.content,
-        sender_id: sender,
       })
     } else if (decision.action === 'ask') {
-      await this._reply(decision.content, msg)
+      await this._reply(decision.content)
     } else {
-      await this._reply(decision.content, msg)
-    }
-
-    this.status = 'idle'
-  }
-
-  // ── 执行能力 ──────────────────────────────────────────────
-
-  private async _doExecute(msg: Record<string, unknown>): Promise<void> {
-    this.status = 'executing'
-    const taskId = (msg.task_id as string) || `task-${crypto.randomUUID().substring(0, 8)}`
-    this.currentTaskId = taskId
-    const taskContent = (msg.content as string) || ''
-
-    await this._publishLog(taskId, `▶ [${this.name}] 开始执行任务...`)
-
-    // 获取智能体定义
-    const agentDef = store.getAgent(this.id)
-    if (!agentDef) {
-      await this._publishLog(taskId, '❌ 找不到智能体定义')
-      this.status = 'idle'
-      this.currentTaskId = null
-      return
-    }
-
-    // 使用 Claude Code Runtime 执行
-    this.runtime = new ClaudeCodeRuntime(this.groupId, agentDef)
-    try {
-      await this._publishLog(taskId, `🚀 启动 Claude Code CLI...`)
-
-      const result = await this.runtime.execute(taskContent, taskId)
-
-      if (result.success) {
-        await this._publishLog(taskId, `✅ 任务完成`)
-        await this._reply(`任务完成 🎉\n${result.output?.substring(0, 200) || '已完成'}`, msg, taskId)
-      } else {
-        await this._publishLog(taskId, `❌ 执行失败`)
-        await this._reply(`执行出错了: ${result.output || '未知错误'}`, msg, taskId)
-      }
-    } catch (err) {
-      await this._publishLog(taskId, `❌ 执行异常: ${err}`)
-      await this._reply(`执行出错了: ${err}`, msg, taskId)
-    } finally {
-      this.runtime = null
-      this.currentTaskId = null
-      this.status = 'idle'
+      await this._reply(decision.content)
     }
   }
 
   // ── 辅助方法 ──────────────────────────────────────────────
 
-  private async _reply(
-    content: string,
-    parentMsg?: Record<string, unknown>,
-    taskId?: string,
-  ): Promise<void> {
-    await this._saveAndPublish(content, 'agent_reply', taskId, parentMsg)
+  private async _reply(content: string): Promise<void> {
+    const msg = store.createMessage({
+      group_id: this.groupId,
+      sender_id: this.id,
+      receiver_id: 'broadcast',
+      type: 'agent_reply',
+      content,
+    })
+
+    eventBus.publish(`${CHANNEL_PREFIX}${this.groupId}`, {
+      id: msg.id,
+      group_id: this.groupId,
+      sender_id: this.id,
+      receiver_id: 'broadcast',
+      type: 'agent_reply',
+      content,
+      timestamp: msg.created_at,
+    })
+
+    this._routeMentions(content)
   }
 
   private async _publishLog(taskId: string, line: string): Promise<void> {
     try {
-      const channel = `${CHANNEL_PREFIX}${this.groupId}`
-      eventBus.publish(channel, {
+      const payload = {
         id: crypto.randomUUID(),
         group_id: this.groupId,
-        task_id: taskId,
+        task_id: taskId || undefined,
         sender_id: this.id,
         receiver_id: 'broadcast',
         type: 'task_log',
         content: line,
         timestamp: new Date().toISOString(),
-      })
-    } catch (err) {
-      console.warn('发布日志失败:', err)
-    }
-  }
-
-  private async _saveAndPublish(
-    content: string,
-    msgType: string,
-    taskId?: string,
-    _parentMsg?: Record<string, unknown>,
-  ): Promise<void> {
-    // 存到 store
-    try {
+      }
+      eventBus.publish(`${CHANNEL_PREFIX}${this.groupId}`, payload)
       store.createMessage({
         group_id: this.groupId,
         sender_id: this.id,
         receiver_id: 'broadcast',
-        type: msgType,
-        content,
-        task_id: taskId,
+        type: 'task_log',
+        content: line,
+        task_id: taskId || undefined,
       })
     } catch (err) {
-      console.warn('保存消息失败:', err)
+      console.warn('发布日志失败:', err)
     }
-
-    // 发布到事件总线
-    try {
-      const channel = `${CHANNEL_PREFIX}${this.groupId}`
-      eventBus.publish(channel, {
-        id: crypto.randomUUID(),
-        group_id: this.groupId,
-        task_id: taskId,
-        sender_id: this.id,
-        receiver_id: 'broadcast',
-        type: msgType,
-        content,
-        timestamp: new Date().toISOString(),
-      })
-    } catch (err) {
-      console.warn('发布消息失败:', err)
-    }
-
-    // 检查 @mention 并路由
-    this._routeMentions(content)
   }
 
   private _buildContext(): string {
@@ -250,42 +325,30 @@ export class AgentEngine {
     const mentions = content.match(/@(\S+)/g)
     if (!mentions) return
 
-    // 防循环
     const now = Date.now() / 1000
     this.recentRoutes = Object.fromEntries(
       Object.entries(this.recentRoutes).filter(([, ts]) => now - ts < 30),
     )
 
-    // 查找目标智能体
     const members = store.listGroupMembers(this.groupId)
     const agents = store.listAgents()
 
     for (const mention of mentions) {
-      const mentionName = mention.substring(1) // 去掉 @
-
-      // 不路由给自己
+      const mentionName = mention.substring(1)
       if (mentionName === this.id || mentionName === this.name) continue
 
-      // 查找匹配的智能体
       let targetId: string | undefined
 
-      // 按 agent_id 精确匹配
       const member = members.find(m => m.agent_id === mentionName)
-      if (member) {
-        targetId = member.agent_id
-      }
+      if (member) targetId = member.agent_id
 
-      // 按 name 匹配
       if (!targetId) {
         const agent = agents.find(a => a.name === mentionName)
-        if (agent) {
-          // 确认该 agent 是群成员
-          const isMember = members.some(m => m.agent_id === agent.id)
-          if (isMember) targetId = agent.id
+        if (agent && members.some(m => m.agent_id === agent.id)) {
+          targetId = agent.id
         }
       }
 
-      // 按 alias 模糊匹配
       if (!targetId) {
         for (const m of members) {
           if (m.alias && mentionName.includes(m.alias)) {
@@ -296,25 +359,25 @@ export class AgentEngine {
       }
 
       if (!targetId || targetId === this.id) continue
-
-      // 防循环
       if (this.recentRoutes[targetId]) {
         console.log(`防循环: 跳过重复路由 ${targetId}`)
         continue
       }
       this.recentRoutes[targetId] = now
 
-      // 路由消息
-      const { agentRegistry } = require('./registry') as { agentRegistry: AgentRegistry }
-      agentRegistry.routeMessage(targetId, {
-        type: 'chat',
-        content,
-        sender_id: this.id,
+      // A2A 解耦：通过 SharedStateCenter 扔字条，不再直接调用 agentRegistry.routeMessage
+      sharedState.pushTask({
         group_id: this.groupId,
-      }, this.groupId)
+        sender_id: this.id,
+        receiver_id: targetId,
+        content,
+      })
     }
   }
-}
 
-// 前置声明（避免循环依赖）
-import type { AgentRegistry } from './registry'
+  private _resetIdle(): void {
+    this.runtime = null
+    this.currentTaskId = null
+    this.status = 'idle'
+  }
+}

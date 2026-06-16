@@ -1,7 +1,7 @@
 /**
- * 数据类型定义（对应原 SQLAlchemy ORM 模型）
+ * 数据类型定义
  *
- * PostgreSQL → 内存 Map + JSON 文件
+ * 内存 Map + JSON 文件持久化
  */
 
 // ── AgentDefinition ─────────────────────────────────────────
@@ -13,7 +13,6 @@ export interface AgentDefinition {
   system_prompt: string
   skills: string[]
   extra_skills: string[]
-  base_image: string          // 保留字段，后续可移除
   allowed_tools: string[]
   denied_tools: string[]
   startup_strategy: 'on_demand' | 'pooled' | 'always_on'
@@ -39,8 +38,6 @@ export interface AgentCreatePayload {
 export interface AgentInstance {
   id: string
   definition_id: string
-  container_id?: string       // 保留字段，不再用
-  container_name?: string     // 保留字段，不再用
   session_id?: string
   status: 'idle' | 'running' | 'error' | 'stopped'
   current_task_id?: string
@@ -56,7 +53,6 @@ export interface Group {
   id: string
   name: string
   coordinator_id: string
-  volume_name?: string        // 保留字段，不再用
   description?: string
   status: 'active' | 'archived'
   config?: Record<string, unknown>
@@ -215,4 +211,38 @@ export interface LLMConfig {
 export interface AppSettings {
   llm: LLMConfig
   claudeCodePath?: string
+}
+
+// ── Shared State (A2A 队列) ───────────────────────────────
+
+export interface TaskQueueItem {
+  id: string
+  group_id: string
+  sender_id: string
+  receiver_id: string
+  content: string
+  data?: Record<string, unknown>
+  created_at: string
+  status: 'pending' | 'claimed' | 'completed' | 'failed'
+  claimed_by?: string
+  result?: string
+  result_data?: Record<string, unknown>
+  completed_at?: string
+}
+
+export interface NotifyQueueItem {
+  id: string
+  group_id: string
+  type: 'task_complete' | 'task_failed' | 'agent_reply' | 'task_log' | 'coordinator_reply'
+  sender_id: string
+  receiver_id: string
+  content: string
+  data?: Record<string, unknown>
+  created_at: string
+}
+
+export interface GroupQueueSnapshot {
+  group_id: string
+  tasks: TaskQueueItem[]
+  notifies: NotifyQueueItem[]
 }

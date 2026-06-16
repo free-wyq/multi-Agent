@@ -1,7 +1,6 @@
 /**
  * 内存状态管理 + JSON 文件持久化
  *
- * 替代 PostgreSQL：
  * - 每个实体类型一个 Map<string, T>
  * - 提供统一 CRUD 方法
  * - 写操作自动触发持久化
@@ -57,7 +56,6 @@ class AppStore {
       system_prompt: payload.system_prompt || '',
       skills: payload.skills || [],
       extra_skills: payload.extra_skills || [],
-      base_image: 'agent-base:latest',
       allowed_tools: [],
       denied_tools: [],
       startup_strategy: 'on_demand',

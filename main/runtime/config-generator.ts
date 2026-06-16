@@ -1,7 +1,5 @@
 /**
  * CLAUDE.md + settings.json 配置生成
- *
- * 从 Python runtime/config_generator.py 移植
  */
 
 const CLAUDE_MD_TEMPLATE = `# {name} 的角色定义

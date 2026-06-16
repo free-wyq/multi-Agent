@@ -33,11 +33,10 @@ interface BusMessageData {
 /**
  * 实时事件 hook：通过 Electron IPC 接收消息总线事件
  *
- * 替代原 WebSocket 连接：
  * - onBusEvent 监听主进程转发的总线消息
- * - 返回值类型 LogEntry[] / TaskStatusEvent[] 保持不变
+ * - 返回值类型 LogEntry[] / TaskStatusEvent[]
  */
-export function useWebSocket(groupId: string | null) {
+export function useBusEvent(groupId: string | null) {
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [statusEvents, setStatusEvents] = useState<TaskStatusEvent[]>([])
 
@@ -82,12 +81,4 @@ export function useWebSocket(groupId: string | null) {
   }, [groupId])
 
   return { logs, statusEvents }
-}
-
-/**
- * 向后兼容
- * @deprecated 请使用 useWebSocket(groupId)
- */
-export function useMockWebSocket(enabled: boolean, groupId?: string | null) {
-  return useWebSocket(enabled ? (groupId ?? null) : null)
 }

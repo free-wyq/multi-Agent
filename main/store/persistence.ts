@@ -1,7 +1,6 @@
 /**
  * JSON 文件持久化
  *
- * 替代 PostgreSQL：
  * - 每个实体类型一个 JSON 文件
  * - 写入 500ms 防抖，原子写入（先 .tmp 再 rename）
  * - 启动时加载填充内存
@@ -9,12 +8,15 @@
 
 import * as fs from 'fs'
 import * as path from 'path'
-import type { AgentDefinition, Group, GroupMember, Task, Message, GroupFile } from './types'
+import type { AgentDefinition, Group, GroupMember, Task, Message, GroupFile, GroupQueueSnapshot } from './types'
 
 const DATA_DIR = path.join(process.cwd(), 'data')
 
 // 防抖定时器
 const _debounceTimers = new Map<string, NodeJS.Timeout>()
+
+// 队列防抖定时器（按 groupId）
+const _queueDebounceTimers = new Map<string, NodeJS.Timeout>()
 
 // 确保数据目录存在
 function ensureDataDir(): void {
@@ -73,16 +75,65 @@ export function scheduleSave(entityName: string, data: unknown): void {
 }
 
 /**
+ * 队列持久化：按 groupId 存储到 data/queues/{groupId}.json
+ */
+export function scheduleSaveQueue(groupId: string, data: GroupQueueSnapshot): void {
+  const existing = _queueDebounceTimers.get(groupId)
+  if (existing) clearTimeout(existing)
+
+  const timer = setTimeout(() => {
+    const queueDir = path.join(DATA_DIR, 'queues')
+    if (!fs.existsSync(queueDir)) {
+      fs.mkdirSync(queueDir, { recursive: true })
+    }
+    const filePath = path.join(queueDir, `${groupId}.json`)
+    try {
+      atomicWrite(filePath, data)
+    } catch (err) {
+      console.error(`Failed to save queue for group ${groupId}:`, err)
+    }
+    _queueDebounceTimers.delete(groupId)
+  }, 500)
+
+  _queueDebounceTimers.set(groupId, timer)
+}
+
+export async function loadAllQueues(): Promise<GroupQueueSnapshot[]> {
+  const queueDir = path.join(DATA_DIR, 'queues')
+  if (!fs.existsSync(queueDir)) return []
+
+  const snapshots: GroupQueueSnapshot[] = []
+  try {
+    const files = fs.readdirSync(queueDir).filter(f => f.endsWith('.json'))
+    for (const file of files) {
+      try {
+        const content = fs.readFileSync(path.join(queueDir, file), 'utf-8')
+        snapshots.push(JSON.parse(content) as GroupQueueSnapshot)
+      } catch {
+        // 忽略损坏的队列文件
+      }
+    }
+  } catch {
+    return []
+  }
+  return snapshots
+}
+
+/**
  * 立即刷盘（应用退出时调用）
  */
 export async function flushPersistence(): Promise<void> {
-  // 清除所有防抖定时器
+  // 清除所有实体防抖定时器
   for (const [, timer] of _debounceTimers) {
     clearTimeout(timer)
   }
   _debounceTimers.clear()
-  // 当前 store 会在各自调用 scheduleSave 时触发
-  // flushPersistence 只是确保没有定时器在等待
+
+  // 清除所有队列防抖定时器
+  for (const [, timer] of _queueDebounceTimers) {
+    clearTimeout(timer)
+  }
+  _queueDebounceTimers.clear()
 }
 
 /**
@@ -133,8 +184,10 @@ export function listFiles(groupId: string): GroupFile[] {
 
 export const persistence = {
   scheduleSave,
+  scheduleSaveQueue,
   flushPersistence,
   initPersistence,
   loadAll,
+  loadAllQueues,
   listFiles,
 }
