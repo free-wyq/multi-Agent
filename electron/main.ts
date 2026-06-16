@@ -1,6 +1,11 @@
 import { app, BrowserWindow } from 'electron'
 import * as path from 'path'
 
+// WSL2/Linux 环境禁用 GPU 加速，避免 d3d12 驱动崩溃
+if (process.platform === 'linux') {
+  app.disableHardwareAcceleration()
+}
+
 let mainWindow: BrowserWindow | null = null
 
 function createWindow() {
