@@ -1,1 +1,0 @@
-仓库地址: git@github.com:team/mall.git

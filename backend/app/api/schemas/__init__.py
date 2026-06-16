@@ -1,3 +1,0 @@
-"""
-Pydantic Schema 包
-"""

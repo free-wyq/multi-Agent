@@ -1,73 +1,62 @@
-# CLAUDE.md
-
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Status
-
-🟡 开发阶段。项目初始化已完成，正在进行 task-002 数据模型设计。
-
-## Architecture
+# Multi-Agent 协作桌面应用
 
 多智能体协作框架，解决软件工程虚拟交付问题。
 
-- **群主**：LangGraph 状态图 + LangChain ChatAnthropic，运行在后端进程内
-- **子智能体**：Claude Code CLI 实例，运行在 Docker 容器内
-- **中间件**：智能体需要的 Redis/MySQL 由 Claude Code 运行时自装自起，用户不感知
-- **镜像**：统一 Ubuntu + Claude Code CLI 单一基础镜像
-- **技能**：内置技能自动映射 + 技能市场可选挂载
+## 架构
 
-## Tech Stack
+- **桌面框架**：Electron + TypeScript
+- **前端**：React + Vite + Ant Design + ReactFlow
+- **主进程**：Node.js/TS — 状态管理、进程管理、LLM 调用
+- **子智能体**：本地 Claude Code CLI 实例（child_process.spawn）
+- **数据持久化**：内存 Map + JSON 文件
+- **事件总线**：进程内 EventEmitter（替代 Redis）
+- **LLM 调用**：直接 HTTP API（OpenAI 兼容端点）
 
-| 层 | 技术 |
-|----|------|
-| 前端 | React + Vite + Ant Design + ReactFlow |
-| 后端 | Python / FastAPI |
-| 群主调度 | LangGraph + LangChain |
-| 子智能体 | Claude Code CLI/SDK |
-| 容器 | Docker（Ubuntu + Claude Code CLI） |
-| 数据库 | PostgreSQL + Redis |
-| DAG 可视化 | LangGraph → API → ReactFlow |
+## 快速开始
 
-## Environment
+```bash
+# 安装依赖
+npm install
 
-- **Python** — available via `python3` / `pip3`
-- **Node.js** — managed via `nvm`
-- **Docker** — 已启动，socket: `/var/run/docker.sock`
+# 开发模式
+npm run dev
 
-## Local Infrastructure（本机开发环境）
-
-本机已有以下服务，`.env` 中配置连接：
-
-| 服务 | 容器名 | 连接信息 |
-|------|--------|---------|
-| PostgreSQL | agenticx-postgres-lite | localhost:5432, user: agenticx, db: multi_agent |
-| Redis | agenticx-redis-lite | localhost:6379 |
-
-**注意**：这些是本机开发环境的配置。其他人启动项目时，需要自行准备 PostgreSQL 和 Redis（可用 docker-compose 或已有实例），并在 `.env` 中配置对应连接信息。
-
-## Project Structure
-
-```
-backend/
-  app/
-    api/        # REST API 路由
-    models/     # SQLAlchemy ORM 模型
-    services/   # 业务逻辑
-    core/       # 配置、依赖注入
-    main.py     # FastAPI 入口
-  pyproject.toml
-frontend/
-  src/
-    pages/      # 页面组件
-    components/ # 通用组件
-    services/   # API 调用
-    hooks/      # React hooks
-  package.json
-docker/
-  docker-compose.yml
-docs/
+# 打包
+npm run electron:build
 ```
 
-## Claude Code Settings
+## 项目结构
 
-Project-level permissions are configured in `settings.local.json` and `.claude/settings.local.json` to allow `pip`/`pip3` installs, `sudo apt-get`, and `nvm` usage. Update these files if new tool permissions are needed.
+```
+electron/
+  main.ts                # Electron 主进程入口
+  preload.ts             # preload 脚本，暴露 IPC API
+src/                     # Renderer 进程（React 前端）
+  pages/                 # 页面组件
+  components/            # 通用组件
+  services/api.ts        # IPC API 调用层
+  hooks/useWebSocket.ts  # 实时事件 hook
+  ipc/                   # IPC 通道定义 + 类型
+main/                    # 主进程业务逻辑
+  store/                 # 内存状态 + JSON 持久化
+  bus/                   # EventEmitter 事件总线
+  coordinator/           # 工作流 + LLM + 提示词
+  agent-engine/          # 智能体引擎 + 大脑 + 注册表
+  runtime/               # Claude Code CLI 进程管理
+  ipc-handlers/          # IPC 处理器
+data/                    # 运行时数据（JSON + 群组文件）
+```
+
+## 核心概念
+
+- **智能体（Agent）**：角色定义 + system prompt，映射到 CLAUDE.md
+- **群组（Group）**：协作单元，群主 + 成员
+- **任务（Task）**：DAG 依赖调度，A2A 协议状态机
+- **消息（Message）**：智能体间通信，@mention 路由
+- **协调者（Coordinator）**：需求分析 → 任务拆解 → 调度 → 监控 → 汇总
+
+## 环境要求
+
+- Node.js 20+
+- Claude Code CLI 已安装（或设置 CLAUDE_CODE_PATH 环境变量）
+- LLM API 密钥（OpenAI / DeepSeek / 其他兼容端点）

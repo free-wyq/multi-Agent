@@ -1,0 +1,21 @@
+appId: com.agenticx.multi-agent
+productName: Multi-Agent
+directories:
+  output: release
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - main/**/*
+extraMetadata:
+  main: dist-electron/main.js
+mac:
+  target:
+    - dmg
+    - zip
+win:
+  target:
+    - nsis
+linux:
+  target:
+    - AppImage
+    - deb
