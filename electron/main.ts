@@ -40,23 +40,27 @@ app.whenReady().then(async () => {
   const { initPersistence } = await import('../main/store/persistence')
   await initPersistence()
 
-  // 2. 初始化事件总线
+  // 2. 加载共享状态中心队列
+  const { sharedState } = await import('../main/store/shared-state')
+  await sharedState.loadAll()
+
+  // 3. 初始化事件总线
   const { eventBus } = await import('../main/bus/event-bus')
   eventBus.initialize()
 
-  // 3. 初始化 Store（从 JSON 文件加载数据到内存）
+  // 4. 初始化 Store
   const { store } = await import('../main/store/store')
   await store.loadFromPersistence()
 
-  // 4. 注册所有 IPC handlers
+  // 5. 注册所有 IPC handlers
   const { registerAllHandlers } = await import('../main/ipc-handlers')
   registerAllHandlers()
 
-  // 5. 启动 AgentEngine 注册表
+  // 6. 启动 AgentEngine 注册表（含 coordinator）
   const { agentRegistry } = await import('../main/agent-engine/registry')
   await agentRegistry.loadFromStore()
 
-  // 6. 创建窗口
+  // 7. 创建窗口
   createWindow()
 
   app.on('activate', () => {

@@ -11,6 +11,10 @@
 - **数据持久化**：内存 Map + JSON 文件
 - **事件总线**：进程内 EventEmitter
 - **LLM 调用**：直接 HTTP API（OpenAI 兼容端点）
+- **A2A 通信**：SharedStateCenter 共享状态中心（扔字条式解耦）
+  - 任务队列（TaskQueue）+ 通知队列（NotifyQueue）
+  - 父/子 agent 对等，通过轮询收件箱通信
+  - 详见 [docs/architecture-a2a.md](docs/architecture-a2a.md)
 
 ## 快速开始
 

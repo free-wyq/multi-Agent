@@ -8,6 +8,8 @@ import {
   TASK_LIST, TASK_GET, TASK_CREATE, TASK_UPDATE, TASK_DELETE, TASK_READY,
 } from '../../src/ipc/channels'
 
+import type { TaskCreatePayload } from '../store/types'
+
 export function registerTaskHandlers(): void {
   ipcMain.handle(TASK_LIST, (_event, groupId?: string) => {
     if (groupId) return store.listTasksByGroup(groupId)
@@ -18,11 +20,11 @@ export function registerTaskHandlers(): void {
     return store.getTask(id) || null
   })
 
-  ipcMain.handle(TASK_CREATE, (_event, data: never) => {
+  ipcMain.handle(TASK_CREATE, (_event, data: TaskCreatePayload) => {
     return store.createTask(data)
   })
 
-  ipcMain.handle(TASK_UPDATE, (_event, id: string, data: never) => {
+  ipcMain.handle(TASK_UPDATE, (_event, id: string, data: Partial<TaskCreatePayload>) => {
     return store.updateTask(id, data)
   })
 

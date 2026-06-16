@@ -47,11 +47,11 @@ export function registerRuntimeHandlers(): void {
     // 更新任务状态
     store.updateTask(taskId, {
       status: result.success ? 'completed' : 'failed',
-      exit_code: result.exitCode,
+      exit_code: result.exitCode ?? undefined,
       result_summary: result.output?.substring(0, 500),
     })
 
-    store.updateInstance(instanceId, { status: 'idle', current_task_id: null })
+    store.updateInstance(instanceId, { status: 'idle', current_task_id: undefined })
     return result
   })
 

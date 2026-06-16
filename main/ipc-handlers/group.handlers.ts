@@ -11,6 +11,8 @@ import {
   GROUP_LIST_FILES,
 } from '../../src/ipc/channels'
 
+import type { GroupCreatePayload } from '../store/types'
+
 export function registerGroupHandlers(): void {
   ipcMain.handle(GROUP_LIST, () => {
     return store.listGroups()
@@ -20,9 +22,18 @@ export function registerGroupHandlers(): void {
     return store.getGroup(id) || null
   })
 
-  ipcMain.handle(GROUP_CREATE, (_event, data: never) => {
+  ipcMain.handle(GROUP_CREATE, (_event, data: GroupCreatePayload) => {
     const group = store.createGroup(data)
-    // 如果有成员，为每个成员启动 AgentEngine
+
+    // 启动 coordinator 引擎（群主）
+    if (group.coordinator_id) {
+      const coordinator = store.getAgent(group.coordinator_id)
+      if (coordinator) {
+        agentRegistry.addEngine(group.id, coordinator)
+      }
+    }
+
+    // 启动子 agent 引擎
     if (data.member_ids) {
       for (const agentId of data.member_ids) {
         const agent = store.getAgent(agentId)
@@ -34,7 +45,7 @@ export function registerGroupHandlers(): void {
     return group
   })
 
-  ipcMain.handle(GROUP_UPDATE, (_event, id: string, data: never) => {
+  ipcMain.handle(GROUP_UPDATE, (_event, id: string, data: Partial<GroupCreatePayload>) => {
     return store.updateGroup(id, data)
   })
 

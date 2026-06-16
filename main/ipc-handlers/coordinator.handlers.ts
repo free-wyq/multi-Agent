@@ -1,18 +1,32 @@
 /**
- * Coordinator IPC Handlers
+ * Coordinator IPC Handlers（A2A 架构改造后）
+ *
+ * COORDINATOR_SUBMIT 不再直接调用 coordinatorWorkflow.run()，
+ * 而是通过 sharedState.pushTask() 扔字条给 coordinator 引擎的收件箱，
+ * 由 coordinator engine 主动消费后执行工作流。
  */
 
 import { ipcMain } from 'electron'
 import { store } from '../store/store'
-import { coordinatorWorkflow } from '../coordinator/workflow'
+import { sharedState } from '../store/shared-state'
 import { COORDINATOR_SUBMIT, COORDINATOR_GET_DAG, COORDINATOR_GET_STATUS } from '../../src/ipc/channels'
 
 export function registerCoordinatorHandlers(): void {
   ipcMain.handle(COORDINATOR_SUBMIT, async (_event, groupId: string, requirement: string) => {
-    // 异步执行工作流，立即返回
-    coordinatorWorkflow.run(groupId, requirement).catch(err => {
-      console.error('Coordinator workflow error:', err)
+    const group = store.getGroup(groupId)
+    if (!group || !group.coordinator_id) {
+      throw new Error(`Group ${groupId} has no coordinator`)
+    }
+
+    // A2A：扔字条给 coordinator 引擎的收件箱
+    sharedState.pushTask({
+      group_id: groupId,
+      sender_id: 'user',
+      receiver_id: group.coordinator_id,
+      content: requirement,
+      data: { type: 'coordinator_submit' },
     })
+
     return { status: 'started', group_id: groupId }
   })
 
