@@ -506,7 +506,9 @@ export default function GroupPage() {
           isCoordinator: true,
         }]
       : []),
-    ...members.map((m) => ({ ...m, isCoordinator: false })),
+    ...members
+      .filter((m) => m.agent_id !== chatGroup?.coordinator_id)
+      .map((m) => ({ ...m, isCoordinator: false })),
   ]
 
   return (

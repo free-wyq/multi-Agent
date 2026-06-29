@@ -10,7 +10,16 @@ import * as fs from 'fs'
 import * as path from 'path'
 import type { AgentDefinition, Group, GroupMember, Task, Message, GroupFile, GroupQueueSnapshot } from './types'
 
-const DATA_DIR = path.join(process.cwd(), 'data')
+// 使用 Electron 标准用户数据目录（跨平台）
+// Windows: C:\Users\xxx\AppData\Roaming\multi-agent\
+// macOS:   ~/Library/Application Support/multi-agent/
+// Linux:   ~/.config/multi-agent/
+const DATA_DIR = process.env.MULTI_AGENT_DATA_DIR || path.join(process.cwd(), 'data')
+
+// 确保数据目录存在
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true })
+}
 
 // 防抖定时器
 const _debounceTimers = new Map<string, NodeJS.Timeout>()

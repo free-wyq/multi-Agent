@@ -12,12 +12,14 @@ import { store } from '../store/store'
 import { sharedState } from '../store/shared-state'
 import { eventBus, CHANNEL_PREFIX } from '../bus/event-bus'
 import { brainDecide } from './brain'
+import { coordinatorBrainDecide } from './coordinator-brain'
 import { getDefaultConfig } from '../coordinator/llm'
 import { ClaudeCodeRuntime } from '../runtime/claude-code-runtime'
 import { coordinatorWorkflow } from '../coordinator/workflow'
 import type {
   AgentDefinition, BrainDecision, TaskQueueItem, NotifyQueueItem,
 } from '../store/types'
+import type { CoordinatorBrainDecision, DispatchStep } from './coordinator-brain'
 
 export type EngineStatus = 'idle' | 'thinking' | 'executing' | 'offline'
 
@@ -44,6 +46,10 @@ export class AgentEngine {
 
   /** 正在处理的本地任务（防止重复消费） */
   private processingTaskIds = new Set<string>()
+
+  /** ===== Coordinator 调度状态 ===== */
+  private dispatchPlan: DispatchStep[] = []
+  private dispatchStep = 0
 
   constructor(agentDef: AgentDefinition, groupId: string) {
     this.id = agentDef.id
@@ -189,6 +195,18 @@ export class AgentEngine {
         } else {
           this._reply(`执行出错了: ${result.output || '未知错误'}`)
         }
+        // 自动向 coordinator 汇报子任务完成
+        const group = store.getGroup(this.groupId)
+        if (group?.coordinator_id && group.coordinator_id !== this.id) {
+          sharedState.pushNotify({
+            group_id: this.groupId,
+            type: 'agent_reply',
+            sender_id: this.id,
+            receiver_id: group.coordinator_id,
+            content: `步骤完成：${task.content}\n\n结果：${result.output?.substring(0, 200) || '已完成'}`,
+            data: { task_id: task.id, success: result.success },
+          })
+        }
       })
       .catch((err: Error) => {
         sharedState.completeTask(task.id, false, `执行异常: ${err.message}`)
@@ -234,6 +252,13 @@ export class AgentEngine {
     const content = notify.content
     const sender = notify.sender_id
 
+    // ===== Coordinator：走调度大脑 =====
+    if (this.role === 'coordinator') {
+      await this._handleNotifyAsCoordinator(content, sender)
+      return
+    }
+
+    // ===== 普通成员：走通用 brainDecide =====
     const context = this._buildContext()
     const displayMsg = sender !== 'user' && sender !== 'coordinator'
       ? `[来自智能体 ${sender}] ${content}`
@@ -249,7 +274,6 @@ export class AgentEngine {
       this.memory.push({ role: 'assistant', content: decision.content, ts: new Date().toISOString() })
     } else if (decision.action === 'execute') {
       await this._reply(`收到，我来 ${decision.content.substring(0, 30)}...`)
-      // 生成一个任务投递给自己（走 SharedStateCenter）
       sharedState.pushTask({
         group_id: this.groupId,
         sender_id: this.id,
@@ -261,6 +285,127 @@ export class AgentEngine {
     } else {
       await this._reply(decision.content)
     }
+  }
+
+  /** Coordinator 专属：调度中枢 */
+  private async _handleNotifyAsCoordinator(content: string, sender: string): Promise<void> {
+    const config = getDefaultConfig()
+    const members = store.listGroupMembers(this.groupId)
+
+    // 构建成员列表
+    const memberList = members.map(m => ({
+      id: m.agent_id,
+      name: m.agent_name,
+      role: m.agent_role,
+    }))
+
+    // 构建对话上下文摘要
+    const conversation = this.memory.slice(-8).join('\n')
+
+    // 构建当前调度状态
+    const dispatchState = this.dispatchPlan.length > 0
+      ? this.dispatchPlan.map(s => {
+        let icon = '⏳'
+        if (s.status === 'completed') icon = '✅'
+        if (s.status === 'failed') icon = '❌'
+        if (s.status === 'dispatched') icon = '🔄'
+        return `${icon} 步骤${s.step}: ${s.agent_name} ${icon}`
+      }).join('\n')
+      : ''
+
+    const decision = await coordinatorBrainDecide(config, {
+      name: this.name,
+      members: memberList,
+      conversation,
+      dispatchState,
+      sender,
+      message: content,
+    })
+
+    this.memory.push({ role: 'user', content: `[${sender}] ${content}`, ts: new Date().toISOString() })
+
+    // --- action: chat --- 直接回复，不涉及调度
+    if (decision.action === 'chat') {
+      await this._reply(decision.content)
+      this.memory.push({ role: 'assistant', content: decision.content, ts: new Date().toISOString() })
+      return
+    }
+
+    // --- action: ask --- 向用户提问
+    if (decision.action === 'ask') {
+      await this._reply(decision.content)
+      return
+    }
+
+    // --- action: dispatch --- 生成调度计划并启动
+    if (decision.action === 'dispatch' && decision.plan && decision.plan.length > 0) {
+      this.dispatchPlan = decision.plan
+      this.dispatchStep = 0
+
+      // 在群里官宣调度计划
+      const planSummary = decision.plan
+        .map(s => `${s.step}. ${s.agent_name} → ${s.instruction.substring(0, 40)}...`)
+        .join('\n')
+
+      await this._reply(`📋 已制定协作计划，开始调度：\n${planSummary}`)
+
+      // 立即派发第一步
+      this._dispatchNextStep()
+      return
+    }
+
+    // --- action: continue --- 收到成员汇报，继续下一步
+    if (decision.action === 'continue') {
+      // 更新当前步骤状态
+      const currentStep = this.dispatchPlan.find(s => s.status === 'dispatched')
+      if (currentStep) {
+        currentStep.result = content
+        currentStep.status = 'completed'
+      }
+
+      // 回复确认
+      await this._reply(decision.content || '收到汇报，继续下一步。')
+
+      // 继续派发后续步骤
+      this._dispatchNextStep()
+    }
+  }
+
+  /** 派发下一个待执行的步骤 */
+  private _dispatchNextStep(): void {
+    if (!this.dispatchPlan.length) return
+
+    // 找到第一个 pending 且依赖已完成的步骤
+    const next = this.dispatchPlan.find(s => {
+      if (s.status !== 'pending') return false
+      return s.depends_on.every(depStepNum => {
+        const dep = this.dispatchPlan.find(d => d.step === depStepNum)
+        return dep?.status === 'completed'
+      })
+    })
+
+    if (!next) {
+      // 所有步骤都完成了，汇总
+      const allDone = this.dispatchPlan.every(s => s.status === 'completed' || s.status === 'failed')
+      if (allDone) {
+        const summary = this.dispatchPlan.map(s =>
+          `${s.status === 'completed' ? '✅' : '❌'} ${s.agent_name}: ${s.result || s.instruction}`
+        ).join('\n')
+        setTimeout(() => {
+          this._reply(`🎉 全部完成！协作结果汇总：\n${summary}`).catch(() => {})
+        }, 1000)
+        this.dispatchPlan = []
+        this.dispatchStep = 0
+      }
+      return
+    }
+
+    // 标记为已派发，然后 @该成员
+    next.status = 'dispatched'
+    this.dispatchStep = next.step
+
+    const mentionMsg = `@${next.agent_name} \n\n${next.instruction}\n\n完成后请 @我 汇报。`
+    this._reply(mentionMsg).catch(err => console.error('[Coordinator] 派发步骤失败:', err))
   }
 
   // ── 辅助方法 ──────────────────────────────────────────────

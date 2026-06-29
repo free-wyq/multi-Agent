@@ -82,7 +82,13 @@ export function setClaudeCodePath(p: string): void {
 
 /**
  * 获取当前工作目录（跨平台）
+ *
+ * 使用 Electron 标准用户数据目录：
+ * Windows: C:\Users\xxx\AppData\Roaming\multi-agent\group_files\{groupId}
+ * macOS:   ~/Library/Application Support/multi-agent/group_files/{groupId}
+ * Linux:   ~/.config/multi-agent/group_files/{groupId}
  */
 export function getGroupWorkDir(groupId: string): string {
-  return path.join(process.cwd(), 'data', 'group_files', groupId)
+  const dataDir = process.env.MULTI_AGENT_DATA_DIR || path.join(process.cwd(), 'data')
+  return path.join(dataDir, 'group_files', groupId)
 }
