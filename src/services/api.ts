@@ -1,8 +1,12 @@
 /**
- * API 层：Electron IPC 调用
+ * API 层：Tauri invoke 调用（替代 Electron IPC）
  *
- * 所有接口签名保持不变，页面组件无需修改
+ * 所有接口签名与旧 electronAPI 保持一致，页面组件尽量少改。
+ * 命令名对应 Rust 端 #[tauri::command] 的函数名（snake_case）。
  */
+
+import { invoke } from '@tauri-apps/api/core'
+import { listen, type UnlistenFn } from '@tauri-apps/api/event'
 
 // ── 类型定义 ──────────────────────────────────────────────────────
 
@@ -11,7 +15,11 @@ export interface AgentDefinition {
   name: string
   role: string
   extra_skills?: string[]
+  skills?: string[]
   system_prompt?: string
+  model?: string
+  max_turns?: number
+  description?: string | null
   created_at: string
   updated_at: string
 }
@@ -20,7 +28,9 @@ export interface AgentCreatePayload {
   name: string
   role: string
   extra_skills?: string[]
+  skills?: string[]
   system_prompt?: string
+  description?: string
 }
 
 export interface Group {
@@ -33,11 +43,6 @@ export interface Group {
   updated_at: string
 }
 
-export interface GroupWithDetails extends Group {
-  members: GroupMember[]
-  tasks: Task[]
-}
-
 export interface GroupMember {
   id: string
   group_id: string
@@ -46,12 +51,21 @@ export interface GroupMember {
   joined_at: string
   agent_name: string
   agent_role: string
+  // Rust 端 GroupMemberWithAgent 用 #[serde(flatten)]，前端平铺访问即可，
+  // member 字段保留以兼容（可能存在也可能不存在）
+  member?: {
+    id: string
+    group_id: string
+    agent_id: string
+    alias: string | null
+    joined_at: string
+  }
 }
 
 export interface GroupFile {
   name: string
   size: number
-  modified_at: number
+  modified_at: string
 }
 
 export interface GroupCreatePayload {
@@ -109,56 +123,83 @@ export interface MessageCreatePayload {
   group_id: string
   task_id?: string
   sender_id: string
-  receiver_id: string
-  type: string
+  receiver_id?: string
+  type?: string
   content?: string
   data?: Record<string, unknown>
 }
 
-// ── Electron IPC 调用 ──────────────────────────────────────────
-
-const api = window.electronAPI
-
 // ── Agent API ────────────────────────────────────────────────
 
 export const agentApi = {
-  list: () => api.agentList(),
-  get: (id: string) => api.agentGet(id),
-  create: (body: AgentCreatePayload) => api.agentCreate(body),
-  update: (id: string, body: Partial<AgentCreatePayload>) => api.agentUpdate(id, body),
-  delete: (id: string) => api.agentDelete(id),
+  list: () => invoke<AgentDefinition[]>('list_agents'),
+  get: (id: string) => invoke<AgentDefinition | null>('get_agent', { id }),
+  create: (body: AgentCreatePayload) => invoke<AgentDefinition>('create_agent', { payload: body }),
+  update: (id: string, body: Partial<AgentCreatePayload>) =>
+    invoke<AgentDefinition | null>('update_agent', { id, payload: body }),
+  delete: (id: string) => invoke<boolean>('delete_agent', { id }),
 }
 
 // ── Group API ────────────────────────────────────────────────
 
 export const groupApi = {
-  list: () => api.groupList(),
-  get: (id: string) => api.groupGet(id),
-  create: (body: GroupCreatePayload) => api.groupCreate(body),
-  update: (id: string, body: Partial<GroupCreatePayload>) => api.groupUpdate(id, body),
-  delete: (id: string) => api.groupDelete(id),
-  listMembers: (id: string) => api.groupListMembers(id),
-  addMember: (id: string, agent_id: string, alias?: string) => api.groupAddMember(id, agent_id, alias),
-  removeMember: (id: string, memberId: string) => api.groupRemoveMember(id, memberId),
-  listFiles: (id: string) => api.groupListFiles(id),
+  list: () => invoke<Group[]>('list_groups'),
+  get: (id: string) => invoke<Group | null>('get_group', { id }),
+  create: (body: GroupCreatePayload) => invoke<Group>('create_group', { payload: body }),
+  update: (id: string, body: Partial<GroupCreatePayload>) =>
+    invoke<Group | null>('update_group', { id, payload: body }),
+  delete: (id: string) => invoke<boolean>('delete_group', { id }),
+  listMembers: (id: string) => invoke<GroupMember[]>('group_list_members', { groupId: id }),
+  addMember: (id: string, agent_id: string, alias?: string) =>
+    invoke<GroupMember>('group_add_member', { groupId: id, agentId: agent_id, alias }),
+  removeMember: (id: string, memberId: string) =>
+    invoke<boolean>('group_remove_member', { groupId: id, memberId }),
+  listFiles: (id: string) => invoke<GroupFile[]>('group_list_files', { groupId: id }),
 }
 
 // ── Task API ─────────────────────────────────────────────────
 
 export const taskApi = {
-  list: (groupId: string) => api.taskList(groupId),
-  get: (id: string) => api.taskGet(id),
-  create: (body: TaskCreatePayload) => api.taskCreate(body),
-  update: (id: string, body: Partial<TaskCreatePayload>) => api.taskUpdate(id, body),
-  delete: (id: string) => api.taskDelete(id),
-  ready: (groupId: string) => api.taskReady(groupId),
+  list: (groupId: string) => invoke<Task[]>('list_tasks', { groupId }),
+  get: (id: string) => invoke<Task | null>('get_task', { id }),
+  create: (body: TaskCreatePayload) => invoke<Task>('create_task', { payload: body }),
+  update: (id: string, body: Partial<TaskCreatePayload>) =>
+    invoke<Task | null>('update_task', { id, payload: body }),
+  delete: (id: string) => invoke<boolean>('delete_task', { id }),
+  ready: (groupId: string) => invoke<Task[]>('task_ready', { groupId }),
 }
 
 // ── Message API ─────────────────────────────────────────────
 
 export const messageApi = {
-  listByGroup: (groupId: string, limit = 100) => api.messageListByGroup(groupId, limit),
-  listByTask: (taskId: string, limit = 100) => api.messageListByTask(taskId, limit),
-  send: (body: MessageCreatePayload) => api.messageSend(body),
-  clearByGroup: (groupId: string) => api.messageClearByGroup(groupId),
+  listByGroup: (groupId: string, limit = 100) =>
+    invoke<Message[]>('list_messages', { groupId, limit }),
+  listByTask: (taskId: string, limit = 100) =>
+    invoke<Message[]>('list_messages_by_task', { taskId, limit }),
+  send: (body: MessageCreatePayload) => invoke<Message>('send_message', { payload: body }),
+  clearByGroup: (groupId: string) => invoke<boolean>('clear_messages_by_group', { groupId }),
+}
+
+// ── 实时事件：Tauri events ──────────────────────────────────
+
+export interface BusEventData {
+  id: string
+  group_id: string
+  task_id: string | null
+  sender_id: string
+  receiver_id: string
+  type: string
+  content: string | null
+  data: unknown
+  timestamp: string
+}
+
+/** 监听某群组的总线事件，返回取消监听函数 */
+export function onBusEvent(
+  groupId: string,
+  callback: (data: BusEventData) => void,
+): Promise<UnlistenFn> {
+  return listen<BusEventData>(`bus-event:${groupId}`, (event) => {
+    callback(event.payload)
+  })
 }

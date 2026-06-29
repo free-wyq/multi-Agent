@@ -1,28 +1,17 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import electron from 'vite-plugin-electron'
-import renderer from 'vite-plugin-electron-renderer'
 
+// Tauri 模式：前端走纯 react 插件，产物输出到 dist/ 供 src-tauri 加载
+// （原 Electron 主进程/preload 不再构建）
 export default defineConfig({
-  plugins: [
-    react(),
-    electron([
-      {
-        // 主进程入口
-        entry: 'electron/main.ts',
-      },
-      {
-        // preload 脚本
-        entry: 'electron/preload.ts',
-        onstart(args) {
-          args.reload()
-        },
-      },
-    ]),
-    renderer(),
-  ],
+  plugins: [react()],
+  // Tauri dev 时 vite dev server 仍由 cargo tauri 启动并注入
   server: {
     port: 5173,
-    host: true,
+    strictPort: true,
+  },
+  build: {
+    outDir: 'dist',
+    emptyOutDir: true,
   },
 })

@@ -920,7 +920,7 @@ export default function GroupPage() {
                                 {file.name}
                               </div>
                               <div style={{ fontSize: 11, color: '#999', marginTop: 1 }}>
-                                {formatFileSize(file.size)} · {new Date(file.modified_at * 1000).toLocaleDateString()}
+                                {formatFileSize(file.size)} · {new Date(file.modified_at).toLocaleDateString()}
                               </div>
                             </div>
                           </div>

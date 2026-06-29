@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { onBusEvent, type BusEventData } from '../services/api'
 
 export interface LogEntry {
   id: string
@@ -17,23 +18,10 @@ export interface TaskStatusEvent {
   updatedAt: string
 }
 
-/** Bus 消息的 data 字段结构 */
-interface BusMessageData {
-  id: string
-  group_id: string
-  task_id: string | null
-  sender_id: string
-  receiver_id: string
-  type: string
-  content: string | null
-  data: unknown
-  timestamp: string
-}
-
 /**
- * 实时事件 hook：通过 Electron IPC 接收消息总线事件
+ * 实时事件 hook：通过 Tauri events 接收消息总线事件
  *
- * - onBusEvent 监听主进程转发的总线消息
+ * - onBusEvent 监听主进程 app.emit 的总线消息
  * - 返回值类型 LogEntry[] / TaskStatusEvent[]
  */
 export function useBusEvent(groupId: string | null) {
@@ -43,8 +31,11 @@ export function useBusEvent(groupId: string | null) {
   useEffect(() => {
     if (!groupId) return
 
-    const cleanup = window.electronAPI.onBusEvent(groupId, (data: unknown) => {
-      const d = data as BusMessageData
+    let unlisten: (() => void) | null = null
+    let cancelled = false
+
+    onBusEvent(groupId, (d: BusEventData) => {
+      if (cancelled) return
 
       // 转换为 LogEntry
       if (d.content) {
@@ -75,9 +66,18 @@ export function useBusEvent(groupId: string | null) {
         }
         setStatusEvents((prev) => [...prev.slice(-50), evt])
       }
+    }).then((fn) => {
+      if (cancelled) {
+        fn()
+      } else {
+        unlisten = fn
+      }
     })
 
-    return cleanup
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
   }, [groupId])
 
   return { logs, statusEvents }
