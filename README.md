@@ -42,7 +42,7 @@ graph TB
     Engine --> LLM
     Engine --> RT
     Store --> SS
-    RT -->|tokio::process| CLI
+    RT -->|"tokio::process"| CLI
 ```
 
 ## A2A 通信：SharedStateCenter「扔字条」
@@ -56,12 +56,12 @@ graph LR
     C["Coordinator"]
     SS(("SharedStateCenter<br/>任务队列 + 通知队列<br/>tokio mpsc 收件箱"))
 
-    A -->|push_task / push_notify| SS
-    B -->|push_task / push_notify| SS
-    C -->|push_task / push_notify| SS
-    SS -->|rx.recv() 唤醒| A
-    SS -->|rx.recv() 唤醒| B
-    SS -->|rx.recv() 唤醒| C
+    A -->|"push_task / push_notify"| SS
+    B -->|"push_task / push_notify"| SS
+    C -->|"push_task / push_notify"| SS
+    SS -->|"rx.recv() 唤醒"| A
+    SS -->|"rx.recv() 唤醒"| B
+    SS -->|"rx.recv() 唤醒"| C
 ```
 
 > 核心改造：TS 版用 `setInterval` 100ms 轮询收件箱；Rust 版改为每 (group, agent) 一个 mpsc channel，`push_*` 直接 `tx.send()` 唤醒目标引擎，引擎 `rx.recv().await` 阻塞等待——**零空转、真消息驱动**。
