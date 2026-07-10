@@ -221,19 +221,25 @@ export interface BusEventData {
   timestamp: string
 }
 
-/** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容） */
+/** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容）。
+ *  断线自动重连（指数退避，最多 5 次），保证长任务期间 WS 不丢。 */
 export function onBusEvent(
   groupId: string,
   callback: (data: BusEventData) => void,
 ): Promise<() => void> {
-  return new Promise((resolve) => {
-    const ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/ws/bus/${groupId}`)
-    const unlisten = () => {
-      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
-        ws.close()
-      }
+  let ws: WebSocket | null = null
+  let closed = false
+  let retry = 0
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  const MAX_RETRIES = 5
+
+  const connect = (resolve?: (fn: () => void) => void) => {
+    ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/ws/bus/${groupId}`)
+
+    ws.onopen = () => {
+      retry = 0
+      if (resolve) resolve(unlisten)
     }
-    ws.onopen = () => resolve(unlisten)
     ws.onmessage = (event) => {
       try {
         callback(JSON.parse(event.data))
@@ -241,6 +247,26 @@ export function onBusEvent(
         /* ignore parse errors */
       }
     }
-    // M5 将加断线重连（指数退避）
-  })
+    ws.onclose = () => {
+      if (closed) return
+      if (retry < MAX_RETRIES) {
+        const delay = Math.min(1000 * 2 ** retry, 16000) // 1s,2s,4s,8s,16s
+        retry += 1
+        reconnectTimer = setTimeout(() => connect(), delay)
+      }
+    }
+    ws.onerror = () => {
+      ws?.close() // trigger onclose → reconnect
+    }
+  }
+
+  const unlisten = () => {
+    closed = true
+    if (reconnectTimer) clearTimeout(reconnectTimer)
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      ws.close()
+    }
+  }
+
+  return new Promise((resolve) => connect(resolve))
 }
