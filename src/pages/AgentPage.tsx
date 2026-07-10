@@ -25,7 +25,7 @@ import {
   ClockCircleOutlined,
   EyeOutlined,
 } from '@ant-design/icons'
-import { agentApi, skillApi, type AgentDefinition, type Skill } from '../services/api'
+import { agentApi, skillApi, systemApi, type AgentDefinition, type Skill } from '../services/api'
 import './AgentPage.css'
 
 const ROLES = [
@@ -103,12 +103,8 @@ function getRoleTheme(role: string) {
   return ROLE_THEME[role] ?? ROLE_THEME['自定义']
 }
 
-/* TODO: v2 替换为 list_agent_statuses 真实状态查询（后端已有命令，前端 wrapper 待加） */
+/* Agent 状态：从后端 GET /api/status 拉取（M11 黑盒透明化，替代哈希 mock） */
 type AgentStatus = 'idle' | 'executing' | 'offline'
-function getMockStatus(id: string): AgentStatus {
-  const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-  return ['idle', 'executing', 'offline'][hash % 3] as AgentStatus
-}
 
 const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: string }> = {
   idle: { label: '空闲', color: '#52c41a', dot: 'success' },
@@ -119,6 +115,7 @@ const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: strin
 export default function AgentPage() {
   const [agents, setAgents] = useState<AgentDefinition[]>([])
   const [skillNameMap, setSkillNameMap] = useState<Record<string, string>>({})
+  const [agentStatusMap, setAgentStatusMap] = useState<Record<string, AgentStatus>>({})
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<AgentDefinition | null>(null)
@@ -137,6 +134,24 @@ export default function AgentPage() {
       const m: Record<string, string> = {}
       skillList.forEach((s: Skill) => { m[s.id] = s.name })
       setSkillNameMap(m)
+      // 拉取每个群组的 agent 状态，合并成 {agentId: status}
+      // （状态接口按群组维度返回，遍历所有群组收集）
+      const { groupApi } = await import('../services/api')
+      const groups = await groupApi.list()
+      const statusMap: Record<string, AgentStatus> = {}
+      await Promise.all(
+        groups.map(async (g) => {
+          try {
+            const list = await systemApi.listStatus(g.id)
+            list.forEach((s) => {
+              statusMap[s.id] = (s.status as AgentStatus) || 'offline'
+            })
+          } catch {
+            /* 群组状态拉取失败静默 */
+          }
+        }),
+      )
+      setAgentStatusMap(statusMap)
     } catch {
       message.error('获取智能体列表失败')
     } finally {
@@ -240,7 +255,7 @@ export default function AgentPage() {
         <div className="agent-grid">
           {agents.map((agent) => {
             const theme = getRoleTheme(agent.role)
-            const status = getMockStatus(agent.id)
+            const status = agentStatusMap[agent.id] ?? 'offline'
             const statusInfo = STATUS_MAP[status]
             const isHovered = hoveredId === agent.id
 

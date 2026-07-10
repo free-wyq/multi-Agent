@@ -260,6 +260,44 @@ export interface BusEventData {
   timestamp: string
 }
 
+// ── System API (M11: agent status) ────────────────────────────
+
+export const systemApi = {
+  listStatus: (groupId: string) => http<AgentStatusInfo[]>('GET', `/api/status/${groupId}`),
+}
+
+// ── M11 黑盒透明化类型 ────────────────────────────────────
+
+export interface TraceEvent {
+  id: string
+  kind: string
+  agentId: string
+  agentName: string
+  taskId: string | null
+  content: string | null
+  data: any
+  timestamp: number
+}
+
+export interface AgentStatusInfo {
+  id: string
+  name: string
+  role: string
+  status: 'idle' | 'executing' | 'offline'
+  current_task_id: string | null
+}
+
+export interface PlanStep {
+  step: number
+  agent_id: string
+  agent_name: string
+  instruction: string
+  depends_on: number[]
+  status: string
+  result?: string | null
+  task_id?: string | null
+}
+
 /** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容）。
  *  断线自动重连（指数退避，最多 5 次），保证长任务期间 WS 不丢。 */
 export function onBusEvent(
