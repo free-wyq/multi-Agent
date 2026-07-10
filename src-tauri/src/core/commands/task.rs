@@ -1,8 +1,10 @@
-//! Task 命令 —— 对应 TS task.handlers.ts
+//! Task 命令 —— greenfield 重写
+//! 参数名 camelCase（与前端 api.ts 对齐）
 
-use crate::store::{self, types::*};
+use crate::core::store;
+use crate::core::types::*;
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn list_tasks(group_id: Option<String>) -> Vec<Task> {
     match group_id {
         Some(gid) => store::store().list_tasks_by_group(&gid),
@@ -10,12 +12,12 @@ pub fn list_tasks(group_id: Option<String>) -> Vec<Task> {
     }
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn get_task(id: String) -> Option<Task> {
     store::store().get_task(&id)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn create_task(payload: TaskCreatePayload) -> Task {
     let now = store::now_iso();
     let task = Task {
@@ -41,13 +43,12 @@ pub fn create_task(payload: TaskCreatePayload) -> Task {
     store::store().upsert_task(task)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn update_task(id: String, payload: serde_json::Value) -> Option<Task> {
     let task = store::store().get_task(&id)?;
     let mut merged = serde_json::to_value(&task).ok()?;
     if let serde_json::Value::Object(map) = &mut merged {
         if let serde_json::Value::Object(patch) = payload {
-            // 状态转换自动设置时间戳
             if let Some(status) = patch.get("status").and_then(|v| v.as_str()) {
                 if status == "working" && task.started_at.is_none() {
                     map.insert("started_at".into(), serde_json::json!(store::now_iso()));
@@ -65,14 +66,13 @@ pub fn update_task(id: String, payload: serde_json::Value) -> Option<Task> {
     Some(store::store().upsert_task(updated))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn delete_task(id: String) -> bool {
     store::store().delete_task(&id)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn task_ready(group_id: String) -> Vec<Task> {
-    // getReadyTasks：status=submitted 且依赖全部 completed
     let group_tasks = store::store().list_tasks_by_group(&group_id);
     group_tasks
         .into_iter()
@@ -83,12 +83,9 @@ pub fn task_ready(group_id: String) -> Vec<Task> {
             if t.dependencies.is_empty() {
                 return true;
             }
-            t.dependencies.iter().all(|dep| {
-                store::store()
-                    .get_task(dep)
-                    .map(|d| d.status == "completed")
-                    .unwrap_or(false)
-            })
+            t.dependencies
+                .iter()
+                .all(|dep| store::store().get_task(dep).map(|d| d.status == "completed").unwrap_or(false))
         })
         .collect()
 }

@@ -1,5 +1,15 @@
-//! 数据模型 —— 与 TS `main/store/types.ts` 一一对应
-//! 优先保证 serde 序列化格式与现有 data/*.json 兼容
+//! 数据模型（serde）—— greenfield 重写
+//!
+//! 与现有 data/*.json 字节兼容（前端不重写，on-disk shape 必须保持）：
+//! - 无全局 rename_all，字段名即 Rust 字段名（snake_case）
+//! - Message.kind → 持久化字段 "type"（serde rename）
+//! - NotifyQueueItem.kind → 持久化字段 "type"
+//! - AgentDefinition.metadata → 持久化字段 "metadata_"
+//!
+//! 相对旧 types.rs 的改动：
+//! - 删除 AgentInstance（runtime 结构移入 engine 内存状态，不再 serde 持久化）
+//! - 删除 LlmConfig/AppSettings（移入 llm.rs，本就未由 store 持久化）
+//! - 删除 SettingsMap 别名（无人引用）
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
@@ -45,26 +55,6 @@ pub struct AgentCreatePayload {
     pub skills: Vec<String>,
     #[serde(default)]
     pub description: Option<String>,
-}
-
-// ── AgentInstance ────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AgentInstance {
-    pub id: String,
-    pub definition_id: String,
-    #[serde(default)]
-    pub session_id: Option<String>,
-    pub status: String,
-    #[serde(default)]
-    pub current_task_id: Option<String>,
-    #[serde(default)]
-    pub work_dir: Option<String>,
-    #[serde(default, rename = "metadata_")]
-    pub metadata: Option<JsonValue>,
-    pub created_at: String,
-    #[serde(default)]
-    pub stopped_at: Option<String>,
 }
 
 // ── Group ────────────────────────────────────────────────────
@@ -209,30 +199,7 @@ pub struct MessageCreatePayload {
     pub data: Option<JsonValue>,
 }
 
-// ── LLM Config ───────────────────────────────────────────────
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct LlmConfig {
-    #[serde(default)]
-    pub apiKey: String,
-    #[serde(default)]
-    pub baseUrl: String,
-    #[serde(default)]
-    pub model: String,
-    #[serde(default)]
-    pub temperature: f64,
-    #[serde(default)]
-    pub maxTokens: i64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppSettings {
-    pub llm: LlmConfig,
-    #[serde(default)]
-    pub claudeCodePath: Option<String>,
-}
-
-// ── Shared State (A2A 队列) ───────────────────────────────
+// ── A2A 队列 ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TaskQueueItem {
@@ -276,7 +243,7 @@ pub struct GroupQueueSnapshot {
     pub notifies: Vec<NotifyQueueItem>,
 }
 
-/// 持久化容器：与 TS 版各 JSON 文件一一对应
+/// 持久化容器：与各 JSON 文件一一对应
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PersistedData {
     #[serde(default)]
@@ -292,6 +259,3 @@ pub struct PersistedData {
     #[serde(default)]
     pub queues: HashMap<String, GroupQueueSnapshot>,
 }
-
-/// 类型别名工具：用于避免重复
-pub type SettingsMap = HashMap<String, JsonValue>;

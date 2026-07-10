@@ -1,19 +1,21 @@
-//! Agent 命令 —— 对应 TS agent.handlers.ts
+//! Agent 命令 —— greenfield 重写
+//! 参数名 camelCase（与前端 api.ts 对齐）
 
-use crate::engine::registry;
-use crate::store::{self, types::*};
+use crate::core::engine::registry;
+use crate::core::store;
+use crate::core::types::*;
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn list_agents() -> Vec<AgentDefinition> {
     store::store().list_agents()
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn get_agent(id: String) -> Option<AgentDefinition> {
     store::store().get_agent(&id)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn create_agent(payload: AgentCreatePayload) -> AgentDefinition {
     let now = store::now_iso();
     let agent = AgentDefinition {
@@ -36,7 +38,7 @@ pub fn create_agent(payload: AgentCreatePayload) -> AgentDefinition {
     store::store().upsert_agent(agent)
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn update_agent(id: String, payload: serde_json::Value) -> Option<AgentDefinition> {
     let agent = store::store().get_agent(&id)?;
     let mut merged = serde_json::to_value(&agent).ok()?;
@@ -52,12 +54,12 @@ pub fn update_agent(id: String, payload: serde_json::Value) -> Option<AgentDefin
     Some(store::store().upsert_agent(updated))
 }
 
-#[tauri::command]
+#[tauri::command(rename_all = "camelCase")]
 pub fn delete_agent(id: String) -> bool {
     store::store().delete_agent(&id)
 }
 
-// 注册表访问（供 group create 时启动引擎）—— 仅内部用
+/// 供 group 命令启动引擎用（内部）
 #[allow(dead_code)]
 pub fn ensure_engine(group_id: &str, agent_id: &str) {
     if let Some(agent) = store::store().get_agent(agent_id) {

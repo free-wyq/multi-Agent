@@ -1,4 +1,4 @@
-//! 提示词 —— 对应 TS `main/coordinator/prompts.ts`
+//! 提示词（greenfield 重写）—— worker brain + coordinator brain
 
 pub fn format_brain_prompt(role: &str, name: &str, context: &str, message: &str) -> String {
     format!(
@@ -22,7 +22,7 @@ pub fn format_brain_prompt(role: &str, name: &str, context: &str, message: &str)
 重要：如果你需要请求其他团队成员协助，在回复中用 @对方名字 的方式提及对方，系统会自动将消息路由给他们。
 例如：@后端工程师 请提供登录API接口
 
-请严格按照以下 JSON 格式回复（不要用 markdown 代码块标记，只输出纯 JSON）：
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
 {{
   "action": "chat | execute | ask",
   "content": "你的回复或任务指令",
@@ -81,23 +81,22 @@ pub fn build_coordinator_prompt(
 收到消息：
 来自「{sender}」：{message}
 
-请严格按照以下 JSON 格式回复（不要 markdown 代码块，只输出纯 JSON）：
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
 {{
   "action": "chat | dispatch | ask | continue",
   "content": "群聊回复内容",
   "plan": [
     {{"step": 1, "agent_id": "xxx", "agent_name": "成员名", "instruction": "具体指令", "depends_on": []}}
-  ],
-  "next_step": 0
+  ]
 }}
 
 action 说明：
 - chat：直接回复，不需要调度
 - dispatch：用户有新需求，输出步骤计划（plan）
 - ask：信息不足，向用户提问
-- continue：收到成员汇报，继续下一步（用 next_step 指定）
+- continue：收到成员汇报，继续下一步
 
-plan 只在 dispatch 时必填。next_step 只在 continue 时必填。
+plan 只在 dispatch 时必填。
 "#,
         COORDINATOR_SYSTEM = COORDINATOR_SYSTEM,
         name = name,

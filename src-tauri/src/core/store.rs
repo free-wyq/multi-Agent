@@ -1,17 +1,16 @@
-//! 内存 Store —— 对应 TS `main/store/store.ts`
-//! 内存中的多 Map 索引 + JSON 持久化（防抖 + 原子写）
+//! Store —— 内存实体索引 + JSON 持久化（greenfield 重写）
+//!
+//! 相对旧 store/mod.rs 的关键改动：
+//! - 队列（A2A task/notify）不再是 Store 的职责，移入 inbox.rs 单一真源，
+//!   消除旧代码中 Store.queues 与 SharedStateCenter 双拷贝写同一文件的怪味。
+//! - Store 只管五大实体（agents/groups/members/tasks/messages）。
 
-pub mod persistence;
-pub mod shared_state;
-pub mod types;
-
+use crate::core::persistence;
+use crate::core::types::*;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use types::*;
-
-/// 全局 store 单例
 static STORE: once_cell::sync::Lazy<Arc<Store>> =
     once_cell::sync::Lazy::new(|| Arc::new(Store::default()));
 
@@ -26,11 +25,10 @@ pub struct Store {
     members: RwLock<HashMap<String, GroupMember>>,
     tasks: RwLock<HashMap<String, Task>>,
     messages: RwLock<Vec<Message>>,
-    queues: RwLock<HashMap<String, GroupQueueSnapshot>>,
 }
 
 impl Store {
-    /// 从磁盘加载全部数据到内存
+    /// 从磁盘全量加载到内存（启动时一次）
     pub fn load(&self) {
         let data = persistence::load_all();
         {
@@ -66,15 +64,8 @@ impl Store {
             g.clear();
             g.extend(data.messages);
         }
-        {
-            let mut g = self.queues.write();
-            g.clear();
-            for (k, v) in data.queues {
-                g.insert(k, v);
-            }
-        }
         log::info!(
-            "[Store] loaded: agents={}, groups={}, members={}, tasks={}, messages={}",
+            "[core/store] loaded: agents={}, groups={}, members={}, tasks={}, messages={}",
             self.agents.read().len(),
             self.groups.read().len(),
             self.members.read().len(),
@@ -83,7 +74,6 @@ impl Store {
         );
     }
 
-    /// 列出所有群组（用于 engine 注册时遍历）
     pub fn list_all_groups(&self) -> Vec<Group> {
         self.groups.read().values().cloned().collect()
     }
@@ -99,10 +89,7 @@ impl Store {
     }
 
     pub fn upsert_agent(&self, agent: AgentDefinition) -> AgentDefinition {
-        {
-            let mut g = self.agents.write();
-            g.insert(agent.id.clone(), agent.clone());
-        }
+        self.agents.write().insert(agent.id.clone(), agent.clone());
         self.persist_agents();
         agent
     }
@@ -131,10 +118,7 @@ impl Store {
     }
 
     pub fn upsert_group(&self, group: Group) -> Group {
-        {
-            let mut g = self.groups.write();
-            g.insert(group.id.clone(), group.clone());
-        }
+        self.groups.write().insert(group.id.clone(), group.clone());
         self.persist_groups();
         group
     }
@@ -142,12 +126,7 @@ impl Store {
     pub fn delete_group(&self, id: &str) -> bool {
         let removed = self.groups.write().remove(id).is_some();
         if removed {
-            // 级联删除成员与队列
-            {
-                let mut m = self.members.write();
-                m.retain(|_, v| v.group_id != id);
-            }
-            self.queues.write().remove(id);
+            self.members.write().retain(|_, v| v.group_id != id);
             self.persist_groups();
             self.persist_members();
         }
@@ -187,10 +166,7 @@ impl Store {
     }
 
     pub fn add_member(&self, member: GroupMember) -> GroupMember {
-        {
-            let mut g = self.members.write();
-            g.insert(member.id.clone(), member.clone());
-        }
+        self.members.write().insert(member.id.clone(), member.clone());
         self.persist_members();
         member
     }
@@ -228,10 +204,7 @@ impl Store {
     }
 
     pub fn upsert_task(&self, task: Task) -> Task {
-        {
-            let mut g = self.tasks.write();
-            g.insert(task.id.clone(), task.clone());
-        }
+        self.tasks.write().insert(task.id.clone(), task.clone());
         self.persist_tasks();
         task
     }
@@ -260,58 +233,24 @@ impl Store {
             .collect()
     }
 
-    /// 列出所有消息（供按 task_id 过滤）
     pub fn list_all_messages(&self) -> Vec<Message> {
         self.messages.read().clone()
     }
 
     pub fn add_message(&self, msg: Message) -> Message {
-        {
-            let mut g = self.messages.write();
-            g.push(msg.clone());
-        }
+        self.messages.write().push(msg.clone());
         self.persist_messages();
         msg
     }
 
     pub fn clear_messages_by_group(&self, group_id: &str) {
-        {
-            let mut g = self.messages.write();
-            g.retain(|m| m.group_id != group_id);
-        }
+        self.messages.write().retain(|m| m.group_id != group_id);
         self.persist_messages();
     }
 
     fn persist_messages(&self) {
         let v: Vec<Message> = self.messages.read().clone();
         persistence::schedule_save_entity("messages", serde_json::to_value(&v).unwrap());
-    }
-
-    // ── Queues (A2A SharedStateCenter) ─────────────────────
-
-    pub fn get_queue(&self, group_id: &str) -> GroupQueueSnapshot {
-        self.queues
-            .read()
-            .get(group_id)
-            .cloned()
-            .unwrap_or_else(|| GroupQueueSnapshot {
-                group_id: group_id.to_string(),
-                tasks: vec![],
-                notifies: vec![],
-            })
-    }
-
-    pub fn save_queue(&self, snap: GroupQueueSnapshot) {
-        let gid = snap.group_id.clone();
-        {
-            let mut g = self.queues.write();
-            g.insert(gid.clone(), snap.clone());
-        }
-        persistence::schedule_save_queue(&gid, serde_json::to_value(&snap).unwrap());
-    }
-
-    pub fn list_files_for_group(&self, group_id: &str) -> Vec<GroupFile> {
-        persistence::list_files(group_id)
     }
 }
 
