@@ -15,6 +15,7 @@ export interface AgentDefinition {
   role: string
   extra_skills?: string[]
   skills?: string[]
+  mounted_skills?: string[]
   system_prompt?: string
   model?: string
   max_turns?: number
@@ -205,6 +206,44 @@ export const messageApi = {
   send: (body: MessageCreatePayload) => http<Message>('POST', '/api/messages', body),
   clearByGroup: (groupId: string) =>
     http<boolean>('DELETE', '/api/messages', undefined, { groupId }),
+}
+
+// ── Skill API ───────────────────────────────────────────────
+
+export interface Skill {
+  id: string
+  name: string
+  description: string | null
+  source: 'builtin' | 'market' | 'custom' | string
+  installed: boolean
+  content: string | null
+  tags: string[]
+  mounted_to: string[]
+  created_at: string
+  updated_at: string
+}
+
+export interface SkillCreatePayload {
+  name: string
+  description?: string
+  content?: string
+  source?: string
+  tags?: string[]
+}
+
+export const skillApi = {
+  list: () => http<Skill[]>('GET', '/api/skills'),
+  get: (id: string) => http<Skill>('GET', `/api/skills/${id}`),
+  create: (body: SkillCreatePayload) => http<Skill>('POST', '/api/skills', body),
+  generate: (description: string) =>
+    http<Skill>('POST', '/api/skills/generate', { description }),
+  update: (id: string, body: SkillCreatePayload) =>
+    http<Skill>('PUT', `/api/skills/${id}`, body),
+  delete: (id: string) => http<boolean>('DELETE', `/api/skills/${id}`),
+  mount: (id: string, agentId: string) =>
+    http<AgentDefinition>('POST', `/api/skills/${id}/mount`, { agentId }),
+  unmount: (id: string, agentId: string) =>
+    http<AgentDefinition>('POST', `/api/skills/${id}/unmount`, { agentId }),
 }
 
 // ── 实时事件：WebSocket ──────────────────────────────────

@@ -25,7 +25,7 @@ import {
   ClockCircleOutlined,
   EyeOutlined,
 } from '@ant-design/icons'
-import { agentApi, type AgentDefinition } from '../services/api'
+import { agentApi, skillApi, type AgentDefinition, type Skill } from '../services/api'
 import './AgentPage.css'
 
 const ROLES = [
@@ -118,6 +118,7 @@ const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: strin
 
 export default function AgentPage() {
   const [agents, setAgents] = useState<AgentDefinition[]>([])
+  const [skillNameMap, setSkillNameMap] = useState<Record<string, string>>({})
   const [loading, setLoading] = useState(false)
   const [modalOpen, setModalOpen] = useState(false)
   const [editing, setEditing] = useState<AgentDefinition | null>(null)
@@ -127,8 +128,15 @@ export default function AgentPage() {
   const fetchAgents = async () => {
     setLoading(true)
     try {
-      const data = await agentApi.list()
-      setAgents(data)
+      const [agentList, skillList] = await Promise.all([
+        agentApi.list(),
+        skillApi.list(),
+      ])
+      setAgents(agentList)
+      // 技能 id → name 映射，用于展示已挂载技能名
+      const m: Record<string, string> = {}
+      skillList.forEach((s: Skill) => { m[s.id] = s.name })
+      setSkillNameMap(m)
     } catch {
       message.error('获取智能体列表失败')
     } finally {
@@ -298,6 +306,18 @@ export default function AgentPage() {
                       <span className="agent-no-skills">暂无技能</span>
                     )}
                   </div>
+
+                  {/* 已挂载技能（来自技能市场 mount） */}
+                  {agent.mounted_skills && agent.mounted_skills.length > 0 && (
+                    <div className="agent-card-skills" style={{ marginTop: 6 }}>
+                      <span style={{ fontSize: 12, color: '#999', marginRight: 4 }}>已挂载:</span>
+                      {agent.mounted_skills.map((sid) => (
+                        <Tag key={sid} color="geekblue" className="agent-skill-tag">
+                          {skillNameMap[sid] ?? sid}
+                        </Tag>
+                      ))}
+                    </div>
+                  )}
 
                   {/* 底部操作 */}
                   <div className="agent-card-actions">
