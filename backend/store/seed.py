@@ -13,6 +13,7 @@ from store.entities import (
     GroupEntity,
     MemberEntity,
     MessageEntity,
+    SkillEntity,
     TaskEntity,
 )
 
@@ -27,6 +28,56 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
         ).scalars().first()
         if existing is not None:
             return
+
+        # ── builtin skills (PRD SK-09: platform ships a skill library) ──
+        skills = [
+            SkillEntity(
+                id="skill_code_review",
+                name="代码审查",
+                description="对代码进行质量、安全、可维护性审查，给出改进建议",
+                source="builtin",
+                installed=1,
+                content=(
+                    "# 代码审查技能\n\n## 用途\n审查代码变更，发现缺陷与改进点。\n\n"
+                    "## 使用步骤\n1. 阅读目标代码文件\n2. 逐项检查：命名、边界、错误处理、性能\n"
+                    "3. 输出结构化审查清单（严重/建议/可选）\n"
+                ),
+                tags=["质量", "审查"],
+                created_at=_SEED_TS,
+                updated_at=_SEED_TS,
+            ),
+            SkillEntity(
+                id="skill_api_doc",
+                name="API 文档生成",
+                description="根据 API 代码自动生成接口文档",
+                source="builtin",
+                installed=1,
+                content=(
+                    "# API 文档生成技能\n\n## 用途\n从 FastAPI/路由代码生成接口文档。\n\n"
+                    "## 使用步骤\n1. 读取路由定义\n2. 提取路径/方法/参数/响应\n"
+                    "3. 输出 Markdown 接口说明\n"
+                ),
+                tags=["文档", "API"],
+                created_at=_SEED_TS,
+                updated_at=_SEED_TS,
+            ),
+            SkillEntity(
+                id="skill_test_gen",
+                name="测试用例生成",
+                description="根据函数签名与实现生成单元测试用例",
+                source="builtin",
+                installed=1,
+                content=(
+                    "# 测试用例生成技能\n\n## 用途\n为目标函数生成 pytest 单元测试。\n\n"
+                    "## 使用步骤\n1. 读取目标函数\n2. 分析输入输出与边界\n"
+                    "3. 生成正常/边界/异常用例\n"
+                ),
+                tags=["测试"],
+                created_at=_SEED_TS,
+                updated_at=_SEED_TS,
+            ),
+        ]
+        db.add_all(skills)
 
         # ── agents ──
         agents = [
@@ -53,6 +104,7 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
                 system_prompt="你是前端工程师，负责页面与组件开发。",
                 skills=["React", "TypeScript", "CSS"],
                 extra_skills=["Ant Design", "ReactFlow"],
+                mounted_skills=["skill_api_doc"],
                 allowed_tools=[],
                 denied_tools=[],
                 startup_strategy="",
@@ -69,6 +121,7 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
                 system_prompt="你是后端工程师，负责 API 与数据层开发。",
                 skills=["Python", "FastAPI", "SQL"],
                 extra_skills=["LangGraph"],
+                mounted_skills=["skill_code_review", "skill_test_gen"],
                 allowed_tools=[],
                 denied_tools=[],
                 startup_strategy="",

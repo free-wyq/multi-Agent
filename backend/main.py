@@ -12,7 +12,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from api import agents, groups, messages, system, tasks, websocket
+from api import agents, groups, messages, skills, system, tasks, websocket
 from engine.registry import registry
 from store.database import init_db
 
@@ -51,4 +51,5 @@ app.include_router(agents.router)
 app.include_router(groups.router)
 app.include_router(tasks.router)
 app.include_router(messages.router)
+app.include_router(skills.router)
 app.include_router(websocket.router)

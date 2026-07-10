@@ -44,7 +44,38 @@ def _enable_wal_once() -> None:
         pass
 
 
+def _ensure_column(conn, table: str, column: str, ddl_type: str) -> None:
+    """Add ``column`` to ``table`` if it is missing (additive migration).
+
+    SQLAlchemy ``create_all`` creates missing tables but will not ALTER an
+    existing table to add a new column. When the schema grows (e.g. M7 adds
+    ``agents.mounted_skills``), pre-existing databases would otherwise crash on
+    reads. This runs ``PRAGMA table_info`` and issues a guarded ``ALTER TABLE``
+    so old DBs upgrade in place. Safe to run every startup (no-op when present).
+    """
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
+        conn.commit()
+
+
+def _migrate_schema() -> None:
+    """Apply additive column migrations the async engine cannot do at runtime.
+
+    Runs once at import (sync sqlite3) right after WAL setup. Only adds columns
+    that are missing; never drops. New tables are created by ``create_all``.
+    """
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        _ensure_column(conn, "agents", "mounted_skills", "JSON NOT NULL DEFAULT '[]'")
+        conn.close()
+    except Exception:
+        # database may not exist yet on first import; create_all handles it
+        pass
+
+
 _enable_wal_once()
+_migrate_schema()
 
 # check_same_thread=False: SQLAlchemy manages thread access; aiosqlite spawns
 # its own thread anyway. pool_pre_ping recovers stale connections.
@@ -71,7 +102,11 @@ async def get_db() -> AsyncSession:
 
 
 async def init_db() -> None:
-    """Create all tables (if absent) and seed demo data on first run."""
+    """Create all tables (if absent) and seed demo data on first run.
+
+    ``create_all`` only adds missing tables, not columns; the additive column
+    migration (``_migrate_schema``) runs at import for pre-existing DBs.
+    """
     from store.entities import Base
     from store.seed import seed_demo_data
 

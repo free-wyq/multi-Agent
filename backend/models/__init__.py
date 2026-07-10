@@ -13,6 +13,7 @@ from .message import (
     Message,
     MessageCreatePayload,
 )
+from .skill import Skill, SkillCreatePayload
 from .task import Task, TaskCreatePayload, TaskStatus
 
 __all__ = [
@@ -28,4 +29,6 @@ __all__ = [
     "Message",
     "MessageCreatePayload",
     "BusEventData",
+    "Skill",
+    "SkillCreatePayload",
 ]

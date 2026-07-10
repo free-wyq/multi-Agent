@@ -21,6 +21,7 @@ from models import (
     GroupFile,
     GroupMember,
     Message,
+    Skill,
     Task,
 )
 from store.entities import (
@@ -28,6 +29,7 @@ from store.entities import (
     GroupEntity,
     MemberEntity,
     MessageEntity,
+    SkillEntity,
     TaskEntity,
 )
 
@@ -37,6 +39,7 @@ _PREFIX_MAP = {
     "member": "member_",
     "task": "task_",
     "msg": "msg_",
+    "skill": "skill_",
 }
 
 
@@ -61,6 +64,7 @@ def _agent_to_model(a: AgentEntity) -> AgentDefinition:
             "system_prompt": a.system_prompt,
             "skills": a.skills or [],
             "extra_skills": a.extra_skills or [],
+            "mounted_skills": a.mounted_skills or [],
             "allowed_tools": a.allowed_tools or [],
             "denied_tools": a.denied_tools or [],
             "startup_strategy": a.startup_strategy,
@@ -101,6 +105,7 @@ async def create_agent(payload: Any) -> AgentDefinition:
         system_prompt=payload.system_prompt or "",
         skills=list(getattr(payload, "skills", []) or []),
         extra_skills=list(getattr(payload, "extra_skills", []) or []),
+        mounted_skills=list(getattr(payload, "mounted_skills", []) or []),
         allowed_tools=[],
         denied_tools=[],
         startup_strategy="",
@@ -532,4 +537,179 @@ async def list_files(group_id: str) -> list[GroupFile]:
                 )
             )
     return out
+
+
+# ── Skill helpers ───────────────────────────────────────────────
+
+
+def _skill_to_model(s: SkillEntity, mounted_to: list[str] | None = None) -> Skill:
+    return Skill.model_validate(
+        {
+            "id": s.id,
+            "name": s.name,
+            "description": s.description,
+            "source": s.source,
+            "installed": bool(s.installed),
+            "content": s.content,
+            "tags": s.tags or [],
+            "mounted_to": mounted_to or [],
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+        }
+    )
+
+
+async def _skill_mount_map() -> dict[str, list[str]]:
+    """Build skill_id -> [agent_id,...] by scanning every agent's mounted_skills.
+
+    Mounting is stored on the agent (mounted_skills list), not on the skill, so
+    reverse-lookup is an in-memory scan of the agents table. Skill count stays
+    small so this is cheap.
+    """
+    from store.database import SessionLocal
+
+    out: dict[str, list[str]] = {}
+    async with SessionLocal() as db:
+        rows = (await db.execute(select(AgentEntity))).scalars().all()
+        for a in rows:
+            for sid in a.mounted_skills or []:
+                out.setdefault(sid, []).append(a.id)
+    return out
+
+
+async def list_skills() -> list[Skill]:
+    from store.database import SessionLocal
+
+    mount_map = await _skill_mount_map()
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(SkillEntity).order_by(SkillEntity.created_at))
+        ).scalars().all()
+        return [_skill_to_model(r, mount_map.get(r.id, [])) for r in rows]
+
+
+async def get_skill(skill_id: str) -> Skill | None:
+    from store.database import SessionLocal
+
+    mount_map = await _skill_mount_map()
+    async with SessionLocal() as db:
+        row = await db.get(SkillEntity, skill_id)
+        return _skill_to_model(row, mount_map.get(skill_id, [])) if row else None
+
+
+async def create_skill(payload: Any) -> Skill:
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    entity = SkillEntity(
+        id=_next_id("skill"),
+        name=payload.name,
+        description=payload.description or "",
+        content=payload.content or "",
+        source=getattr(payload, "source", "custom") or "custom",
+        installed=1,
+        tags=list(getattr(payload, "tags", []) or []),
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _skill_to_model(entity)
+
+
+async def update_skill(skill_id: str, payload: Any) -> Skill | None:
+    from store.database import SessionLocal
+
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(SkillEntity, skill_id)
+        if not row:
+            return None
+        for k, v in data.items():
+            if k in ("name", "description", "content", "source", "installed", "tags"):
+                setattr(row, k, v)
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return await get_skill(skill_id)
+
+
+async def delete_skill(skill_id: str) -> bool:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(SkillEntity, skill_id)
+        if not row:
+            return False
+        # detach from any agent that has it mounted
+        agents = (
+            await db.execute(select(AgentEntity).where(AgentEntity.mounted_skills.contains(skill_id)))
+        ).scalars().all()
+        for a in agents:
+            a.mounted_skills = [s for s in (a.mounted_skills or []) if s != skill_id]
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def mount_skill(agent_id: str, skill_id: str) -> AgentDefinition | None:
+    """Append skill_id to the agent's mounted_skills (idempotent, PRD AG-08)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        agent = await db.get(AgentEntity, agent_id)
+        if not agent:
+            return None
+        skill = await db.get(SkillEntity, skill_id)
+        if not skill:
+            return None
+        mounted = list(agent.mounted_skills or [])
+        if skill_id not in mounted:
+            mounted.append(skill_id)
+            agent.mounted_skills = mounted
+            agent.updated_at = _now_iso()
+            await db.commit()
+            await db.refresh(agent)
+    return await get_agent(agent_id)
+
+
+async def unmount_skill(agent_id: str, skill_id: str) -> AgentDefinition | None:
+    """Remove skill_id from the agent's mounted_skills (PRD AG-09)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        agent = await db.get(AgentEntity, agent_id)
+        if not agent:
+            return None
+        mounted = [s for s in (agent.mounted_skills or []) if s != skill_id]
+        agent.mounted_skills = mounted
+        agent.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(agent)
+    return await get_agent(agent_id)
+
+
+async def resolve_skill_contents(skill_ids: list[str]) -> list[str]:
+    """Resolve a list of mounted skill ids to their content strings.
+
+    Used by the worker executor to inject mounted-skill content into the system
+    prompt (PL-06). Missing ids are skipped silently.
+    """
+    from store.database import SessionLocal
+
+    if not skill_ids:
+        return []
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(SkillEntity).where(SkillEntity.id.in_(skill_ids)))
+        ).scalars().all()
+        by_id = {r.id: r for r in rows}
+        out: list[str] = []
+        for sid in skill_ids:
+            row = by_id.get(sid)
+            if row and row.content:
+                out.append(row.content)
+        return out
 

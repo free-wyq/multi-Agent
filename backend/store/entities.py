@@ -35,6 +35,10 @@ class AgentEntity(Base):
     system_prompt: Mapped[str] = mapped_column(String, nullable=False, default="")
     skills: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     extra_skills: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # IDs of SkillEntity rows mounted onto this agent (PRD AG-08/SK-04).
+    # At execution time the engine resolves these to skill content and injects
+    # it into the worker system prompt (PL-06 技能自主使用).
+    mounted_skills: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     allowed_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     denied_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     startup_strategy: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -111,3 +115,25 @@ class MessageEntity(Base):
     content: Mapped[str | None] = mapped_column(String, nullable=True)
     data: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso, index=True)
+
+
+class SkillEntity(Base):
+    """A reusable skill capability document (PRD 3.2).
+
+    A skill is a natural-language description of an ability. Agents mount skills
+    by id (``AgentEntity.mounted_skills``); at execution time the engine resolves
+    the mounted ids to ``content`` and injects it into the worker system prompt.
+    ``source`` distinguishes builtin / market / custom skills (SK-09).
+    """
+
+    __tablename__ = "skills"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    description: Mapped[str] = mapped_column(String, nullable=False, default="")
+    source: Mapped[str] = mapped_column(String, nullable=False, default="custom")
+    installed: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
+    content: Mapped[str] = mapped_column(String, nullable=False, default="")
+    tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)

@@ -19,6 +19,7 @@ class AgentDefinition(BaseModel):
     system_prompt: str = ""
     skills: list[str] = []
     extra_skills: list[str] = []
+    mounted_skills: list[str] = []
     allowed_tools: list[str] = []
     denied_tools: list[str] = []
     startup_strategy: str = ""
@@ -38,4 +39,5 @@ class AgentCreatePayload(BaseModel):
     system_prompt: str | None = None
     extra_skills: list[str] = []
     skills: list[str] = []
+    mounted_skills: list[str] = []
     description: str | None = None
