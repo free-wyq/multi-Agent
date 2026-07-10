@@ -1,12 +1,11 @@
 /**
- * API 层：Tauri invoke 调用（替代 Electron IPC）
+ * API 层：HTTP fetch + WebSocket（替代 Tauri invoke/listen）
  *
- * 所有接口签名与旧 electronAPI 保持一致，页面组件尽量少改。
- * 命令名对应 Rust 端 #[tauri::command] 的函数名（snake_case）。
+ * 后端为 Python FastAPI（localhost:8000）。所有接口签名与返回类型保持不变，
+ * 页面组件零改。24 个后端 endpoint 见 backend/api/。
  */
 
-import { invoke } from '@tauri-apps/api/core'
-import { listen, type UnlistenFn } from '@tauri-apps/api/event'
+const API_BASE = 'http://localhost:8000'
 
 // ── 类型定义 ──────────────────────────────────────────────────────
 
@@ -51,8 +50,8 @@ export interface GroupMember {
   joined_at: string
   agent_name: string
   agent_role: string
-  // Rust 端 GroupMemberWithAgent 用 #[serde(flatten)]，前端平铺访问即可，
-  // member 字段保留以兼容（可能存在也可能不存在）
+  // 后端返回平铺结构（agent_name/agent_role join 平铺），
+  // member 嵌套字段保留以兼容（可能存在也可能不存在）
   member?: {
     id: string
     group_id: string
@@ -129,58 +128,86 @@ export interface MessageCreatePayload {
   data?: Record<string, unknown>
 }
 
+// ── HTTP 工具 ────────────────────────────────────────────────
+
+async function http<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  params?: Record<string, string>,
+): Promise<T> {
+  const url = new URL(API_BASE + path)
+  if (params) {
+    Object.entries(params).forEach(([k, v]) => {
+      if (v !== undefined && v !== null) url.searchParams.set(k, v)
+    })
+  }
+  const resp = await fetch(url.toString(), {
+    method,
+    headers: body ? { 'Content-Type': 'application/json' } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+  })
+  if (!resp.ok) {
+    throw new Error(`API ${resp.status}: ${await resp.text()}`)
+  }
+  // 空主体（DELETE 返回 boolean 时 FastAPI 仍返回 JSON）
+  const text = await resp.text()
+  return (text ? JSON.parse(text) : null) as T
+}
+
 // ── Agent API ────────────────────────────────────────────────
 
 export const agentApi = {
-  list: () => invoke<AgentDefinition[]>('list_agents'),
-  get: (id: string) => invoke<AgentDefinition | null>('get_agent', { id }),
-  create: (body: AgentCreatePayload) => invoke<AgentDefinition>('create_agent', { payload: body }),
+  list: () => http<AgentDefinition[]>('GET', '/api/agents'),
+  get: (id: string) => http<AgentDefinition | null>('GET', `/api/agents/${id}`),
+  create: (body: AgentCreatePayload) => http<AgentDefinition>('POST', '/api/agents', body),
   update: (id: string, body: Partial<AgentCreatePayload>) =>
-    invoke<AgentDefinition | null>('update_agent', { id, payload: body }),
-  delete: (id: string) => invoke<boolean>('delete_agent', { id }),
+    http<AgentDefinition | null>('PUT', `/api/agents/${id}`, body),
+  delete: (id: string) => http<boolean>('DELETE', `/api/agents/${id}`),
 }
 
 // ── Group API ────────────────────────────────────────────────
 
 export const groupApi = {
-  list: () => invoke<Group[]>('list_groups'),
-  get: (id: string) => invoke<Group | null>('get_group', { id }),
-  create: (body: GroupCreatePayload) => invoke<Group>('create_group', { payload: body }),
+  list: () => http<Group[]>('GET', '/api/groups'),
+  get: (id: string) => http<Group | null>('GET', `/api/groups/${id}`),
+  create: (body: GroupCreatePayload) => http<Group>('POST', '/api/groups', body),
   update: (id: string, body: Partial<GroupCreatePayload>) =>
-    invoke<Group | null>('update_group', { id, payload: body }),
-  delete: (id: string) => invoke<boolean>('delete_group', { id }),
-  listMembers: (id: string) => invoke<GroupMember[]>('group_list_members', { groupId: id }),
+    http<Group | null>('PUT', `/api/groups/${id}`, body),
+  delete: (id: string) => http<boolean>('DELETE', `/api/groups/${id}`),
+  listMembers: (id: string) => http<GroupMember[]>('GET', `/api/groups/${id}/members`),
   addMember: (id: string, agent_id: string, alias?: string) =>
-    invoke<GroupMember>('group_add_member', { groupId: id, agentId: agent_id, alias }),
+    http<GroupMember>('POST', `/api/groups/${id}/members`, { agentId: agent_id, alias }),
   removeMember: (id: string, memberId: string) =>
-    invoke<boolean>('group_remove_member', { groupId: id, memberId }),
-  listFiles: (id: string) => invoke<GroupFile[]>('group_list_files', { groupId: id }),
+    http<boolean>('DELETE', `/api/groups/${id}/members/${memberId}`),
+  listFiles: (id: string) => http<GroupFile[]>('GET', `/api/groups/${id}/files`),
 }
 
 // ── Task API ─────────────────────────────────────────────────
 
 export const taskApi = {
-  list: (groupId: string) => invoke<Task[]>('list_tasks', { groupId }),
-  get: (id: string) => invoke<Task | null>('get_task', { id }),
-  create: (body: TaskCreatePayload) => invoke<Task>('create_task', { payload: body }),
+  list: (groupId: string) => http<Task[]>('GET', '/api/tasks', undefined, { groupId }),
+  get: (id: string) => http<Task | null>('GET', `/api/tasks/${id}`),
+  create: (body: TaskCreatePayload) => http<Task>('POST', '/api/tasks', body),
   update: (id: string, body: Partial<TaskCreatePayload>) =>
-    invoke<Task | null>('update_task', { id, payload: body }),
-  delete: (id: string) => invoke<boolean>('delete_task', { id }),
-  ready: (groupId: string) => invoke<Task[]>('task_ready', { groupId }),
+    http<Task | null>('PUT', `/api/tasks/${id}`, body),
+  delete: (id: string) => http<boolean>('DELETE', `/api/tasks/${id}`),
+  ready: (groupId: string) => http<Task[]>('GET', '/api/tasks/ready', undefined, { groupId }),
 }
 
 // ── Message API ─────────────────────────────────────────────
 
 export const messageApi = {
   listByGroup: (groupId: string, limit = 100) =>
-    invoke<Message[]>('list_messages', { groupId, limit }),
+    http<Message[]>('GET', '/api/messages', undefined, { groupId, limit: String(limit) }),
   listByTask: (taskId: string, limit = 100) =>
-    invoke<Message[]>('list_messages_by_task', { taskId, limit }),
-  send: (body: MessageCreatePayload) => invoke<Message>('send_message', { payload: body }),
-  clearByGroup: (groupId: string) => invoke<boolean>('clear_messages_by_group', { groupId }),
+    http<Message[]>('GET', `/api/messages/by-task/${taskId}`, undefined, { limit: String(limit) }),
+  send: (body: MessageCreatePayload) => http<Message>('POST', '/api/messages', body),
+  clearByGroup: (groupId: string) =>
+    http<boolean>('DELETE', '/api/messages', undefined, { groupId }),
 }
 
-// ── 实时事件：Tauri events ──────────────────────────────────
+// ── 实时事件：WebSocket ──────────────────────────────────
 
 export interface BusEventData {
   id: string
@@ -194,12 +221,26 @@ export interface BusEventData {
   timestamp: string
 }
 
-/** 监听某群组的总线事件，返回取消监听函数 */
+/** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容） */
 export function onBusEvent(
   groupId: string,
   callback: (data: BusEventData) => void,
-): Promise<UnlistenFn> {
-  return listen<BusEventData>(`bus-event:${groupId}`, (event) => {
-    callback(event.payload)
+): Promise<() => void> {
+  return new Promise((resolve) => {
+    const ws = new WebSocket(`${API_BASE.replace(/^http/, 'ws')}/ws/bus/${groupId}`)
+    const unlisten = () => {
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close()
+      }
+    }
+    ws.onopen = () => resolve(unlisten)
+    ws.onmessage = (event) => {
+      try {
+        callback(JSON.parse(event.data))
+      } catch {
+        /* ignore parse errors */
+      }
+    }
+    // M5 将加断线重连（指数退避）
   })
 }

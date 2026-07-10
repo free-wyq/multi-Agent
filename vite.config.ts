@@ -1,11 +1,10 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// Tauri 模式：前端走纯 react 插件，产物输出到 dist/ 供 src-tauri 加载
-// （原 Electron 主进程/preload 不再构建）
+// Electron 模式：前端产物输出到 dist/，资源用相对路径以便 file:// 加载
 export default defineConfig({
   plugins: [react()],
-  // Tauri dev 时 vite dev server 仍由 cargo tauri 启动并注入
+  base: './',
   server: {
     port: 5173,
     strictPort: true,

@@ -1,30 +1,37 @@
 {
   "name": "multi-agent",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "多智能体协作桌面应用",
   "type": "module",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "tauri": "tauri",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "dev": "concurrently -k -n python,web,electron \"npm run dev:python\" \"npm run dev:web\" \"npm run dev:electron\"",
+    "dev:python": "cd backend && python3 -m uvicorn main:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:web": "vite --port 5173",
+    "dev:electron": "wait-on http://localhost:8000/health && wait-on tcp:5173 && tsc -p tsconfig.node.json && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron dist-electron/main.js",
+    "build": "vite build && tsc -p tsconfig.node.json",
+    "build:python": "cd backend && pyinstaller --onefile --name multi-agent-server main.py",
+    "pack": "npm run build && npm run build:python && electron-builder",
+    "pack:linux": "npm run build && npm run build:python && electron-builder --linux",
+    "pack:win": "npm run build && npm run build:python && electron-builder --win",
+    "pack:mac": "npm run build && npm run build:python && electron-builder --mac"
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.5",
-    "@tauri-apps/api": "^2.11.1",
-    "@tauri-apps/plugin-shell": "^2.3.5",
     "antd": "^6.4.4",
     "reactflow": "^11.11.4",
     "uuid": "^11.1.0"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "^2",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
+    "concurrently": "^9.0.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.0.0",
     "typescript": "~6.0.2",
-    "vite": "^8.0.12"
+    "vite": "^8.0.12",
+    "wait-on": "^8.0.0"
   }
 }

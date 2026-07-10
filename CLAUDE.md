@@ -4,17 +4,17 @@
 
 ## 架构
 
-- **桌面框架**：Electron + TypeScript
+- **桌面框架**：Tauri v2 + Rust（tokio async runtime）
 - **前端**：React + Vite + Ant Design + ReactFlow
-- **主进程**：Node.js/TS — 状态管理、进程管理、LLM 调用
-- **子智能体**：本地 Claude Code CLI 实例（child_process.spawn）
-- **数据持久化**：内存 Map + JSON 文件
-- **事件总线**：进程内 EventEmitter
-- **LLM 调用**：直接 HTTP API（OpenAI 兼容端点）
-- **A2A 通信**：SharedStateCenter 共享状态中心（扔字条式解耦）
-  - 任务队列（TaskQueue）+ 通知队列（NotifyQueue）
-  - 父/子 agent 对等，通过轮询收件箱通信
-  - 详见 [docs/architecture-a2a.md](docs/architecture-a2a.md)
+- **后端**：Rust（`src-tauri/src/core/`）— 状态管理、引擎、LLM 调用、CLI 进程
+- **群主 Coordinator**：主进程内 tokio task + 轻量 LLM 直调（reqwest，OpenAI 兼容）
+- **子智能体 Worker**：本地 Claude Code CLI 实例（`tokio::process::spawn` 跑 `claude --print`）
+- **数据持久化**：内存索引 + JSON 文件（500ms 防抖 + 原子写 .tmp→rename）
+- **实时事件**：Tauri `app.emit` / `listen`（`bus-event:{groupId}` 通道）
+- **A2A 通信**：InboxHub 收件箱中心（`core/inbox.rs`，扔字条式解耦）
+  - 每 (group, agent) 一个 tokio mpsc channel，`push_*` 直接送信唤醒
+  - 队列在 inbox.rs 单一真源（零空转真消息驱动）
+- **.env 配置**：`run()` 启动时通过 dotenvy 自动加载项目根 `.env`（OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL）
 
 ## 快速开始
 
@@ -22,33 +22,39 @@
 # 安装依赖
 npm install
 
-# 开发模式
-npm run dev
+# 开发模式（Tauri + Vite dev server）
+npm run tauri:dev
 
-# 打包
-npm run build
+# 打包桌面应用
+npm run tauri:build
 ```
 
 ## 项目结构
 
 ```
-electron/
-  main.ts                # Electron 主进程入口
-  preload.ts             # preload 脚本，暴露 IPC API
-src/                     # Renderer 进程（React 前端）
-  pages/                 # 页面组件
-  components/            # 通用组件
-  services/api.ts        # IPC API 调用层
-  hooks/useBusEvent.ts    # 实时事件 hook
-  ipc/                   # IPC 通道定义 + 类型
-main/                    # 主进程业务逻辑
-  store/                 # 内存状态 + JSON 持久化
-  bus/                   # EventEmitter 事件总线
-  coordinator/           # 工作流 + LLM + 提示词
-  agent-engine/          # 智能体引擎 + 大脑 + 注册表
-  runtime/               # Claude Code CLI 进程管理
-  ipc-handlers/          # IPC 处理器
-data/                    # 运行时数据（JSON + 群组文件）
+src-tauri/src/              # Rust + Tauri 后端
+  lib.rs                    # Tauri 入口：.env 加载 → init → setup → 24 命令 → Exit 优雅关闭
+  main.rs                   # windows_subsystem 配置
+  core/
+    mod.rs                  # 模块树声明
+    types.rs                # serde 数据模型（byte 兼容旧 data/*.json）
+    persistence.rs          # JSON 持久化（500ms 防抖 + 原子写）
+    store.rs                # 五实体内存索引
+    inbox.rs                # A2A 收件箱（InboxHub · mpsc channel · 队列单一真源）
+    llm.rs                  # OpenAI 兼容 HTTP + extract_json
+    prompts.rs              # worker/coordinator 提示词
+    event.rs                # 类型化事件（DomainEvent → BusEventData 投影 → app.emit）
+    workspace.rs            # Workspace trait + LocalWorkspace（留 Docker/E2B 接缝）
+    permission.rs           # allowed/denied tools + model/max_turns → CLI flags
+    middleware.rs           # outbound @mention 路由 + inbound stub（v2）
+    engine.rs               # AgentEngine + AgentRegistry（调度大脑 + DAG fail-fast）
+    commands/               # #[tauri::command]（camelCase 参数）
+      agent.rs group.rs task.rs message.rs status.rs system.rs
+src/                        # 前端 Renderer（React）
+  pages/                    # 页面组件
+  components/               # 通用组件
+  services/api.ts           # invoke() 调用层
+  hooks/useBusEvent.ts      # Tauri listen 实时事件 hook
 ```
 
 ## 核心概念
@@ -61,6 +67,8 @@ data/                    # 运行时数据（JSON + 群组文件）
 
 ## 环境要求
 
+- Rust toolchain（stable）+ Tauri 系统依赖
+  - Linux：`libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 - Node.js 20+
-- Claude Code CLI 已安装（或设置 CLAUDE_CODE_PATH 环境变量）
-- LLM API 密钥（OpenAI / DeepSeek / 其他兼容端点）
+- Claude Code CLI 已安装（或设置 `CLAUDE_CODE_PATH` 环境变量）
+- LLM API 密钥（OpenAI / DeepSeek / 其他兼容端点，通过 `.env` 注入）

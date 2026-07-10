@@ -14,57 +14,80 @@
 
 ```mermaid
 graph TB
-    subgraph Frontend["前端 Renderer (WebView)"]
-        UI["React + Ant Design + ReactFlow<br/>智能体 / 群组 / 任务 / 监控"]
-        API["services/api.ts<br/>invoke()"]
-        Hook["hooks/useBusEvent.ts<br/>listen()"]
+    subgraph FE["前端 Renderer · WebView (React)"]
+        UI["pages/<br/>AgentPage · GroupPage · TaskPage · MonitorPage"]
+        API["services/api.ts<br/>invoke() · 24 命令"]
+        HOOK["hooks/useBusEvent.ts<br/>listen('bus-event:groupId')"]
     end
-    subgraph Tauri["Tauri v2 桥接"]
-        Cmd["commands/<br/>#[tauri::command]"]
-        Bus["bus.rs<br/>app.emit()"]
+
+    subgraph TAURI["Tauri v2 桥接"]
+        CMD["commands/<br/>#[tauri::command(rename_all=camelCase)]<br/>agent·group·task·message·status·system"]
+        EVT["event.rs<br/>app.emit('bus-event:groupId')"]
     end
-    subgraph Backend["Rust 后端 (src-tauri/src/)"]
-        Store["store/<br/>内存 + JSON 持久化"]
-        SS["shared_state.rs<br/>A2A 共享状态中心<br/>tokio mpsc 收件箱"]
-        Engine["engine.rs<br/>AgentEngine + 大脑 + 注册表"]
-        RT["runtime.rs<br/>spawn Claude Code CLI"]
-        LLM["llm.rs / prompts.rs<br/>OpenAI 兼容 HTTP"]
+
+    subgraph CORE["Rust 后端 · src-tauri/src/core/"]
+        direction TB
+        ST["store.rs<br/>五实体内存索引<br/>RwLock HashMap"]
+        PS["persistence.rs<br/>500ms 防抖 + 原子写 .tmp→rename"]
+        IB["inbox.rs · InboxHub<br/>mpsc 收件箱<br/>队列单一真源"]
+        EG["engine.rs · AgentEngine + Registry<br/>coordinator 调度大脑 / worker brain"]
+        MW["middleware.rs<br/>@mention 路由 outbound<br/>inbound = v2 stub"]
+        WS["workspace.rs · LocalWorkspace<br/>Workspace trait 留 Docker/E2B"]
+        PM["permission.rs<br/>--model / --allowedTools / --max-turns"]
+        LLM["llm.rs<br/>OpenAI 兼容 + extract_json"]
+        PR["prompts.rs<br/>worker / coordinator prompt"]
     end
-    CLI["本地 Claude Code CLI 实例<br/>--print 非交互"]
+
+    CLI["本地 Claude Code CLI<br/>claude --print"]
+    ENV[(".env<br/>OPENAI_API_KEY<br/>OPENAI_BASE_URL<br/>LLM_MODEL")]
+    DISK[("data/*.json + queues/*.json")]
 
     UI --> API
-    UI -.事件.-> Hook
-    API <-->|invoke / command| Cmd
-    Bus -->|app.emit 事件| Hook
-    Cmd --> Store
-    Cmd --> Engine
-    Engine --> SS
-    Engine --> LLM
-    Engine --> RT
-    Store --> SS
-    RT -->|"tokio::process"| CLI
+    UI -. 事件 .-> HOOK
+    API <-->|"invoke camelCase"| CMD
+    EVT -->|"app.emit"| HOOK
+
+    CMD --> ST
+    CMD --> MW
+    CMD --> EG
+    ST <--> PS
+    PS <--> DISK
+    IB --> PS
+
+    EG --> IB
+    EG --> LLM
+    EG --> PR
+    EG --> WS
+    EG --> EVT
+    WS --> PM
+    WS -->|"tokio::process spawn"| CLI
+    MW --> IB
+    MW --> ST
+
+    ENV -.->|"dotenvy::from_path<br/>run() 起手加载"| CORE
+    LLM -.->|"get_default_config 读取"| ENV
 ```
 
-## A2A 通信：SharedStateCenter「扔字条」
+## A2A 通信：InboxHub「扔字条」
 
-智能体之间**不点对点直连**，而是通过共享状态中心解耦通信——任何 agent 向中心「扔字条」（任务 / 通知），接收者通过 tokio mpsc channel 被唤醒取信，互不知道对方是否存在。
+智能体之间**不点对点直连**，而是通过收件箱中心解耦通信——任何 agent 向中心「扔字条」（任务 / 通知），接收者通过 tokio mpsc channel 被唤醒取信，互不知道对方是否存在。
 
 ```mermaid
 graph LR
     A["智能体 A"]
     B["智能体 B"]
     C["Coordinator"]
-    SS(("SharedStateCenter<br/>任务队列 + 通知队列<br/>tokio mpsc 收件箱"))
+    IH(("InboxHub<br/>core/inbox.rs<br/>task + notify 队列<br/>mpsc channel"))
 
-    A -->|"push_task / push_notify"| SS
-    B -->|"push_task / push_notify"| SS
-    C -->|"push_task / push_notify"| SS
-    SS -->|"rx.recv() 唤醒"| A
-    SS -->|"rx.recv() 唤醒"| B
-    SS -->|"rx.recv() 唤醒"| C
+    A -->|"push_task / push_notify"| IH
+    B -->|"push_task / push_notify"| IH
+    C -->|"push_task / push_notify"| IH
+    IH -->|"rx.recv() 唤醒"| A
+    IH -->|"rx.recv() 唤醒"| B
+    IH -->|"rx.recv() 唤醒"| C
 ```
 
-> 核心改造：TS 版用 `setInterval` 100ms 轮询收件箱；Rust 版改为每 (group, agent) 一个 mpsc channel，`push_*` 直接 `tx.send()` 唤醒目标引擎，引擎 `rx.recv().await` 阻塞等待——**零空转、真消息驱动**。
+> 核心改造：TS 版用 `setInterval` 100ms 轮询收件箱；Rust 版改为每 (group, agent) 一个 mpsc channel，`push_*` 直接 `tx.send()` 唤醒目标引擎，引擎 `rx.recv().await` 阻塞等待——**零空转、真消息驱动**。队列在 `inbox.rs` 单一真源（旧代码 Store.queues 与 SharedStateCenter 双拷贝已消除）。
 
 ## 数据流图
 
@@ -75,7 +98,7 @@ sequenceDiagram
     actor U as 用户
     participant F as 前端
     participant C as commands
-    participant SS as SharedState
+    participant SS as InboxHub
     participant CO as Coordinator Engine
     participant M as 成员 Engine
     participant CLI as Claude Code CLI
@@ -115,7 +138,7 @@ sequenceDiagram
     actor U as 用户
     participant F as 前端
     participant C as commands (send_message)
-    participant SS as SharedState
+    participant SS as InboxHub
     participant E as AgentEngine
 
     U->>F: 发消息（可能带 @mention）
@@ -190,9 +213,9 @@ sequenceDiagram
 
 子智能体都是 Claude Code CLI 实例，只需不同的 system prompt 和工作目录。本地进程启动更快，同一群组共享工作目录，天然支持文件交换和依赖复用。
 
-### 3. A2A 共享状态中心（扔字条）
+### 3. A2A 收件箱中心（扔字条）
 
-智能体间通信全部走 `SharedStateCenter`（`shared_state.rs`），禁止点对点直接调用。父/子 agent 真正成为独立任务实体，通过写/读中间队列通信。这是相对早期「直接路由」的关键架构升级。
+智能体间通信全部走 `InboxHub`（`core/inbox.rs`），禁止点对点直接调用。父/子 agent 真正成为独立任务实体，通过写/读中间队列通信。队列在 inbox.rs 单一真源（旧代码 Store.queues + SharedStateCenter 双拷贝已消除）。
 
 ### 4. 内存 + JSON 文件存储
 
@@ -217,7 +240,7 @@ sequenceDiagram
 | 群主 LLM | OpenAI 兼容 HTTP API 直调（reqwest） |
 | 子智能体运行时 | 本地 Claude Code CLI（`tokio::process::Command`） |
 | 数据存储 | 内存 + JSON 文件（防抖 + 原子写） |
-| A2A 通信 | SharedStateCenter + tokio mpsc 收件箱 |
+| A2A 通信 | InboxHub（core/inbox.rs）+ tokio mpsc 收件箱 |
 | 实时事件 | Tauri `app.emit` / `listen` |
 | 进程间通信 | Tauri `invoke` / `#[command]` |
 | 跨平台 | macOS / Windows / Linux（tauri bundler） |
@@ -245,10 +268,13 @@ npm run tauri:dev
 npm run tauri:build
 ```
 
-开发前需注入 LLM 环境变量（WSL/Linux）：
+开发前需配置 LLM 环境变量。在项目根创建 `.env` 文件：
 
 ```bash
-set -a; source .env; set +a   # OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL
+# .env（run() 启动时通过 dotenvy 自动加载，无需手动 source）
+OPENAI_API_KEY=sk-...
+OPENAI_BASE_URL=https://api.openai.com/v1   # 或 DeepSeek / 其他兼容端点
+LLM_MODEL=gpt-4o                              # 可选，默认 glm-5.1
 ```
 
 ## 环境要求
@@ -265,26 +291,33 @@ set -a; source .env; set +a   # OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL
 multi-Agent/
   src-tauri/                    # Rust + Tauri 后端
     src/
-      lib.rs / main.rs          # Tauri 入口 + 应用装配
-      store/                    # serde 数据模型 + JSON 持久化 + SharedStateCenter
-        mod.rs                  # 内存 Store（多 Map 索引）
-        types.rs                # 数据类型（与旧 data/*.json 兼容）
-        persistence.rs          # 防抖 + 原子写 JSON
-        shared_state.rs         # A2A 共享状态中心 + mpsc 收件箱
-      engine.rs                 # AgentEngine + 大脑 + 调度大脑 + 注册表
-      runtime.rs                # spawn Claude Code CLI + 生成 CLAUDE.md
-      llm.rs / prompts.rs       # OpenAI 兼容 HTTP 客户端 + 提示词
-      commands/                 # #[tauri::command]（agent/group/task/message）
-      bus.rs                    # Tauri app.emit 事件推送
-      rt.rs                     # async runtime 桥接
+      lib.rs                   # Tauri 入口：.env 加载 → init → setup → 24 命令 → Exit 优雅关闭
+      main.rs                  # windows_subsystem 配置
+      core/                    # greenfield 重写后的全量后端逻辑
+        mod.rs                 # 模块树声明
+        types.rs               # serde 数据模型（byte 兼容旧 data/*.json）
+        persistence.rs          # JSON 持久化（500ms 防抖 + 原子写 .tmp→rename）
+        store.rs               # 五实体内存索引（agents/groups/members/tasks/messages）
+        inbox.rs               # A2A 收件箱（InboxHub · mpsc channel · 队列单一真源）
+        llm.rs                 # OpenAI 兼容 HTTP 客户端 + extract_json
+        prompts.rs             # worker/coordinator 提示词
+        event.rs               # 类型化事件（DomainEvent → BusEventData 投影 → app.emit）
+        workspace.rs            # Workspace trait + LocalWorkspace（留 Docker/E2B 接缝）
+        permission.rs          # allowed/denied tools + model/max_turns → CLI flags
+        middleware.rs           # outbound @mention 路由 + inbound stub（v2）
+        engine.rs              # AgentEngine + AgentRegistry（调度大脑 + DAG fail-fast）
+        commands/              # #[tauri::command]（camelCase 参数）
+          agent.rs group.rs task.rs message.rs status.rs system.rs
     tauri.conf.json             # 窗口 / 打包配置
   src/                          # 前端 Renderer（React）
     pages/                      # 页面组件
     components/                 # 通用组件
     services/api.ts             # invoke() 调用层
     hooks/useBusEvent.ts        # Tauri listen 实时事件 hook
-  data/                         # 运行时数据（JSON + 群组文件，开发期路径）
+  data/                         # 旧开发期数据（历史遗留，运行时数据目录见下）
 ```
+
+> 运行时数据目录：`~/.local/share/multi-agent/`（Linux），含 `agents.json` / `groups.json` / `members.json` / `tasks.json` / `messages.json` / `queues/<group>.json` / `group_files/<group>/`。
 
 ## 路线图
 

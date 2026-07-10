@@ -103,16 +103,16 @@ function getRoleTheme(role: string) {
   return ROLE_THEME[role] ?? ROLE_THEME['自定义']
 }
 
-/* 模拟状态（后续接真实数据） */
-type AgentStatus = 'idle' | 'working' | 'offline'
+/* TODO: v2 替换为 list_agent_statuses 真实状态查询（后端已有命令，前端 wrapper 待加） */
+type AgentStatus = 'idle' | 'executing' | 'offline'
 function getMockStatus(id: string): AgentStatus {
   const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-  return ['idle', 'working', 'offline'][hash % 3] as AgentStatus
+  return ['idle', 'executing', 'offline'][hash % 3] as AgentStatus
 }
 
 const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: string }> = {
   idle: { label: '空闲', color: '#52c41a', dot: 'success' },
-  working: { label: '工作中', color: '#1677ff', dot: 'processing' },
+  executing: { label: '工作中', color: '#1677ff', dot: 'processing' },
   offline: { label: '离线', color: '#d9d9d9', dot: 'default' },
 }
 
@@ -239,7 +239,7 @@ export default function AgentPage() {
             return (
               <div
                 key={agent.id}
-                className={`agent-card ${isHovered ? 'agent-card--hovered' : ''} ${status === 'working' ? 'agent-card--working' : ''}`}
+                className={`agent-card ${isHovered ? 'agent-card--hovered' : ''} ${status === 'executing' ? 'agent-card--working' : ''}`}
                 onMouseEnter={() => setHoveredId(agent.id)}
                 onMouseLeave={() => setHoveredId(null)}
               >
@@ -272,7 +272,7 @@ export default function AgentPage() {
                     <h3 className="agent-card-name">{agent.name}</h3>
                     <Tooltip title={statusInfo.label}>
                       <span className="agent-card-status" style={{ color: statusInfo.color }}>
-                        {status === 'working' && <ThunderboltOutlined style={{ marginRight: 4 }} />}
+                        {status === 'executing' && <ThunderboltOutlined style={{ marginRight: 4 }} />}
                         {status === 'idle' && <ClockCircleOutlined style={{ marginRight: 4 }} />}
                         {status === 'offline' && <EyeOutlined style={{ marginRight: 4 }} />}
                         {statusInfo.label}
