@@ -2,6 +2,7 @@
   "name": "multi-agent",
   "private": true,
   "version": "0.2.0",
+  "license": "Apache-2.0",
   "description": "多智能体协作桌面应用",
   "type": "module",
   "scripts": {

@@ -1,6 +1,8 @@
 # Multi-Agent 协作桌面应用
 
-多智能体协作框架，解决软件工程虚拟交付问题。
+![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
+
+多智能体协作框架，解决软件工程虚拟交付问题。本项目基于 Apache License 2.0 开源。
 
 ## 项目简介
 
