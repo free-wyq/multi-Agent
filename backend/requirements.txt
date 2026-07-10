@@ -6,3 +6,4 @@ aiosqlite
 httpx
 langgraph
 langchain-openai
+langchain-core
