@@ -920,3 +920,184 @@ async def resolve_mcp_configs(mcp_ids: list[str]) -> list[tuple[str, dict]]:
                 out.append((row.name, _mcp_connection_config(row)))
         return out
 
+
+
+# ── Scheduled task helpers ─────────────────────────────────────
+
+
+def _sched_to_model(s: ScheduledTaskEntity) -> ScheduledTask:
+    return ScheduledTask.model_validate(
+        {
+            "id": s.id,
+            "name": s.name,
+            "content": s.content,
+            "agent_id": s.agent_id,
+            "group_id": s.group_id,
+            "schedule_type": s.schedule_type,
+            "cron": s.cron,
+            "interval_seconds": s.interval_seconds,
+            "run_at": s.run_at,
+            "enabled": bool(s.enabled),
+            "created_at": s.created_at,
+            "updated_at": s.updated_at,
+        }
+    )
+
+
+def _schedrun_to_model(r: ScheduledTaskRunEntity) -> ScheduledTaskRun:
+    return ScheduledTaskRun.model_validate(
+        {
+            "id": r.id,
+            "scheduled_task_id": r.scheduled_task_id,
+            "status": r.status,
+            "result": r.result,
+            "started_at": r.started_at,
+            "finished_at": r.finished_at or "",
+        }
+    )
+
+
+async def list_scheduled_tasks() -> list[ScheduledTask]:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ScheduledTaskEntity).order_by(ScheduledTaskEntity.created_at)
+            )
+        ).scalars().all()
+        return [_sched_to_model(r) for r in rows]
+
+
+async def get_scheduled_task(task_id: str) -> ScheduledTask | None:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ScheduledTaskEntity, task_id)
+        return _sched_to_model(row) if row else None
+
+
+async def create_scheduled_task(payload: Any) -> ScheduledTask:
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    entity = ScheduledTaskEntity(
+        id=_next_id("sched"),
+        name=payload.name,
+        content=payload.content,
+        agent_id=payload.agent_id,
+        group_id=payload.group_id,
+        schedule_type=payload.schedule_type or "interval",
+        cron=payload.cron or "",
+        interval_seconds=int(payload.interval_seconds or 0),
+        run_at=payload.run_at or "",
+        enabled=1 if getattr(payload, "enabled", True) else 0,
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _sched_to_model(entity)
+
+
+async def update_scheduled_task(task_id: str, payload: Any) -> ScheduledTask | None:
+    from store.database import SessionLocal
+
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(ScheduledTaskEntity, task_id)
+        if not row:
+            return None
+        for k, v in data.items():
+            if k in ("name", "content", "agent_id", "group_id", "schedule_type",
+                     "cron", "interval_seconds", "run_at", "enabled"):
+                setattr(row, k, v)
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return await get_scheduled_task(task_id)
+
+
+async def set_scheduled_task_enabled(task_id: str, enabled: bool) -> ScheduledTask | None:
+    """Toggle a scheduled task's enabled state (PRD TM-05 暂停/恢复)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ScheduledTaskEntity, task_id)
+        if not row:
+            return None
+        row.enabled = 1 if enabled else 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return await get_scheduled_task(task_id)
+
+
+async def delete_scheduled_task(task_id: str) -> bool:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ScheduledTaskEntity, task_id)
+        if not row:
+            return False
+        # cascade: delete run history too
+        await db.execute(
+            delete(ScheduledTaskRunEntity).where(
+                ScheduledTaskRunEntity.scheduled_task_id == task_id
+            )
+        )
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def list_scheduled_task_runs(task_id: str, limit: int = 50) -> list[ScheduledTaskRun]:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        stmt = (
+            select(ScheduledTaskRunEntity)
+            .where(ScheduledTaskRunEntity.scheduled_task_id == task_id)
+            .order_by(ScheduledTaskRunEntity.started_at.desc())
+            .limit(limit)
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        return [_schedrun_to_model(r) for r in rows]
+
+
+async def create_scheduled_task_run(task_id: str) -> ScheduledTaskRun:
+    """Insert a 'running' run record and return it (TM-07)."""
+    from store.database import SessionLocal
+
+    entity = ScheduledTaskRunEntity(
+        id=_next_id("schedrun"),
+        scheduled_task_id=task_id,
+        status="running",
+        started_at=_now_iso(),
+        finished_at=None,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _schedrun_to_model(entity)
+
+
+async def finish_scheduled_task_run(
+    run_id: str, success: bool, result: str
+) -> ScheduledTaskRun | None:
+    """Mark a run finished with success/failed + result (TM-07)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ScheduledTaskRunEntity, run_id)
+        if not row:
+            return None
+        row.status = "success" if success else "failed"
+        row.result = result[:2000] if result else None
+        row.finished_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+        return _schedrun_to_model(row)
