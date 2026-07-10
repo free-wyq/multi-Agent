@@ -1,0 +1,78 @@
+"""LangGraph state TypedDicts + reducers (blueprint C.2.1 / C.2.2).
+
+``CoordinatorState`` and ``WorkerState`` are the state schemas for the two
+StateGraphs. Reducers: ``append_list`` concatenates lists (memory), ``merge_dict``
+right-overrides-left (dispatch_plan, recent_routes). The engine injects the
+runtime values (memory, dispatch_plan, recent_routes) at each ``ainvoke`` so
+the checkpointer + thread_id keep cross-invoke state.
+"""
+from __future__ import annotations
+
+from typing import Annotated, Any, TypedDict
+
+
+def append_list(left: list, right: list) -> list:
+    """Reducer: concatenate lists (right appended to left)."""
+    return (left or []) + (right or [])
+
+
+def merge_dict(left: dict, right: dict) -> dict:
+    """Reducer: merge dict (right overrides left)."""
+    result = dict(left or {})
+    result.update(right or {})
+    return result
+
+
+def replace_value(left: Any, right: Any) -> Any:
+    """Reducer: last-write-wins (right replaces left). Used for dispatch_plan
+    where nodes return the full updated plan rather than appending."""
+    return right if right is not None else left
+
+
+class CoordinatorState(TypedDict, total=False):
+    """State schema for the coordinator StateGraph.
+
+    The engine injects ``memory``, ``dispatch_plan``, and ``recent_routes`` at
+    each ``ainvoke`` from the AgentEngine's in-memory fields (these are the
+    cross-invoke state kept consistent by the MemorySaver checkpointer + thread_id).
+    """
+
+    # identity
+    group_id: str
+    agent_id: str
+    agent_name: str
+
+    # incoming message
+    incoming_message: str
+    incoming_sender: str
+    incoming_kind: str  # agent_reply | coordinator_task | coordinator_reply
+    incoming_data: dict | None
+
+    # cross-invoke state (injected by engine)
+    memory: Annotated[list[dict], append_list]
+    dispatch_plan: Annotated[list[dict], replace_value]
+    recent_routes: Annotated[dict, merge_dict]
+
+    # decision output
+    reply_content: str
+    action_taken: str  # chat | dispatch | ask | continue | handle_reply | summarize | dispatch_next
+
+
+class WorkerState(TypedDict, total=False):
+    """State schema for the worker StateGraph."""
+
+    # identity
+    group_id: str
+    agent_id: str
+    agent_name: str
+    agent_role: str
+
+    # incoming message
+    incoming_message: str
+    incoming_sender: str
+
+    # cross-invoke state
+    memory: Annotated[list[dict], append_list]
+
+    # decision output
+    decision: dict  # {action, content, reasoning}
