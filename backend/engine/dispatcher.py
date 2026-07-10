@@ -1,11 +1,13 @@
-"""DAG dispatcher: fail-fast + dispatch_next_step (Rust engine.rs 643-755).
+"""DAG dispatcher: fail-fast + parallel fan-out (Rust engine.rs 643-755).
 
 ``apply_fail_fast`` cascades failed status to pending steps whose dependencies
-include a failed step, looping until stable. ``dispatch_next_step`` finds the
-first pending step whose dependencies are all completed, marks it dispatched,
-replies with the dispatch message, ``push_task`` to the worker, and emits the
-``task_dispatched`` bus event. If no step is dispatchable and all are done,
-the caller routes to ``summarize``.
+include a failed step, looping until stable. ``dispatch_ready_steps`` finds
+ALL steps that are ready (pending + deps satisfied) and dispatches them
+together — independent steps run concurrently as separate worker engines
+(AgentEngine instances), each its own asyncio task. ``find_ready_steps`` is the
+pure query. ``_dispatch_one`` dispatches a single step (mark dispatched, reply,
+push_task, emit). If no step is dispatchable and all are done, the caller
+routes to ``summarize``.
 """
 from __future__ import annotations
 
@@ -40,24 +42,14 @@ def apply_fail_fast(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return plan
 
 
-async def dispatch_next_step(
-    group_id: str,
-    coordinator_id: str,
-    plan: list[dict[str, Any]],
-) -> dict | None:
-    """Dispatch the next ready step (pending + deps all completed).
+def find_ready_steps(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return all steps ready to dispatch now (pending + deps all completed).
 
-    Mutates the step in ``plan`` to ``dispatched``, replies with the dispatch
-    message (persist + emit + mention route via crud.add_message +
-    emit_message_added), ``push_task`` to the worker, stores the pushed
-    ``task_id`` back on the step, and emits ``task_dispatched``.
-
-    Returns the dispatched step dict, or ``None`` if no step was dispatchable
-    (caller checks whether all are done to route to summarize).
+    Independent steps (empty ``depends_on`` or whose deps are all completed) are
+    returned together so the coordinator can fan them out in parallel — each
+    goes to its own worker engine which runs as an independent asyncio task.
     """
-    plan = apply_fail_fast(plan)
-
-    next_step: dict | None = None
+    ready: list[dict[str, Any]] = []
     for s in plan:
         if s.get("status") != "pending":
             continue
@@ -66,18 +58,25 @@ async def dispatch_next_step(
             for dep in s.get("depends_on", []) or []
         )
         if deps_ok:
-            next_step = s
-            break
+            ready.append(s)
+    return ready
 
-    if next_step is None:
-        return None
 
-    next_step["status"] = "dispatched"
+async def _dispatch_one(
+    group_id: str,
+    coordinator_id: str,
+    step: dict[str, Any],
+) -> None:
+    """Dispatch a single ready step: mark dispatched, reply, push_task, emit.
 
-    step_num = next_step["step"]
-    agent_id = next_step["agent_id"]
-    agent_name = next_step["agent_name"]
-    instruction = next_step["instruction"]
+    Mutates ``step`` to ``dispatched`` and stores the pushed ``task_id`` on it.
+    """
+    step["status"] = "dispatched"
+
+    step_num = step["step"]
+    agent_id = step["agent_id"]
+    agent_name = step["agent_name"]
+    instruction = step["instruction"]
 
     # reply: persist dispatch message + emit
     dispatch_msg = f"🚀 步骤 {step_num} 派发：\n@{agent_name} \n\n{instruction}"
@@ -94,7 +93,8 @@ async def dispatch_next_step(
     )
     await emit_message_added(msg.model_dump())
 
-    # push task to worker
+    # push task to worker — this wakes the target AgentEngine's run loop as an
+    # independent asyncio task, so multiple dispatched steps run concurrently.
     pushed = await push_task(
         group_id,
         coordinator_id,
@@ -102,7 +102,7 @@ async def dispatch_next_step(
         instruction,
         {"step": step_num, "agent_name": agent_name},
     )
-    next_step["task_id"] = pushed["id"]
+    step["task_id"] = pushed["id"]
 
     await emit_task_dispatched(
         group_id, pushed["id"], step_num, agent_id, agent_name, instruction
@@ -112,4 +112,23 @@ async def dispatch_next_step(
         "[dispatcher] dispatched step %s to %s (task_id=%s)",
         step_num, agent_name, pushed["id"],
     )
-    return next_step
+
+
+async def dispatch_ready_steps(
+    group_id: str,
+    coordinator_id: str,
+    plan: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Dispatch ALL ready steps in parallel (DAG fan-out).
+
+    Finds every step that is pending with dependencies satisfied and dispatches
+    each one. Independent steps (no shared dependency) are dispatched together so
+    their worker engines run concurrently as separate asyncio tasks. Mutates
+    ``plan`` in place. Returns the list of dispatched step dicts (empty if none
+    were dispatchable — caller checks whether all are done to route to summarize).
+    """
+    plan = apply_fail_fast(plan)
+    ready = find_ready_steps(plan)
+    for step in ready:
+        await _dispatch_one(group_id, coordinator_id, step)
+    return ready

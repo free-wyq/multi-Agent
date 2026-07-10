@@ -15,7 +15,7 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from engine.dispatcher import dispatch_next_step
+from engine.dispatcher import dispatch_ready_steps
 from engine.state import CoordinatorState
 from events import emit_message_added
 from llm.client import chat_completion, get_llm_config
@@ -207,20 +207,21 @@ async def node_dispatch(state: CoordinatorState) -> dict:
 
 
 async def node_dispatch_next(state: CoordinatorState) -> dict:
-    """Call the dispatcher to advance the next ready step.
+    """Fan out ALL ready steps in parallel (DAG fan-out, MT-12).
 
-    If no step is dispatchable and all are done, route to summarize. The
-    dispatcher mutates the plan in place and performs reply + emit + push_task
-    internally.
+    Dispatches every step that is pending with deps satisfied — independent
+    steps go to their own worker engines which run concurrently as separate
+    asyncio tasks. Returns ``action_taken="summarize"`` only if no step was
+    dispatchable AND all steps are done; otherwise the graph ends (the engines
+    run on, and each worker's report re-enters the coordinator via a notify).
     """
     group_id = state["group_id"]
     coordinator_id = state["agent_id"]
     plan = state.get("dispatch_plan") or []
 
-    # dispatch_next_step mutates plan in place; pass a reference list
-    result = await dispatch_next_step(group_id, coordinator_id, plan)
+    dispatched = await dispatch_ready_steps(group_id, coordinator_id, plan)
 
-    if result is None:
+    if not dispatched:
         # no dispatchable step; if all done, summarize
         if plan and all(s.get("status") in ("completed", "failed") for s in plan):
             return {"action_taken": "summarize", "dispatch_plan": plan}
