@@ -6,326 +6,407 @@
 
 ## 项目简介
 
-一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协作完成软件交付任务。群主智能体负责意图分析与任务调度，子智能体通过本地 Claude Code CLI 执行开发、编译、测试等具体工作。
+一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协作完成软件交付任务。群主智能体负责意图分析与任务调度，子智能体在框架内自主执行开发、编译、测试等具体工作。
 
 **核心定位**：桌面端工具，双击即用，零基础设施。
 
-> 后端已用 **Rust + Tauri v2** 重写，A2A 引擎基于 **tokio mpsc** 真消息驱动（替代轮询）。前端保留 React + Ant Design + ReactFlow。
+**技术栈**：Electron（桌面壳）+ Python 后端（FastAPI + LangGraph + SQLAlchemy）+ React 前端（Vite + Ant Design + ReactFlow）。引擎全部基于开源框架（LangGraph `StateGraph`、`create_agent`、`astream_events`、APScheduler、langchain-mcp-adapters），不调外部 Claude Code CLI，不自研调度引擎——招投标技术背书。
 
 ## 整体架构图
 
 ```mermaid
 graph TB
-    subgraph FE["前端 Renderer · WebView (React)"]
-        UI["pages/<br/>AgentPage · GroupPage · TaskPage · MonitorPage"]
-        API["services/api.ts<br/>invoke() · 24 命令"]
-        HOOK["hooks/useBusEvent.ts<br/>listen('bus-event:groupId')"]
+    subgraph DESKTOP["桌面壳 · Electron (main process)"]
+        MAIN["electron/main.ts<br/>拉起 Python uvicorn:8000<br/>+ 加载 Vite dev server / 打包产物"]
+        WIN["BrowserWindow<br/>WebView 渲染 React"]
+        MAIN --> WIN
     end
 
-    subgraph TAURI["Tauri v2 桥接"]
-        CMD["commands/<br/>#[tauri::command(rename_all=camelCase)]<br/>agent·group·task·message·status·system"]
-        EVT["event.rs<br/>app.emit('bus-event:groupId')"]
+    subgraph FE["前端 Renderer · React + Vite + Ant Design"]
+        PAGES["pages/<br/>AgentPage · GroupPage · TaskPage<br/>MonitorPage · SkillPage"]
+        COMP["components/<br/>LeaderPanel · WorkerTrace · LogPanel<br/>AgentAvatar · Layout"]
+        API_TS["services/api.ts<br/>REST fetch + WebSocket onBusEvent"]
+        HOOK["hooks/useBusEvent.ts<br/>logs / events / agentStatuses / plan"]
+        PAGES --> COMP
+        PAGES --> HOOK
+        HOOK --> API_TS
     end
 
-    subgraph CORE["Rust 后端 · src-tauri/src/core/"]
-        direction TB
-        ST["store.rs<br/>五实体内存索引<br/>RwLock HashMap"]
-        PS["persistence.rs<br/>500ms 防抖 + 原子写 .tmp→rename"]
-        IB["inbox.rs · InboxHub<br/>mpsc 收件箱<br/>队列单一真源"]
-        EG["engine.rs · AgentEngine + Registry<br/>coordinator 调度大脑 / worker brain"]
-        MW["middleware.rs<br/>@mention 路由 outbound<br/>inbound = v2 stub"]
-        WS["workspace.rs · LocalWorkspace<br/>Workspace trait 留 Docker/E2B"]
-        PM["permission.rs<br/>--model / --allowedTools / --max-turns"]
-        LLM["llm.rs<br/>OpenAI 兼容 + extract_json"]
-        PR["prompts.rs<br/>worker / coordinator prompt"]
+    subgraph BE["后端 · Python FastAPI (uvicorn :8000)"]
+        ROUTERS["api/ routers<br/>agents·groups·tasks·messages·skills<br/>mcp·scheduled_tasks·system·websocket"]
+        WS_EP["websocket.py<br/>ws/bus/{groupId}"]
+        LIFE["main.py lifespan<br/>init_db → registry.load_from_store → load_schedule"]
+        ROUTERS --> LIFE
     end
 
-    CLI["本地 Claude Code CLI<br/>claude --print"]
-    ENV[(".env<br/>OPENAI_API_KEY<br/>OPENAI_BASE_URL<br/>LLM_MODEL")]
-    DISK[("data/*.json + queues/*.json")]
+    subgraph ENGINE["引擎层 · LangGraph 1.2 (engine/)"]
+        REG["registry.py · AgentEngine + AgentRegistry<br/>常驻 asyncio.Task · 状态机 idle/executing/offline"]
+        INBOX["inbox.py · asyncio.Queue<br/>push_task / push_notify 唤醒"]
+        COORD["coordinator.py · StateGraph<br/>7 节点: classify→llm_decide→<br/>chat/dispatch/dispatch_next/summarize"]
+        WORK["worker.py · StateGraph<br/>brain 决策 chat/ask/execute"]
+        LOOP["agent_loop.py<br/>langchain create_agent + astream_events<br/>框架内 ReAct 循环"]
+        TOOLS["tools.py · @tool 框架内工具<br/>read_file/write_file/edit_file/list_dir/run_command"]
+        MCP["mcp_manager.py<br/>langchain-mcp-adapters → BaseTool"]
+        SKILL["技能注入 system_prompt"]
+        SCHED["scheduler.py · APScheduler<br/>Cron/Interval/Date 触发 → 复用 push_task"]
+        REG --> INBOX
+        INBOX --> COORD
+        INBOX --> WORK
+        WORK --> LOOP
+        LOOP --> TOOLS
+        LOOP --> MCP
+        LOOP --> SKILL
+        SCHED --> INBOX
+    end
 
-    UI --> API
-    UI -. 事件 .-> HOOK
-    API <-->|"invoke camelCase"| CMD
-    EVT -->|"app.emit"| HOOK
+    subgraph STORE["持久化 · SQLAlchemy async + aiosqlite (WAL)"]
+        CRUD["store/crud.py · 五实体 CRUD<br/>agents/groups/members/tasks/messages"]
+        DB[("SQLite<br/>+ scheduled_tasks/skills/mcp")]
+        CRUD --> DB
+    end
 
-    CMD --> ST
-    CMD --> MW
-    CMD --> EG
-    ST <--> PS
-    PS <--> DISK
-    IB --> PS
+    subgraph EVENTS["事件总线 · events/bus.py"]
+        BUS["BusManager · 每 group 一组 WebSocket<br/>emit_task_tool/think/log/dispatch/complete<br/>+ agent_status + coordinator_plan/think"]
+    end
 
-    EG --> IB
-    EG --> LLM
-    EG --> PR
-    EG --> WS
-    EG --> EVT
-    WS --> PM
-    WS -->|"tokio::process spawn"| CLI
-    MW --> IB
-    MW --> ST
+    subgraph WS_DIR["工作区隔离 · engine/workspace.py"]
+        WD["DATA_DIR/workspaces/{group_id}/<br/>safe_path 防路径穿越"]
+    end
 
-    ENV -.->|"dotenvy::from_path<br/>run() 起手加载"| CORE
-    LLM -.->|"get_default_config 读取"| ENV
+    subgraph LLM_LAYER["LLM 层 (llm/)"]
+        CLIENT["client.py · OpenAI 兼容 chat_completion"]
+        PROMPT["prompts.py · worker/coordinator 提示词"]
+    end
+
+    ENV[(".env<br/>OPENAI_API_KEY / BASE_URL / LLM_MODEL")]
+    LLMAPI["DeepSeek / OpenAI 兼容端点"]
+
+    WIN -->|"HTTP REST"| ROUTERS
+    WIN -.WS.-> WS_EP
+    ROUTERS --> REG
+    ROUTERS --> CRUD
+    COORD --> LLM_LAYER
+    LOOP --> LLM_LAYER
+    LLM_LAYER -->|"httpx"| LLMAPI
+    ENV -.-> LLM_LAYER
+    REG --> EVENTS
+    LOOP --> EVENTS
+    COORD --> EVENTS
+    EVENTS --> WS_EP
+    TOOLS --> WD
+    WS_EP -.实时事件.-> HOOK
 ```
 
-## A2A 通信：InboxHub「扔字条」
-
-智能体之间**不点对点直连**，而是通过收件箱中心解耦通信——任何 agent 向中心「扔字条」（任务 / 通知），接收者通过 tokio mpsc channel 被唤醒取信，互不知道对方是否存在。
+## 功能架构图
 
 ```mermaid
 graph LR
-    A["智能体 A"]
-    B["智能体 B"]
-    C["Coordinator"]
-    IH(("InboxHub<br/>core/inbox.rs<br/>task + notify 队列<br/>mpsc channel"))
+    USER(("用户<br/>技术管理者"))
 
-    A -->|"push_task / push_notify"| IH
-    B -->|"push_task / push_notify"| IH
-    C -->|"push_task / push_notify"| IH
-    IH -->|"rx.recv() 唤醒"| A
-    IH -->|"rx.recv() 唤醒"| B
-    IH -->|"rx.recv() 唤醒"| C
+    subgraph APP["WorkMate 企伴 v1.0 桌面应用"]
+        direction TB
+
+        subgraph M_AGENT["智能体中心"]
+            A1["角色定义 + system prompt<br/>5 种默认模板"]
+            A2["技能挂载 PL-06"]
+            A3["MCP 工具挂载 PL-07"]
+            A4["状态实时显示<br/>idle/executing/offline"]
+        end
+
+        subgraph M_GROUP["群组协作"]
+            G1["群主 + 成员群组"]
+            G2["群聊对话 @mention 路由"]
+            G3["30s 防循环"]
+        end
+
+        subgraph M_COORD["协调者调度 Leader"]
+            C1["意图分析 + 任务拆解<br/>DAG 依赖"]
+            C2["并行派发独立步骤<br/>M4 fan-out"]
+            C3["汇报汇总"]
+            C4["计划可视化<br/>coordinator_plan/think"]
+        end
+
+        subgraph M_EXEC["子智能体执行 Worker"]
+            E1["框架内工具操作文件/命令"]
+            E2["流式思考 + 工具卡片<br/>task_tool/task_think"]
+            E3["recursion_limit 容错"]
+        end
+
+        subgraph M_TASK["任务管理"]
+            T1["DAG 依赖图可视化 ReactFlow"]
+            T2["每任务日志/交付物"]
+        end
+
+        subgraph M_SKILL["技能系统 M7"]
+            S1["内置技能库"]
+            S2["LLM 生成技能"]
+        end
+
+        subgraph M_MCP["MCP 外部工具 M9"]
+            M1["标准协议接入"]
+            M2["外部能力扩展"]
+        end
+
+        subgraph M_SCHED["定时任务 M8"]
+            SC1["Cron/间隔/一次性"]
+            SC2["执行历史"]
+        end
+
+        subgraph M_MON["执行监控 M11"]
+            MO1["Leader 面板<br/>思考链+计划+时间线"]
+            MO2["Worker 标签页<br/>工具卡片+状态徽标"]
+        end
+
+        subgraph M_WS["工作区隔离"]
+            W1["每群组独立目录"]
+            W2["safe_path 沙箱"]
+        end
+    end
+
+    USER --> M_AGENT
+    USER --> M_GROUP
+    USER --> M_TASK
+    USER --> M_SCHED
+    USER --> M_MON
+
+    M_GROUP --> M_COORD
+    M_COORD --> M_EXEC
+    M_COORD --> M_MON
+    M_EXEC --> M_MON
+    M_EXEC --> M_WS
+    M_AGENT --> M_SKILL
+    M_AGENT --> M_MCP
+    M_SKILL --> M_EXEC
+    M_MCP --> M_EXEC
+    M_SCHED --> M_COORD
+    M_COORD --> M_TASK
+    M_EXEC --> M_TASK
 ```
 
-> 核心改造：TS 版用 `setInterval` 100ms 轮询收件箱；Rust 版改为每 (group, agent) 一个 mpsc channel，`push_*` 直接 `tx.send()` 唤醒目标引擎，引擎 `rx.recv().await` 阻塞等待——**零空转、真消息驱动**。队列在 `inbox.rs` 单一真源（旧代码 Store.queues 与 SharedStateCenter 双拷贝已消除）。
+### 功能模块与代码对照
 
-## 数据流图
+| 功能模块 | 后端 | 前端 | 里程碑 |
+|---|---|---|---|
+| 智能体中心 | `api/agents.py` `models/agent.py` | `AgentPage.tsx` | M1/M2 |
+| 群组协作 | `api/groups.py` `engine/mention.py` | `GroupPage.tsx` | M3 |
+| 协调者调度 | `engine/coordinator.py` `dispatcher.py` | `LeaderPanel.tsx` | M3/M4 |
+| 子智能体执行 | `engine/worker.py` `agent_loop.py` `tools.py` | `WorkerTrace.tsx` | M5/M10 |
+| 任务管理 | `api/tasks.py` | `TaskPage.tsx` | M4 |
+| 技能系统 | `api/skills.py` `agent_executor.py` | `SkillPage.tsx` | M7 |
+| MCP 工具 | `api/mcp.py` `engine/mcp_manager.py` | 配置页 | M9 |
+| 定时任务 | `api/scheduled_tasks.py` `engine/scheduler.py` | 配置页 | M8 |
+| 执行监控 | `events/bus.py` `api/system.py` | `MonitorPage.tsx` | M11 |
+| 工作区隔离 | `engine/workspace.py` | — | M5 |
+| 实时事件 | `events/bus.py` `api/websocket.py` | `useBusEvent.ts` | M5/M11 |
 
-### 完整任务执行流程
+## 数据流：一次完整任务执行
 
 ```mermaid
 sequenceDiagram
     actor U as 用户
     participant F as 前端
-    participant C as commands
-    participant SS as InboxHub
-    participant CO as Coordinator Engine
-    participant M as 成员 Engine
-    participant CLI as Claude Code CLI
+    participant API as FastAPI routes
+    participant REG as AgentRegistry
+    participant CO as Coordinator StateGraph
+    participant LOOP as Worker create_agent
+    participant LLM as OpenAI 兼容端点
+    participant BUS as BusManager → WS
 
-    U->>F: 提交需求
-    F->>C: send_message (invoke)
-    C->>SS: push_notify → coordinator
-    C->>F: app.emit bus-event
+    U->>F: 群聊提交需求
+    F->>API: POST /api/messages
+    API->>REG: push_notify → coordinator
+    API->>BUS: emit_message_added
+    BUS-->>F: WS 推送用户消息
     F-->>U: 显示自己的消息
 
-    SS-->>CO: rx.recv() 唤醒
-    CO->>CO: 调度大脑 LLM 决策
-    CO->>CO: action = dispatch（生成计划）
-    CO->>F: 官宣调度计划 (app.emit)
-    CO->>SS: push_task → 成员（第 1 步）
+    REG-->>CO: asyncio.Queue 唤醒
+    CO->>LLM: chat_completion 决策 action=dispatch
+    CO->>BUS: emit_coordinator_think + emit_coordinator_plan
+    CO->>REG: push_task → 第一个 worker
+    BUS-->>F: WS 推送计划+派工
+    F-->>U: 看到协作计划
 
-    SS-->>M: rx.recv() 唤醒
-    M->>M: claim_task
-    M->>CLI: spawn --print task
-    CLI-->>M: stdout 逐行日志
-    M->>F: app.emit task_log
-    M->>C: complete_task
-    C->>SS: push_notify → coordinator（汇报）
+    REG-->>LOOP: asyncio.Queue 唤醒 worker
+    LOOP->>LLM: create_agent + astream_events
+    loop ReAct 循环
+        LLM-->>LOOP: AIMessage(tool_calls)
+        LOOP->>TOOLS: 执行框架内工具
+        TOOLS-->>LOOP: 工具结果
+        LOOP->>BUS: emit_task_tool(start/end) + emit_task_think
+        BUS-->>F: WS 推送工具卡片+思考
+    end
+    LLM-->>LOOP: 最终文本答案
+    LOOP->>BUS: emit_task_complete + emit_agent_status(idle)
+    LOOP->>CO: push_notify 汇报
+    BUS-->>F: WS 推送完成
+    F-->>U: 监控页状态徽标变完成
 
-    SS-->>CO: rx.recv() 收到汇报
-    CO->>CO: action = continue（下一步）
-    CO->>SS: push_task → 下一个成员
-    Note over CO: 全部完成 → 汇总
-    CO->>F: app.emit 汇总结果
+    CO->>CO: action=continue 派发下一步 / summarize 汇总
+    CO->>BUS: emit 最终汇总
+    BUS-->>F: WS 推送汇总
     F-->>U: 查看交付物
-```
-
-### 群聊消息流
-
-```mermaid
-sequenceDiagram
-    actor U as 用户
-    participant F as 前端
-    participant C as commands (send_message)
-    participant SS as InboxHub
-    participant E as AgentEngine
-
-    U->>F: 发消息（可能带 @mention）
-    F->>C: send_message (invoke)
-    C->>C: 存 Store + JSON
-    C->>F: app.emit bus-event
-    F-->>U: 看到自己的消息
-
-    alt 有 @mention
-        C->>SS: push_notify → 被 @ 的 agent
-    else 无 @mention
-        C->>SS: push_notify → coordinator
-    end
-
-    SS-->>E: rx.recv() 唤醒
-    E->>E: 大脑 LLM 决策<br/>chat / execute / ask
-    alt chat / ask
-        E->>F: app.emit 回复
-        F-->>U: 看到智能体回复
-    else execute
-        E->>SS: push_task → 自己
-        Note over E: 进入任务执行流
-    end
-```
-
-### Coordinator 调度状态机
-
-```mermaid
-stateDiagram-v2
-    [*] --> Idle
-    Idle --> Dispatch: 收到新需求<br/>action = dispatch
-    Dispatch --> Dispatching: 生成计划<br/>派发第 1 步
-    Dispatching --> Dispatching: 收到汇报<br/>action = continue<br/>派发下一步
-    Dispatching --> Summarize: 所有步骤完成
-    Dispatching --> Ask: 信息不足<br/>action = ask
-    Ask --> Idle: 用户补充后
-    Summarize --> Idle: 输出汇总
-    Idle --> Chat: 闲聊<br/>action = chat
-    Chat --> Idle
-```
-
-### 智能体间文件交换
-
-```mermaid
-sequenceDiagram
-    participant A as 开发智能体A
-    participant WD as 群组工作目录<br/>group_files/{groupId}/
-    participant CO as Coordinator
-    participant B as 测试智能体B
-
-    A->>WD: 写代码 + npm install
-    A->>CO: 汇报完成 (push_notify)
-    CO->>CO: continue → 派发测试任务
-    CO->>WD: spawn B 到同目录
-    B->>WD: 读取代码 / 依赖 / 产物
-    B->>B: 跑测试
-    B->>CO: 汇报结果
 ```
 
 ## 核心设计决策
 
-### 1. 两类智能体
+### 1. 两类智能体（LangGraph StateGraph）
 
-|  | 群主 Coordinator | 子智能体 |
+| | 群主 Coordinator | 子智能体 Worker |
 |--|------|---------|
-| 本质 | LLM API 直调 + 调度大脑 | Claude Code CLI 进程 |
-| 职责 | 意图分析、任务拆解、DAG 调度 | 开发、编译、测试 |
-| 运行位置 | tokio task（主进程内） | `tokio::process::spawn` |
-| 成本 | 低 | 中 |
+| 实现 | `coordinator.py` 的 `StateGraph`（7 节点 + conditional edge） | `worker.py` 的 `StateGraph`（brain 决策）+ `agent_loop.py` 的 `create_agent` |
+| 职责 | 意图分析、任务拆解、DAG 调度、汇总 | 开发、编译、测试 |
+| 运行形态 | 主进程内常驻 `asyncio.Task` | `create_agent` 框架内 ReAct 循环 |
+| 框架背书 | LangGraph `StateGraph` + `MemorySaver` checkpointer + `thread_id` | `langchain.agents.create_agent` + `astream_events(version="v2")` |
 
-### 2. 本地进程替代容器
+### 2. 编排用 LangGraph 原生术语
 
-子智能体都是 Claude Code CLI 实例，只需不同的 system prompt 和工作目录。本地进程启动更快，同一群组共享工作目录，天然支持文件交换和依赖复用。
+协调与执行**不使用自创比喻**，全部用 LangGraph 原生概念：
+- **StateGraph**：coordinator / worker 各一张图，节点（node）间用 conditional edge 路由（`route_after_classify`）。
+- **checkpointer + thread_id**：`MemorySaver` 保存图内状态，`thread_id = "{group_id}:{agent_id}"` 跨轮次保持上下文。
+- **create_agent + astream_events**：worker 的 ReAct 循环由框架 `create_agent` 构建，我们只订阅 `astream_events` 事件流（`on_tool_start`/`on_tool_end`/`on_chain_end`），投影成 typed `BusEventData`。
+- **asyncio.Queue channel**：agent 间不点对点直连，通过 `inbox.py` 的 `asyncio.Queue` 解耦——`push_task`/`push_notify` 投递，引擎 `await get()` 阻塞唤醒（零空转、真消息驱动）。
 
-### 3. A2A 收件箱中心（扔字条）
+### 3. 引擎不自研，全部用开源框架
 
-智能体间通信全部走 `InboxHub`（`core/inbox.rs`），禁止点对点直接调用。父/子 agent 真正成为独立任务实体，通过写/读中间队列通信。队列在 inbox.rs 单一真源（旧代码 Store.queues + SharedStateCenter 双拷贝已消除）。
+| 能力 | 开源框架 | 代码 |
+|---|---|---|
+| Agent 编排 | LangGraph `StateGraph` | `engine/coordinator.py` `engine/worker.py` |
+| ReAct 循环 | `langchain.agents.create_agent` | `engine/agent_loop.py` |
+| 事件流 | `astream_events(version="v2")` | `engine/agent_loop.py` |
+| 外部工具协议 | `langchain-mcp-adapters` → `BaseTool` | `engine/mcp_manager.py` |
+| 定时调度 | APScheduler（`AsyncIOScheduler`） | `engine/scheduler.py` |
+| 框架内工具 | `langchain_core.tools.@tool` | `engine/tools.py` |
 
-### 4. 内存 + JSON 文件存储
+### 4. 工作区隔离
 
-单机桌面应用，数据全在内存，持久化用 JSON 文件（防抖 + 原子写）。事件用 Tauri `app.emit` / `listen`，无需查询优化、事务、跨进程通信。
+每个群组一个独立工作目录 `DATA_DIR/workspaces/{group_id}/`，`safe_path()` 做路径穿越防护。worker 的框架内工具（read_file/write_file/edit_file/list_dir/run_command）通过闭包绑定到该目录，不同群组互不干扰。`Workspace` trait 预留 Docker/E2B 接缝。
 
-### 5. DAG 依赖感知调度
+### 5. SQLite + WAL 持久化
 
-无依赖的任务并行派发，有依赖的等前置完成后再派发。Coordinator 调度大脑按步骤依赖推进下游。
+单机桌面应用，数据用 SQLAlchemy async + aiosqlite（WAL 模式）。五实体（agents/groups/members/tasks/messages）+ 技能/MCP/定时任务。实时事件用 WebSocket 总线（`BusManager` 按 group 分组 fan-out），无需查询优化与跨进程通信。
 
-### 6. @mention 智能路由
+### 6. DAG 依赖感知调度
 
-群聊消息中的 @mention 自动扔字条到对应智能体收件箱。30 秒防循环机制，避免两个智能体互相 @ 死循环。
+无依赖的任务并行派发（M4 fan-out），有依赖的等前置完成后再派发。Coordinator 的 `dispatch_next` 节点找出所有 deps 满足的 pending 步骤，一次性 fan-out 到各自 worker 引擎。
+
+### 7. @mention 智能路由 + 防循环
+
+群聊消息中的 @mention 自动路由到对应智能体。30 秒防循环机制，避免两个智能体互相 @ 死循环。
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
-| 桌面框架 | Tauri v2（Rust） |
-| 前端 | React + Vite + Ant Design + ReactFlow |
-| 后端 | Rust（tokio async runtime） |
-| 群主调度 | tokio task + mpsc channel 消息驱动 |
-| 群主 LLM | OpenAI 兼容 HTTP API 直调（reqwest） |
-| 子智能体运行时 | 本地 Claude Code CLI（`tokio::process::Command`） |
-| 数据存储 | 内存 + JSON 文件（防抖 + 原子写） |
-| A2A 通信 | InboxHub（core/inbox.rs）+ tokio mpsc 收件箱 |
-| 实时事件 | Tauri `app.emit` / `listen` |
-| 进程间通信 | Tauri `invoke` / `#[command]` |
-| 跨平台 | macOS / Windows / Linux（tauri bundler） |
+| 桌面壳 | Electron 33（main process 拉起 Python + 渲染 React） |
+| 前端 | React 19 + Vite 8 + Ant Design 6 + ReactFlow |
+| 后端框架 | Python 3 + FastAPI + uvicorn |
+| Agent 编排 | LangGraph 1.2（StateGraph + MemorySaver + checkpointer） |
+| ReAct 循环 | langchain `create_agent` + `astream_events` |
+| LLM 客户端 | OpenAI 兼容 HTTP（httpx，DeepSeek/OpenAI 等端点） |
+| 外部工具协议 | langchain-mcp-adapters |
+| 定时任务 | APScheduler（AsyncIOScheduler + Cron/Interval/Date Trigger） |
+| 持久化 | SQLAlchemy async + aiosqlite（WAL 模式） |
+| 实时事件 | WebSocket 总线（`BusManager` per-group fan-out） |
+| 进程间通信 | Electron ↔ Python：HTTP REST + WebSocket |
+| 跨平台 | macOS / Windows / Linux（electron-builder） |
 
 ## 默认角色模板
 
-| 角色 | 职责 | 技能（自动映射） |
-|------|------|---------|
-| 前端工程师 | 页面开发、组件实现 | React/Vue, CSS/Tailwind, Jest/Vitest |
-| 后端工程师 | API 开发、数据库操作 | Python/FastAPI, SQL, API 设计 |
-| 测试工程师 | 测试用例、执行测试 | 测试用例设计, pytest, 缺陷跟踪 |
-| 代码审查员 | 代码质量、安全审查 | 代码审查, 安全检查, 架构评估 |
-| DevOps 工程师 | 部署、CI/CD | Docker, CI/CD, 部署脚本 |
+| 角色 | 职责 |
+|------|------|
+| 前端工程师 | 页面开发、组件实现（React/Vue, CSS, Jest） |
+| 后端工程师 | API 开发、数据库操作（Python/FastAPI, SQL） |
+| 测试工程师 | 测试用例、执行测试（pytest, 缺陷跟踪） |
+| 代码审查员 | 代码质量、安全审查 |
+| DevOps 工程师 | 部署、CI/CD（Docker, 部署脚本） |
 
 ## 快速开始
 
 ```bash
 # 安装依赖
 npm install
+pip install -r backend/requirements.txt
 
-# 开发模式（启动 Tauri + Vite dev server）
-npm run tauri:dev
+# 开发模式（同时启动 Python 后端 + Vite 前端 + Electron 壳）
+npm run dev
 
-# 打包桌面应用
-npm run tauri:build
+# 仅前端（调试 UI，需后端已起）
+npm run dev:web
+
+# 打包桌面应用（前端构建 + PyInstaller 后端 + electron-builder）
+npm run pack          # 当前平台
+npm run pack:linux    # 指定平台
 ```
 
-开发前需配置 LLM 环境变量。在项目根创建 `.env` 文件：
+开发前需配置 LLM 环境变量。在项目根创建 `.env` 文件（`main.py` 启动时自动加载）：
 
 ```bash
-# .env（run() 启动时通过 dotenvy 自动加载，无需手动 source）
+# .env（dotenvy 自动加载，无需手动 source）
 OPENAI_API_KEY=sk-...
-OPENAI_BASE_URL=https://api.openai.com/v1   # 或 DeepSeek / 其他兼容端点
-LLM_MODEL=gpt-4o                              # 可选，默认 glm-5.1
+OPENAI_BASE_URL=https://api.deepseek.com/v1   # 或 OpenAI / 其他兼容端点
+LLM_MODEL=deepseek-v4-flash                    # 可选
 ```
 
 ## 环境要求
 
-- Rust toolchain（stable）+ Tauri 系统依赖
-  - Linux：`libwebkit2gtk-4.1-dev libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev`
 - Node.js 20+
-- Claude Code CLI 已安装（或设置 `CLAUDE_CODE_PATH` 环境变量）
-- LLM API 密钥（OpenAI / DeepSeek / 其他兼容端点）
+- Python 3.10+（含 `pip`）
+- Electron 系统依赖（Linux：`libgtk-3-0 libnss3 libasound2` 等）
+- LLM API 密钥（OpenAI / DeepSeek / 其他兼容端点，通过 `.env` 注入）
 
 ## 项目结构
 
 ```
 multi-Agent/
-  src-tauri/                    # Rust + Tauri 后端
-    src/
-      lib.rs                   # Tauri 入口：.env 加载 → init → setup → 24 命令 → Exit 优雅关闭
-      main.rs                  # windows_subsystem 配置
-      core/                    # greenfield 重写后的全量后端逻辑
-        mod.rs                 # 模块树声明
-        types.rs               # serde 数据模型（byte 兼容旧 data/*.json）
-        persistence.rs          # JSON 持久化（500ms 防抖 + 原子写 .tmp→rename）
-        store.rs               # 五实体内存索引（agents/groups/members/tasks/messages）
-        inbox.rs               # A2A 收件箱（InboxHub · mpsc channel · 队列单一真源）
-        llm.rs                 # OpenAI 兼容 HTTP 客户端 + extract_json
-        prompts.rs             # worker/coordinator 提示词
-        event.rs               # 类型化事件（DomainEvent → BusEventData 投影 → app.emit）
-        workspace.rs            # Workspace trait + LocalWorkspace（留 Docker/E2B 接缝）
-        permission.rs          # allowed/denied tools + model/max_turns → CLI flags
-        middleware.rs           # outbound @mention 路由 + inbound stub（v2）
-        engine.rs              # AgentEngine + AgentRegistry（调度大脑 + DAG fail-fast）
-        commands/              # #[tauri::command]（camelCase 参数）
-          agent.rs group.rs task.rs message.rs status.rs system.rs
-    tauri.conf.json             # 窗口 / 打包配置
+  electron/                      # Electron 桌面壳
+    main.ts                     # 主进程：拉起 Python + 创建 BrowserWindow
+  backend/                      # Python 后端（FastAPI + LangGraph）
+    main.py                     # FastAPI 入口：lifespan → init_db → registry → scheduler
+    config.py                   # .env 加载（OPENAI_API_KEY/BASE_URL/LLM_MODEL）
+    api/                        # REST + WebSocket 路由
+      agents.py groups.py tasks.py messages.py
+      skills.py mcp.py scheduled_tasks.py system.py websocket.py
+    engine/                     # LangGraph 引擎层
+      registry.py              # AgentEngine + AgentRegistry（常驻 asyncio.Task）
+      coordinator.py           # 协调者 StateGraph（7 节点 + conditional edge）
+      worker.py                # Worker StateGraph（brain 决策）
+      agent_loop.py            # create_agent + astream_events（ReAct 循环）
+      agent_executor.py        # 桥接：技能注入 + MCP 注入 → run_agent_loop
+      tools.py                 # @tool 框架内工具（read_file/write_file/...）
+      mcp_manager.py           # langchain-mcp-adapters → BaseTool
+      inbox.py                 # asyncio.Queue channel（push_task/push_notify 唤醒）
+      dispatcher.py             # DAG fan-out 派发
+      mention.py                # @mention 路由 + 防循环
+      workspace.py             # 工作区隔离 + safe_path
+      scheduler.py             # APScheduler 定时触发
+    llm/                       # OpenAI 兼容 HTTP + 提示词 + JSON 提取
+    models/                    # Pydantic 数据模型（agent/group/task/message/skill/mcp/scheduled_task）
+    store/                     # SQLAlchemy async + aiosqlite + CRUD + seed
+    events/                    # bus.py BusManager + typed emit helpers
   src/                          # 前端 Renderer（React）
-    pages/                      # 页面组件
-    components/                 # 通用组件
-    services/api.ts             # invoke() 调用层
-    hooks/useBusEvent.ts        # Tauri listen 实时事件 hook
-  data/                         # 旧开发期数据（历史遗留，运行时数据目录见下）
+    pages/                      # AgentPage · GroupPage · TaskPage · MonitorPage · SkillPage
+    components/                 # LeaderPanel · WorkerTrace · LogPanel · AgentAvatar · Layout
+    services/api.ts            # REST fetch + WebSocket onBusEvent
+    hooks/useBusEvent.ts        # logs / events / agentStatuses / plan
 ```
 
-> 运行时数据目录：`~/.local/share/multi-agent/`（Linux），含 `agents.json` / `groups.json` / `members.json` / `tasks.json` / `messages.json` / `queues/<group>.json` / `group_files/<group>/`。
+> 运行时数据目录：`MULTI_AGENT_DATA_DIR` 环境变量指定（Electron 托管时设为 `app.getPath('userData')`），含 SQLite 数据库 + `workspaces/{group_id}/` 工作目录 + `logs/`。
 
 ## 路线图
 
-- [x] Tauri v2 + Rust 后端重写
-- [x] A2A 引擎 tokio mpsc 消息驱动化
-- [ ] Coordinator workflow 全流程迁移（analyze/decompose/monitor/summarize）
-- [ ] settings IPC 迁移为 Tauri command
-- [ ] 清理 Electron 残留（`electron/` `dist-electron/` `main/`）
-- [ ] 端到端 LLM 协作流实测验证
+- [x] Electron + Python(FastAPI+LangGraph) 后端推倒重来（M1/M2/M3）
+- [x] LangGraph coordinator + worker 双 StateGraph + create_agent ReAct 循环（M3/M5/M10）
+- [x] DAG 并行派发 + 任务管理（M4）
+- [x] 技能系统（内置 + LLM 生成 + 挂载注入，M7）
+- [x] MCP 外部工具集成（langchain-mcp-adapters，M9）
+- [x] 定时任务（APScheduler + 复用 push_task + 执行历史，M8）
+- [x] 黑盒透明化 UI（typed BusEventData + LeaderPanel + WorkerTrace 监控，M11）
+- [x] Apache License 2.0 开源协议
+- [ ] 执行可控：停止执行 / 超时降级 / 失败重派
+- [ ] 产物交付：交付物下载 / 文件浏览
+- [ ] 计划确认：用户确认协作计划后执行
+- [ ] 打包发布（PyInstaller + electron-builder）
+
+## License
+
+本项目基于 [Apache License 2.0](./LICENSE) 开源。
