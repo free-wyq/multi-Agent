@@ -25,7 +25,7 @@ from engine.inbox import (
     register_inbox,
     unregister_inbox,
 )
-from engine.cli_executor import execute_claude_cli
+from engine.agent_executor import execute_agent_task
 from engine.mention import route_mentions
 from engine.worker import build_worker_graph
 from events import emit_message_added, emit_task_completed, emit_task_log
@@ -148,7 +148,7 @@ class AgentEngine:
         await self._drain_pending()
 
     async def _run_worker_task(self, task: dict[str, Any]) -> None:
-        """Worker task execution. M3 uses the mock CLI executor; M5 swaps in real Claude Code CLI."""
+        """Worker task execution via the agentic loop (M5: LLM + bind_tools)."""
         agent_def = await crud.get_agent(self.agent_id)
         if not agent_def:
             await complete_task(task["id"], False, "找不到智能体定义")
@@ -164,7 +164,7 @@ class AgentEngine:
         async def on_log(line: str) -> None:
             await emit_task_log(group_id, task_id, agent_id, line)
 
-        result = await execute_claude_cli(
+        result = await execute_agent_task(
             group_id, agent_dict, task_content, task_id, on_log
         )
 

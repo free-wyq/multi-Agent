@@ -508,5 +508,28 @@ async def clear_messages_by_group(group_id: str) -> bool:
 # ── Files (placeholder until M5) ────────────────────────────────
 
 async def list_files(group_id: str) -> list[GroupFile]:
-    """M5 will implement real workspace file listing. M2 returns empty."""
-    return []
+    """List files in the group's shared workspace (DATA_DIR/workspaces/{group_id}/).
+
+    Returns top-level files with name/size/modified_at. Empty list if the
+    workspace directory does not exist yet (no task has produced artifacts).
+    """
+    from engine.workspace import workspace_path
+
+    ws = workspace_path(group_id)
+    if not ws.exists():
+        return []
+    out: list[GroupFile] = []
+    for entry in sorted(ws.iterdir(), key=lambda p: p.name):
+        if entry.is_file():
+            st = entry.stat()
+            out.append(
+                GroupFile(
+                    name=entry.name,
+                    size=st.st_size,
+                    modified_at=datetime.fromtimestamp(st.st_mtime, tz=timezone.utc)
+                    .isoformat()
+                    .replace("+00:00", "Z"),
+                )
+            )
+    return out
+
