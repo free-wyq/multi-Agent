@@ -24,3 +24,10 @@ Thumbs.db
 
 # Data
 data/
+
+# Python
+__pycache__/
+*.py[cod]
+*.db
+*.db-wal
+*.db-shm
