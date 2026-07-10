@@ -7,3 +7,5 @@ httpx
 langgraph
 langchain-openai
 langchain-core
+mcp
+langchain-mcp-adapters

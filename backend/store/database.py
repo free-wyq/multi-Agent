@@ -68,6 +68,7 @@ def _migrate_schema() -> None:
     try:
         conn = sqlite3.connect(str(DB_PATH))
         _ensure_column(conn, "agents", "mounted_skills", "JSON NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "agents", "mounted_mcp", "JSON NOT NULL DEFAULT '[]'")
         conn.close()
     except Exception:
         # database may not exist yet on first import; create_all handles it

@@ -20,15 +20,22 @@ from models import (
     Group,
     GroupFile,
     GroupMember,
+    McpConnection,
     Message,
+    ScheduledTask,
+    ScheduledTaskCreatePayload,
+    ScheduledTaskRun,
     Skill,
     Task,
 )
 from store.entities import (
     AgentEntity,
     GroupEntity,
+    McpConnectionEntity,
     MemberEntity,
     MessageEntity,
+    ScheduledTaskEntity,
+    ScheduledTaskRunEntity,
     SkillEntity,
     TaskEntity,
 )
@@ -40,6 +47,9 @@ _PREFIX_MAP = {
     "task": "task_",
     "msg": "msg_",
     "skill": "skill_",
+    "mcp": "mcp_",
+    "sched": "sched_",
+    "schedrun": "schedrun_",
 }
 
 
@@ -65,6 +75,7 @@ def _agent_to_model(a: AgentEntity) -> AgentDefinition:
             "skills": a.skills or [],
             "extra_skills": a.extra_skills or [],
             "mounted_skills": a.mounted_skills or [],
+            "mounted_mcp": a.mounted_mcp or [],
             "allowed_tools": a.allowed_tools or [],
             "denied_tools": a.denied_tools or [],
             "startup_strategy": a.startup_strategy,
@@ -106,6 +117,7 @@ async def create_agent(payload: Any) -> AgentDefinition:
         skills=list(getattr(payload, "skills", []) or []),
         extra_skills=list(getattr(payload, "extra_skills", []) or []),
         mounted_skills=list(getattr(payload, "mounted_skills", []) or []),
+        mounted_mcp=list(getattr(payload, "mounted_mcp", []) or []),
         allowed_tools=[],
         denied_tools=[],
         startup_strategy="",
@@ -711,5 +723,200 @@ async def resolve_skill_contents(skill_ids: list[str]) -> list[str]:
             row = by_id.get(sid)
             if row and row.content:
                 out.append(row.content)
+        return out
+
+
+# ── MCP connection helpers ──────────────────────────────────────
+
+
+def _mcp_to_model(m: McpConnectionEntity) -> McpConnection:
+    return McpConnection.model_validate(
+        {
+            "id": m.id,
+            "name": m.name,
+            "transport": m.transport,
+            "command": m.command,
+            "args": m.args or [],
+            "env": m.env,
+            "url": m.url,
+            "headers": m.headers,
+            "enabled": bool(m.enabled),
+            "created_at": m.created_at,
+            "updated_at": m.updated_at,
+        }
+    )
+
+
+def _mcp_connection_config(m: McpConnectionEntity) -> dict:
+    """Build a langchain-mcp-adapters connection dict from an entity.
+
+    stdio: {transport, command, args, env?}
+    sse:   {transport, url, headers?}
+    """
+    if m.transport == "sse":
+        cfg: dict = {"transport": "sse", "url": m.url}
+        if m.headers:
+            cfg["headers"] = m.headers
+        return cfg
+    cfg = {"transport": "stdio", "command": m.command, "args": list(m.args or [])}
+    if m.env:
+        cfg["env"] = m.env
+    return cfg
+
+
+async def list_mcp_connections() -> list[McpConnection]:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(McpConnectionEntity).order_by(McpConnectionEntity.created_at)
+            )
+        ).scalars().all()
+        return [_mcp_to_model(r) for r in rows]
+
+
+async def get_mcp_connection(mcp_id: str) -> McpConnection | None:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(McpConnectionEntity, mcp_id)
+        return _mcp_to_model(row) if row else None
+
+
+async def create_mcp_connection(payload: Any) -> McpConnection:
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    entity = McpConnectionEntity(
+        id=_next_id("mcp"),
+        name=payload.name,
+        transport=payload.transport or "stdio",
+        command=payload.command or "",
+        args=list(payload.args or []),
+        env=payload.env,
+        url=payload.url or "",
+        headers=payload.headers,
+        enabled=1 if getattr(payload, "enabled", True) else 0,
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _mcp_to_model(entity)
+
+
+async def update_mcp_connection(mcp_id: str, payload: Any) -> McpConnection | None:
+    from store.database import SessionLocal
+
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(McpConnectionEntity, mcp_id)
+        if not row:
+            return None
+        for k, v in data.items():
+            if k in ("name", "transport", "command", "args", "env", "url", "headers", "enabled"):
+                setattr(row, k, v)
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return await get_mcp_connection(mcp_id)
+
+
+async def set_mcp_enabled(mcp_id: str, enabled: bool) -> McpConnection | None:
+    """Toggle a connection's enabled state (PRD MC-03 启用/禁用)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(McpConnectionEntity, mcp_id)
+        if not row:
+            return None
+        row.enabled = 1 if enabled else 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return await get_mcp_connection(mcp_id)
+
+
+async def delete_mcp_connection(mcp_id: str) -> bool:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(McpConnectionEntity, mcp_id)
+        if not row:
+            return False
+        # detach from any agent that has it mounted (MC-04 cleanup)
+        agents = (
+            await db.execute(select(AgentEntity).where(AgentEntity.mounted_mcp.contains(mcp_id)))
+        ).scalars().all()
+        for a in agents:
+            a.mounted_mcp = [s for s in (a.mounted_mcp or []) if s != mcp_id]
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def mount_mcp(agent_id: str, mcp_id: str) -> AgentDefinition | None:
+    """Append mcp_id to the agent's mounted_mcp (PRD MC-06)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        agent = await db.get(AgentEntity, agent_id)
+        if not agent:
+            return None
+        mcp = await db.get(McpConnectionEntity, mcp_id)
+        if not mcp:
+            return None
+        mounted = list(agent.mounted_mcp or [])
+        if mcp_id not in mounted:
+            mounted.append(mcp_id)
+            agent.mounted_mcp = mounted
+            agent.updated_at = _now_iso()
+            await db.commit()
+            await db.refresh(agent)
+    return await get_agent(agent_id)
+
+
+async def unmount_mcp(agent_id: str, mcp_id: str) -> AgentDefinition | None:
+    """Remove mcp_id from the agent's mounted_mcp."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        agent = await db.get(AgentEntity, agent_id)
+        if not agent:
+            return None
+        mounted = [s for s in (agent.mounted_mcp or []) if s != mcp_id]
+        agent.mounted_mcp = mounted
+        agent.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(agent)
+    return await get_agent(agent_id)
+
+
+async def resolve_mcp_configs(mcp_ids: list[str]) -> list[tuple[str, dict]]:
+    """Resolve mounted mcp ids to (id, connection_config) for enabled ones.
+
+    Used by the worker executor to build a MultiServerMCPClient and load tools
+    (PL-07). Disabled connections are skipped so toggling off a server
+    immediately removes its tools from the agent.
+    """
+    from store.database import SessionLocal
+
+    if not mcp_ids:
+        return []
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(McpConnectionEntity).where(McpConnectionEntity.id.in_(mcp_ids))
+            )
+        ).scalars().all()
+        by_id = {r.id: r for r in rows}
+        out: list[tuple[str, dict]] = []
+        for mid in mcp_ids:
+            row = by_id.get(mid)
+            if row and row.enabled:
+                out.append((row.name, _mcp_connection_config(row)))
         return out
 

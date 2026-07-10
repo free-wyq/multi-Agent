@@ -20,6 +20,7 @@ class AgentDefinition(BaseModel):
     skills: list[str] = []
     extra_skills: list[str] = []
     mounted_skills: list[str] = []
+    mounted_mcp: list[str] = []
     allowed_tools: list[str] = []
     denied_tools: list[str] = []
     startup_strategy: str = ""
@@ -40,4 +41,5 @@ class AgentCreatePayload(BaseModel):
     extra_skills: list[str] = []
     skills: list[str] = []
     mounted_skills: list[str] = []
+    mounted_mcp: list[str] = []
     description: str | None = None

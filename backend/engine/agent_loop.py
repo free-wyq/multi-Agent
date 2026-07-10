@@ -28,6 +28,9 @@ logger = logging.getLogger("multi-agent.agent_loop")
 
 DEFAULT_MAX_TURNS = 15
 
+# extra tools beyond the framework-internal set (MCP, injected per-run)
+_EXTRA_TOOLS: list = []
+
 _TOOL_SYSTEM_SUFFIX = """
 
 You have access to the following tools for operating on files and running
@@ -42,6 +45,23 @@ When you need to create or modify files, call the appropriate tool directly.
 Work step by step: read existing files if needed, then write/edit. When the
 task is done, reply with a concise text summary (no tool call).
 """
+
+
+def set_extra_tools(tools: list) -> None:
+    """Inject additional tools (MCP) for the next ainvoke (PRD PL-07).
+
+    Set by the executor before calling ``run_agent_loop``. Cleared after the
+    loop so concurrent agent runs on different groups don't bleed tool sets.
+    """
+    global _EXTRA_TOOLS
+    _EXTRA_TOOLS = list(tools)
+
+
+def _format_tool_names(tools: list) -> str:
+    """Render tool names for the system prompt."""
+    if not tools:
+        return ""
+    return ", ".join(t.name for t in tools)
 
 
 def _summarize_args(args: Any) -> str:
@@ -77,6 +97,9 @@ async def run_agent_loop(
     """
     model_name = agent_model or LLM_MODEL
     tools = tools_for_group(group_id)
+    # merge MCP tools injected by the executor (PL-07), if any
+    mcp_tools = list(_EXTRA_TOOLS)
+    tools = tools + mcp_tools
 
     try:
         model = ChatOpenAI(
@@ -95,6 +118,12 @@ async def run_agent_loop(
     if sys_content:
         sys_content += "\n"
     sys_content += _TOOL_SYSTEM_SUFFIX
+    if mcp_tools:
+        sys_content += (
+            "\nYou also have access to these external (MCP) tools: "
+            + _format_tool_names(mcp_tools)
+            + ". Use them when the task requires an external capability.\n"
+        )
 
     messages: list[Any] = [SystemMessage(content=sys_content)]
     messages.append(HumanMessage(content=task_content))

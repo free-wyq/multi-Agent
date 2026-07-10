@@ -39,6 +39,10 @@ class AgentEntity(Base):
     # At execution time the engine resolves these to skill content and injects
     # it into the worker system prompt (PL-06 技能自主使用).
     mounted_skills: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # IDs of McpConnectionEntity rows mounted onto this agent (PRD MC-06).
+    # At execution time the engine loads these as LangChain tools via
+    # langchain-mcp-adapters and merges with the framework tools (PL-07).
+    mounted_mcp: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     allowed_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     denied_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     startup_strategy: Mapped[str] = mapped_column(String, nullable=False, default="")
@@ -117,6 +121,31 @@ class MessageEntity(Base):
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso, index=True)
 
 
+class McpConnectionEntity(Base):
+    """A configured external MCP tool connection (PRD 3.4).
+
+    Each connection is either a stdio spawn (command + args + env) or a remote
+    SSE endpoint (url + headers). Agents mount connections by id
+    (``AgentEntity.mounted_mcp``); at execution time the engine builds a
+    ``MultiServerMCPClient`` from the enabled ones and loads LangChain tools
+    (PL-07). ``enabled`` is the on/off toggle (PRD MC-03).
+    """
+
+    __tablename__ = "mcp_connections"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    transport: Mapped[str] = mapped_column(String, nullable=False, default="stdio")
+    command: Mapped[str] = mapped_column(String, nullable=False, default="")
+    args: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    env: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    url: Mapped[str] = mapped_column(String, nullable=False, default="")
+    headers: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    enabled: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+
+
 class SkillEntity(Base):
     """A reusable skill capability document (PRD 3.2).
 
@@ -137,3 +166,46 @@ class SkillEntity(Base):
     tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+
+
+class ScheduledTaskEntity(Base):
+    """A scheduled task that fires a prompt at an agent on a schedule (PRD 3.5).
+
+    ``schedule_type`` is one of ``cron`` / ``interval`` / ``once``:
+    - cron: ``cron`` holds a cron expression
+    - interval: ``interval_seconds`` holds the seconds between runs
+    - once: ``run_at`` holds an ISO8601 datetime to fire a single time
+
+    At fire time the scheduler pushes the ``content`` prompt onto the agent's
+    inbox (reusing the resident engine), so scheduled execution uses the same
+    agentic loop as interactive dispatch. ``enabled`` is the pause/resume toggle
+    (TM-05).
+    """
+
+    __tablename__ = "scheduled_tasks"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(String, nullable=False, default="")
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    schedule_type: Mapped[str] = mapped_column(String, nullable=False, default="interval")
+    cron: Mapped[str] = mapped_column(String, nullable=False, default="")
+    interval_seconds: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    run_at: Mapped[str] = mapped_column(String, nullable=False, default="")
+    enabled: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+
+
+class ScheduledTaskRunEntity(Base):
+    """One execution record of a scheduled task (PRD TM-07 执行历史)."""
+
+    __tablename__ = "scheduled_task_runs"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    scheduled_task_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending")
+    result: Mapped[str | None] = mapped_column(String, nullable=True)
+    started_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
