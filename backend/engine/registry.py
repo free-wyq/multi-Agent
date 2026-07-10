@@ -28,7 +28,14 @@ from engine.inbox import (
 from engine.agent_executor import execute_agent_task
 from engine.mention import route_mentions
 from engine.worker import build_worker_graph
-from events import emit_message_added, emit_task_completed, emit_task_log
+from events import (
+    emit_agent_status,
+    emit_message_added,
+    emit_task_completed,
+    emit_task_log,
+    emit_task_think,
+    emit_task_tool,
+)
 from store import crud
 
 logger = logging.getLogger("multi-agent.registry")
@@ -90,6 +97,9 @@ class AgentEngine:
                 pass
         unregister_inbox(self.group_id, self.agent_id)
         self.status = "offline"
+        await emit_agent_status(
+            self.group_id, self.agent_id, self.name, "offline", None
+        )
         logger.info("[engine] %s stopped", self.name)
 
     async def _run_loop(self) -> None:
@@ -123,6 +133,9 @@ class AgentEngine:
 
         self.status = "executing"
         self.current_task_id = task["id"]
+        await emit_agent_status(
+            self.group_id, self.agent_id, self.name, "executing", task["id"]
+        )
         preview = (task.get("content") or "")[:50]
         await self._publish_log(task["id"], f"▶ [{self.name}] 开始执行任务: {preview}...")
 
@@ -144,7 +157,7 @@ class AgentEngine:
         else:
             await self._run_worker_task(task)
 
-        self._reset_idle(task["id"])
+        await self._reset_idle(task["id"])
         await self._drain_pending()
 
     async def _run_worker_task(self, task: dict[str, Any]) -> None:
@@ -161,8 +174,28 @@ class AgentEngine:
         task_id = task["id"]
         task_content = task.get("content") or ""
 
-        async def on_log(line: str) -> None:
-            await emit_task_log(group_id, task_id, agent_id, line)
+        async def on_log(kind: str, content: str, data: dict | None = None) -> None:
+            if kind in ("tool_start", "tool_end"):
+                phase = "start" if kind == "tool_start" else "end"
+                await emit_task_tool(
+                    group_id,
+                    task_id,
+                    agent_id,
+                    phase,
+                    (data or {}).get("name", ""),
+                    content,
+                    data,
+                )
+            elif kind in ("think", "answer"):
+                await emit_task_think(
+                    group_id,
+                    task_id,
+                    agent_id,
+                    "thinking" if kind == "think" else "final",
+                    content,
+                )
+            else:
+                await emit_task_log(group_id, task_id, agent_id, content)
 
         result = await execute_agent_task(
             group_id, agent_dict, task_content, task_id, on_log
@@ -325,9 +358,12 @@ class AgentEngine:
         )
         await emit_message_added(msg.model_dump())
 
-    def _reset_idle(self, task_id: str) -> None:
+    async def _reset_idle(self, task_id: str) -> None:
         self.status = "idle"
         self.current_task_id = None
+        await emit_agent_status(
+            self.group_id, self.agent_id, self.name, "idle", None
+        )
 
     async def _drain_pending(self) -> None:
         """After finishing a task, process the backlog (Rust drain_pending)."""

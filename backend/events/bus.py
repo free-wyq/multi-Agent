@@ -89,7 +89,12 @@ async def emit_task_dispatched(
             "receiver_id": agent_id,
             "type": "task_dispatch",
             "content": instruction,
-            "data": {"step": step, "agent_name": agent_name, "agent_id": agent_id},
+            "data": {
+                "step": step,
+                "agent_name": agent_name,
+                "agent_id": agent_id,
+                "instruction": instruction,
+            },
             "timestamp": _ts(),
         },
     )
@@ -131,6 +136,135 @@ async def emit_task_log(group_id: str, task_id: str, sender_id: str, line: str) 
             "type": "task_log",
             "content": line,
             "data": None,
+            "timestamp": _ts(),
+        },
+    )
+
+
+# ── M11 typed event helpers (structured agent execution transparency) ────
+
+
+async def emit_task_tool(
+    group_id: str,
+    task_id: str,
+    agent_id: str,
+    phase: str,
+    name: str,
+    content: str,
+    data: dict[str, Any] | None,
+) -> None:
+    """Tool invocation lifecycle (on_tool_start / on_tool_end)."""
+    payload: dict[str, Any] = {"phase": phase, "name": name}
+    if data:
+        payload.update(data)
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": task_id,
+            "sender_id": agent_id,
+            "receiver_id": "broadcast",
+            "type": "task_tool",
+            "content": content,
+            "data": payload,
+            "timestamp": _ts(),
+        },
+    )
+
+
+async def emit_task_think(
+    group_id: str,
+    task_id: str,
+    agent_id: str,
+    phase: str,
+    content: str,
+) -> None:
+    """Agent reasoning (intermediate thinking) or final answer."""
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": task_id,
+            "sender_id": agent_id,
+            "receiver_id": "broadcast",
+            "type": "task_think",
+            "content": content,
+            "data": {"phase": phase},
+            "timestamp": _ts(),
+        },
+    )
+
+
+async def emit_agent_status(
+    group_id: str,
+    agent_id: str,
+    agent_name: str,
+    status: str,
+    current_task_id: str | None,
+) -> None:
+    """Agent status transition (idle / executing / offline)."""
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": current_task_id,
+            "sender_id": agent_id,
+            "receiver_id": "broadcast",
+            "type": "agent_status",
+            "content": None,
+            "data": {
+                "status": status,
+                "current_task_id": current_task_id,
+                "agent_name": agent_name,
+            },
+            "timestamp": _ts(),
+        },
+    )
+
+
+async def emit_coordinator_plan(
+    group_id: str,
+    coordinator_id: str,
+    plan: list[dict[str, Any]],
+) -> None:
+    """Coordinator dispatch plan (steps, DAG dependencies)."""
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": None,
+            "sender_id": coordinator_id,
+            "receiver_id": "broadcast",
+            "type": "coordinator_plan",
+            "content": None,
+            "data": {"plan": plan},
+            "timestamp": _ts(),
+        },
+    )
+
+
+async def emit_coordinator_think(
+    group_id: str,
+    coordinator_id: str,
+    action: str,
+    content: str,
+) -> None:
+    """Coordinator thinking step (action + reasoning)."""
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": None,
+            "sender_id": coordinator_id,
+            "receiver_id": "broadcast",
+            "type": "coordinator_think",
+            "content": content,
+            "data": {"action": action},
             "timestamp": _ts(),
         },
     )

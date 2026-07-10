@@ -17,7 +17,7 @@ from langgraph.graph import END, START, StateGraph
 
 from engine.dispatcher import dispatch_ready_steps
 from engine.state import CoordinatorState
-from events import emit_message_added
+from events import emit_coordinator_plan, emit_coordinator_think, emit_message_added
 from llm.client import chat_completion, get_llm_config
 from llm.extract_json import extract_json
 from llm.prompts import COORDINATOR_SYSTEM, build_coordinator_prompt
@@ -171,6 +171,9 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "plan": [],
         }
 
+    await emit_coordinator_think(
+        state["group_id"], state["agent_id"], decision["action"], decision["content"]
+    )
     return {
         "action_taken": decision["action"],
         "reply_content": decision["content"],
@@ -202,6 +205,9 @@ async def node_dispatch(state: CoordinatorState) -> dict:
         state["group_id"],
         state["agent_id"],
         f"📋 已制定协作计划，开始调度：\n{plan_summary}",
+    )
+    await emit_coordinator_plan(
+        state["group_id"], state["agent_id"], state.get("dispatch_plan") or []
     )
     return {}
 

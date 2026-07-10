@@ -42,7 +42,7 @@ async def execute_agent_task(
     agent: dict[str, Any],
     task_content: str,
     task_id: str,
-    on_log: Callable[[str], Awaitable[None]] | None = None,
+    on_log: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
 ) -> dict[str, Any]:
     """Execute a worker task via the agentic loop.
 
@@ -67,7 +67,9 @@ async def execute_agent_task(
         system_prompt = _compose_system_prompt(system_prompt, skill_contents)
         if on_log:
             await on_log(
-                f"[技能] 已加载 {len(skill_contents)} 个挂载技能到上下文"
+                "log",
+                f"[技能] 已加载 {len(skill_contents)} 个挂载技能到上下文",
+                None,
             )
 
     # PL-07: load MCP tools from mounted connections, inject into the loop
@@ -81,12 +83,14 @@ async def execute_agent_task(
         except Exception as exc:
             logger.warning("[agent_executor] MCP tools load failed: %s", exc)
             if on_log:
-                await on_log(f"[警告] MCP 工具加载失败: {exc}")
+                await on_log("log", f"[警告] MCP 工具加载失败: {exc}", None)
         if mcp_tools:
             if on_log:
                 await on_log(
+                    "log",
                     f"[MCP] 已挂载 {len(mcp_tools)} 个外部工具: "
-                    + ", ".join(t.name for t in mcp_tools)
+                    + ", ".join(t.name for t in mcp_tools),
+                    None,
                 )
             set_extra_tools(mcp_tools)
         else:

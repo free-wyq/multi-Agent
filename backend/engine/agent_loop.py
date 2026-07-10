@@ -124,7 +124,7 @@ async def run_agent_loop(
     agent_name: str,
     task_content: str,
     task_id: str,
-    on_log: Callable[[str], Awaitable[None]] | None = None,
+    on_log: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
     max_turns: int = DEFAULT_MAX_TURNS,
     system_prompt: str = "",
     agent_model: str = "",
@@ -149,7 +149,7 @@ async def run_agent_loop(
     except Exception as exc:
         logger.exception("[agent_loop %s] failed to init model", agent_name)
         if on_log:
-            await on_log(f"[错误] 模型初始化失败: {exc}")
+            await on_log("log", f"[错误] 模型初始化失败: {exc}", None)
         return {"success": False, "exit_code": 1, "output": f"model init error: {exc}"}
 
     sys_content = (system_prompt or "").strip()
@@ -173,7 +173,7 @@ async def run_agent_loop(
     except Exception as exc:
         logger.exception("[agent_loop %s] create_agent failed", agent_name)
         if on_log:
-            await on_log(f"[错误] 智能体图构建失败: {exc}")
+            await on_log("log", f"[错误] 智能体图构建失败: {exc}", None)
         return {"success": False, "exit_code": 1, "output": f"create_agent error: {exc}"}
 
     # recursion_limit: each "model call + tool exec" ≈ 2 super-steps
@@ -188,7 +188,9 @@ async def run_agent_loop(
 
     if on_log:
         await on_log(
-            f"[开始] 智能体 {agent_name} 开始执行任务（max_turns={max_turns}, recursion_limit={recursion_limit}）"
+            "log",
+            f"[开始] 智能体 {agent_name} 开始执行任务（max_turns={max_turns}, recursion_limit={recursion_limit}）",
+            None,
         )
 
     output = ""
@@ -208,7 +210,11 @@ async def run_agent_loop(
                 args_input = data.get("input", {})
                 summary = _summarize_args(args_input)
                 if on_log:
-                    await on_log(f"[工具] {name}({summary})")
+                    await on_log(
+                        "tool_start",
+                        f"[工具] {name}({summary})",
+                        {"name": name, "args": args_input},
+                    )
 
             elif etype == "on_tool_end":
                 raw_output = data.get("output", "")
@@ -218,7 +224,11 @@ async def run_agent_loop(
                     out_str = str(raw_output)
                 last_tool_output = out_str
                 if on_log:
-                    await on_log(f"[工具] {name} → {out_str[:200]}")
+                    await on_log(
+                        "tool_end",
+                        f"[工具] {name} → {out_str[:200]}",
+                        {"name": name, "output": out_str[:2000]},
+                    )
 
             elif etype == "on_chain_end" and name == "model":
                 # Model node finished — check if this is the final answer
@@ -226,10 +236,23 @@ async def run_agent_loop(
                 ai_content = _extract_ai_content(model_output)
                 if ai_content:
                     output = ai_content
-                    # If no tool_calls → final text answer → log [完成]
                     tool_calls = _extract_tool_calls(model_output)
-                    if not tool_calls and on_log:
-                        await on_log(f"[完成] {output[:200]}")
+                    if tool_calls:
+                        # intermediate reasoning before a tool call
+                        if on_log:
+                            await on_log(
+                                "think",
+                                ai_content,
+                                {"phase": "thinking"},
+                            )
+                    else:
+                        # final text answer
+                        if on_log:
+                            await on_log(
+                                "answer",
+                                output[:200],
+                                {"phase": "final"},
+                            )
 
     except GraphRecursionError:
         logger.warning(
@@ -237,7 +260,9 @@ async def run_agent_loop(
         )
         if on_log:
             await on_log(
-                f"[停止] 达到最大轮次 {max_turns}（recursion_limit={recursion_limit}）"
+                "log",
+                f"[停止] 达到最大轮次 {max_turns}（recursion_limit={recursion_limit}）",
+                None,
             )
         # Try to recover last known output from checkpoint state
         if not output:
@@ -259,13 +284,13 @@ async def run_agent_loop(
     except Exception as exc:
         logger.exception("[agent_loop %s] execution error", agent_name)
         if on_log:
-            await on_log(f"[错误] 执行异常: {exc}")
+            await on_log("log", f"[错误] 执行异常: {exc}", None)
         return {"success": False, "exit_code": 1, "output": f"execution error: {exc}"}
 
     if not output:
         # Stream ended without a final text answer; fall back to last tool output
         output = last_tool_output or "(无输出)"
         if on_log:
-            await on_log(f"[完成] {output[:200]}")
+            await on_log("log", f"[完成] {output[:200]}", None)
 
     return {"success": True, "exit_code": 0, "output": output[:2000]}
