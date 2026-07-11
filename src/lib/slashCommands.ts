@@ -36,6 +36,7 @@ import { createElement } from 'react'
 
 import ModelCard from '../components/ModelCard'
 import SkillsCard from '../components/SkillsCard'
+import StatusCard from '../components/StatusCard'
 import ToolsCard from '../components/ToolsCard'
 import { configApi, groupApi, messageApi, slashApi, skillApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
@@ -228,6 +229,30 @@ async function handleSkills(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
+ * SC-07 `/status` handler：纯本地聚合运行状态，StatusCard 渲染（不调 LLM 不调 api）。
+ *
+ * 数据全部来自 ctx.busState（BusEventContext 快照）——agentStatuses（各 agent 的
+ * idle/executing/offline）、plan（驻留计划）、streaming（流式 task_id→文本）。零网络开销，
+ * 即时反馈「谁在跑、跑到哪」。
+ *
+ * /status 是只读快照命令——不调任何 api（区别于 /tools /model /skills 要拉后端），
+ * busState 由 ChatPanel 从 useBusEventContext 注入，handler 直接读快照渲染。
+ *
+ * 群组判空：未选群时 agentStatuses 通常为空（无群组上下文 → 无 agent 状态），StatusCard
+ * 展示「未选会话，无状态可聚合」占位。不报错（/status 在任何状态都可调，只是无内容时提示）。
+ */
+function handleStatus(ctx: SlashCommandContext): void {
+  ctx.renderCard(
+    createElement(StatusCard, {
+      groupId: ctx.groupId,
+      agentStatuses: ctx.busState.agentStatuses,
+      plan: ctx.busState.plan,
+      streaming: ctx.busState.streaming,
+    }),
+  )
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -264,7 +289,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'status',
     description: '查看运行状态（模型/各智能体状态，纯本地聚合）',
     usage: '/status',
-    handler: stub('status'),
+    handler: handleStatus,
   },
   {
     name: 'tools',
