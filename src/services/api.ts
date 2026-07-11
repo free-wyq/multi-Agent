@@ -36,6 +36,14 @@ export interface AgentCreatePayload {
   skills?: string[]
   system_prompt?: string
   description?: string
+  /** AD-02: agentApi.update 透传的工具权限白/黑名单（后端 AgentCreatePayload extra="allow"
+   *  + AgentEntity 有 allowed_tools/denied_tools 列，update_agent model_dump(exclude_unset)
+   *  + setattr 落库）。create 时通常不传（挂载是独立动作），仅 update 用。 */
+  allowed_tools?: string[]
+  denied_tools?: string[]
+  /** AD-02: agentApi.update 透传的运行参数（后端 AgentEntity model/max_turns 列）。 */
+  model?: string
+  max_turns?: number
 }
 
 /**
