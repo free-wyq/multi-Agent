@@ -231,7 +231,7 @@ main_loop() {
         else
           commit_msg="feat: $task_desc"
         fi
-        if git commit -m "$commit_msg" --no-verify --quiet 2>>"$LOG_FILE"; then
+        if git commit -m "$commit_msg" -m "Co-Authored-By: Claude <noreply@anthropic.com>" --no-verify --quiet 2>>"$LOG_FILE"; then
           log "📦 已提交: $commit_msg"
         else
           log "⚠️ 提交失败"

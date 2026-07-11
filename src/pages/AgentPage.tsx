@@ -332,7 +332,10 @@ export default function AgentPage() {
   const roleValue = Form.useWatch('role', form)
 
   return (
-    <div className="agent-page">
+    <div
+      className="agent-page"
+      style={{ height: '100%', minHeight: 0, overflowY: 'auto', padding: 16 }}
+    >
       {/* ── 顶部横幅 ── */}
       <div className="agent-hero">
         <div className="agent-hero-content">

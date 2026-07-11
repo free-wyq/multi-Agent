@@ -191,10 +191,19 @@ export default function TaskPage() {
   }
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: '100%',
+        minHeight: 0,
+        gap: 16,
+        padding: 16,
+      }}
+    >
       {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「任务看板」与 Tab 标题「任务」重复，移除；
           Select 独占该行右对齐（原与 h2 space-between，现 flex-end）。 */}
-      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', flexShrink: 0 }}>
         <Select
           style={{ width: 240 }}
           placeholder="选择群组"
@@ -204,12 +213,28 @@ export default function TaskPage() {
         />
       </div>
 
-      {/* DAG 图 */}
-      <Card title="任务依赖图" loading={loading} style={{ height: 360 }}>
+      {/* DAG 图
+          L1-04：去写死 height:300 / Card height:360 —— 改 flex 弹性容器。
+          ReactFlow 要求父容器有确定 width+height（否则报 "parent container needs
+          width and a height"）。全屏路由下（/tasks）外层高度链已通（Layout: height:100%
+          → Content flex:1 minHeight:0 → 本页 height:100%），DAG 卡片 flex:1 填充剩余
+          高度，内部 ReactFlow 容器 flex:1 + minHeight:0 随卡片宽度变化自适应，抽屉
+          开合/窗口缩放不再断图。Empty 占位时卡片塌缩为内容高度（flex:0 auto）。 */}
+      <Card
+        title="任务依赖图"
+        loading={loading}
+        styles={{ body: { flex: 1, minHeight: 0, padding: 0 } }}
+        style={{
+          flex: tasks.length === 0 ? '0 0 auto' : 1,
+          minHeight: 0,
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
         {tasks.length === 0 ? (
-          <Empty description="暂无任务" />
+          <Empty description="暂无任务" style={{ padding: 24 }} />
         ) : (
-          <div style={{ height: 300 }}>
+          <div style={{ flex: 1, minHeight: 0 }}>
             <ReactFlow nodes={nodes} edges={edges} fitView>
               <MiniMap />
               <Controls />
@@ -219,8 +244,10 @@ export default function TaskPage() {
         )}
       </Card>
 
-      {/* 智能体状态卡片 */}
-      <Card title="执行状态">
+      {/* 智能体状态卡片
+          L1-04：下方状态卡 + 交付物卡设 flexShrink:0 + overflow auto，DAG 卡 flex:1 抢高度
+          时这两张卡按内容高度不缩，溢出由外层 padding 容器滚动（body auto）。 */}
+      <Card title="执行状态" style={{ flexShrink: 0 }}>
         {tasks.length === 0 && !loading ? (
           <Empty description="暂无任务" />
         ) : (
@@ -267,6 +294,7 @@ export default function TaskPage() {
 
       {/* 交付物 — PL-12 产物文件卡片 + 下载入口 */}
       <Card
+        style={{ flexShrink: 0 }}
         title={
           <span>
             <PaperClipOutlined /> 交付物

@@ -314,8 +314,18 @@ export default function SkillPage() {
   const agentOptions = agents.map((a) => ({ value: a.id, label: a.name }))
 
   return (
-    <div>
-      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「技能中心」与 Tab 标题「技能市场」重复，移除。 */}
+    <div
+      style={{
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        padding: 16,
+        display: 'flex',
+        flexDirection: 'column',
+      }}
+    >
+      {/* L4-02：迁 /skills 全屏路由，根容器加 height:100%+overflowY:auto 接通高度链。
+          原 SH-05 降级为抽屉 Tab 时移除了页级 h2，全屏路由下保留 Tabs 直接展示。 */}
 
       <Tabs
         activeKey={tabKey}

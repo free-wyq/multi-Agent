@@ -1,49 +1,71 @@
-import { useState } from 'react'
-import { Layout as AntLayout, Button, theme } from 'antd'
-import { AppstoreOutlined } from '@ant-design/icons'
+import { Layout as AntLayout, Dropdown, Button, theme } from 'antd'
+import {
+  RobotOutlined,
+  AppstoreOutlined,
+  ApiOutlined,
+  ScheduleOutlined,
+  DashboardOutlined,
+  MessageOutlined,
+  MenuOutlined,
+} from '@ant-design/icons'
+import type { MenuProps } from 'antd'
+import { Outlet, useNavigate } from 'react-router-dom'
 
-import ChatPage from '../pages/ChatPage'
-import SettingsDrawer from './SettingsDrawer'
+import Statusbar from './Statusbar'
 
 const { Header, Content } = AntLayout
 
 /**
- * SH-07 Layout 改造：聊天为默认主页，资源管理降为右上角次级入口。
+ * Layout — 应用根 layout route（L1-02 路由化 + L1-03 高度链 + L4-05 Header 导航下拉）。
  *
- * 旧 Layout：Sider 纵向菜单（智能体/群组/任务/监控/技能/MCP/定时 7 项）+ Content 按菜单
- * active 切换渲染对应页——7 个资源页平级并列，聊天藏在「群组」页里。
+ * 作为 router.tsx 的根 layout route element，常驻不卸载；Content 渲染 <Outlet/> 承载
+ * 7 个子路由（/ 聊天主页 + /agents /skills /mcp /schedule /tasks /monitor）。
+ * 路由切换只换 Outlet 内容，Layout + Header + Statusbar 不重挂——BusEventProvider
+ * 在 App 层（RouterProvider 外），WS 连接跨路由不中断。
  *
- * 新 Layout（钉钉/企微风格——对话即工作台）：
- *  - 顶部 Header：左侧品牌标识，右侧「资源管理」按钮 → 拉开 SettingsDrawer（SH-06，7 页 Tab 承载）。
- *  - Content：ChatPage 全屏占满（ChatShell 自带 SessionList 左栏 + ChatPanel 主区，自带新建会话 Modal）。
- *  - 去掉 Sider 纵向菜单与 7 页条件渲染分支——资源页不再平级常驻，按需从抽屉访问。
+ * L4-05：Header 右侧「☰资源」Dropdown 导航下拉，点击跳各全屏路由（agents/skills/mcp/
+ * schedule/tasks/monitor）。取代原「资源管理」按钮 + SettingsDrawer 抽屉——配置页 L4-01~
+ * 04 全迁路由后，抽屉（7 Tab）已无存在意义，整体退役。slash 命令 /agent /skills /mcp
+ * /schedule 仍走聊天流内联速览卡片（只读，不动），与路由页（全功能管理）互补。
  *
- * 高度链：`#root{height:100%}`（App.css）→ AntLayout(minHeight:100vh, flex column) → Header(56)
- *   + Content(flex:1, minHeight:0) → ChatShell(height:100%) 填满。Content 加 overflow:hidden
- *   让聊天滚动局限在 Content 内，不撑破外层。
- *
- * 资源入口选「资源管理」按钮 + AppstoreOutlined（资源网格意象），区别于各 Tab 内的图标
- * （Robot/Team/...）与 ChatPanel 头部 SettingOutlined（群信息），避免语义撞车。
- *
- * SettingsDrawer 用非受控模式（open/onClose/defaultActiveKey）——SH-06 设计已支持，SC-09
- * slash 命令受控定位到指定 tab 时再走 activeKey/onActiveKeyChange 受控用法，互不冲突。
- *
- * 注：SH-05（各资源页降级适配，如去掉页内自带 h2 避免与 Tab 标题重复）留该任务处理；
- *      本轮仅做路由接线——7 页直接承载进抽屉 Tab，Tab 标题 + 页内 h2 短期共存可接受。
+ * 高度链（L1-03 定稿，修 TaskPage/聊天滚动随宽度变化崩的根因）：
+ *   #root{height:100%}（App.css）→ AntLayout(height:100%, flex column)
+ *     → Header(48, flexShrink:0) + Content(flex:1, minHeight:0) + Statusbar(26, flexShrink:0)
+ *   关键：AntLayout 从 minHeight:100vh 改 height:100%——minHeight:100vh 会让 Layout 至少占
+ *   一屏但允许超出（内容多时撑破、Body 出现滚动条），height:100% 严格锁在父（#root）高度，
+ *   配合 Content 的 minHeight:0（flex 子项可缩，不强制内容高度），滚动局限在 Content 内，
+ *   Header/Statusbar 恒定高度不被顶出视口。Header 从 56→48 收紧。
  */
+
+/** 资源导航菜单项：跳各全屏路由。 */
+const NAV_ITEMS: MenuProps['items'] = [
+  { key: '/agents', label: '智能体', icon: <RobotOutlined /> },
+  { key: '/skills', label: '技能市场', icon: <AppstoreOutlined /> },
+  { key: '/mcp', label: 'MCP 工具', icon: <ApiOutlined /> },
+  { key: '/schedule', label: '定时任务', icon: <ScheduleOutlined /> },
+  { type: 'divider' },
+  { key: '/tasks', label: '任务看板', icon: <DashboardOutlined /> },
+  { key: '/monitor', label: '执行监控', icon: <MessageOutlined /> },
+]
+
 export default function Layout() {
-  const [settingsOpen, setSettingsOpen] = useState(false)
+  const navigate = useNavigate()
 
   const {
     token: { colorBgContainer },
   } = theme.useToken()
 
+  /** 导航菜单点击 → 跳对应路由（hash 路由，navigate 内部转 #/path）。 */
+  const handleNav: MenuProps['onClick'] = ({ key }) => {
+    navigate(key)
+  }
+
   return (
-    <AntLayout style={{ minHeight: '100vh' }}>
+    <AntLayout style={{ height: '100%' }}>
       <Header
         style={{
-          height: 56,
-          lineHeight: '56px',
+          height: 48,
+          lineHeight: '48px',
           padding: '0 20px',
           background: colorBgContainer,
           borderBottom: '1px solid #f0f0f0',
@@ -53,15 +75,20 @@ export default function Layout() {
           flexShrink: 0,
         }}
       >
-        <div style={{ fontWeight: 700, fontSize: 16, color: '#1677ff' }}>
+        <div
+          style={{
+            fontWeight: 700,
+            fontSize: 16,
+            color: '#1677ff',
+            cursor: 'pointer',
+          }}
+          onClick={() => navigate('/')}
+        >
           🤖 Multi-Agent
         </div>
-        <Button
-          icon={<AppstoreOutlined />}
-          onClick={() => setSettingsOpen(true)}
-        >
-          资源管理
-        </Button>
+        <Dropdown menu={{ items: NAV_ITEMS, onClick: handleNav }} placement="bottomRight">
+          <Button icon={<MenuOutlined />}>资源</Button>
+        </Dropdown>
       </Header>
       <Content
         style={{
@@ -72,13 +99,9 @@ export default function Layout() {
           overflow: 'hidden',
         }}
       >
-        <ChatPage />
+        <Outlet />
       </Content>
-      <SettingsDrawer
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        defaultActiveKey="agents"
-      />
+      <Statusbar />
     </AntLayout>
   )
 }

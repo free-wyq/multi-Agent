@@ -250,8 +250,18 @@ export default function McpPage() {
   }
 
   return (
-    <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「MCP 工具」与 Tab 标题「MCP 工具」重复，移除。 */}
+    <div
+      style={{
+        maxWidth: 1200,
+        margin: '0 auto',
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        padding: 16,
+      }}
+    >
+      {/* L4-03：迁 /mcp 全屏路由，根容器加 height:100%+overflowY:auto 接通高度链。
+          原 SH-05 降级为抽屉 Tab 时移除了页级 h2，全屏路由下保留 maxWidth 居中可读。 */}
 
       <div
         style={{

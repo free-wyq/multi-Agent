@@ -1,23 +1,26 @@
 import { useState } from 'react'
 import { ConfigProvider } from 'antd'
-import Layout from './components/Layout'
+import { RouterProvider } from 'react-router-dom'
+import { router } from './router'
 import { BusEventProvider } from './contexts/BusEventContext'
 
 /**
- * App — 顶层：ConfigProvider（主题）→ BusEventProvider（全局唯一群组 WS）→ Layout。
+ * App — 顶层：ConfigProvider（主题）→ BusEventProvider（全局唯一群组 WS）→ RouterProvider。
  *
  * WS-03：在 provider 层持有 `activeGroupId` 并包裹 `BusEventProvider`，全应用共享一条
  * 群组 WS 连接。`activeGroupId` 经 provider 的 `setGroupId` 下发到 context——任何子组件
- * （WS-04 GroupPage / WS-05 MonitorPage 等迁移后）选中群组时调
- * `useBusEventContext().setGroupId(id)` 即可切换全局聚焦群组，provider 重新订阅对应
- * 事件流，全应用跟随。
+ * 选中群组时调 `useBusEventContext().setGroupId(id)` 即可切换全局聚焦群组，provider 重新
+ * 订阅对应事件流，全应用跟随。
+ *
+ * L1-02：接入 react-router-dom v7（createHashRouter）。RouterProvider 替换原直接渲染的
+ * <Layout/>——Layout 作根 layout route（router.tsx 中 element: <Layout/>），其内部 Content
+ * 渲染 <Outlet/> 承载 7 个子路由。关键顺序：BusEventProvider 在 RouterProvider 外层，故
+ * 跨路由切换（/agents ↔ / ↔ /tasks）时 provider 不卸载，WS 连接 + activeGroupId 不中断——
+ * 路由切换只换 Outlet 内容，全局 WS 态在 Layout + 各页间共享，零重连。
  *
  * `activeGroupId` 起始为 null（未选群不订阅 WS，避免冷启动对空群组建连）；切换群组时旧
- * WS 在 `useBusEvent` effect cleanup 中 unlisten，零泄漏。
- *
- * 当前 Layout 仍是签名零参的旧组件（WS-04/WS-05 才迁移子页面到 context），暂不读
- * context——activeGroupId 此刻仅作为 provider 的 groupId 输入，使全局 WS 通道就位。
- * 子页面迁移后通过 `useBusEventContext()` 直接消费共享状态 + setGroupId 切群。
+ * WS 在 `useBusEvent` effect cleanup 中 unlisten，零泄漏。子组件经 `useBusEventContext()`
+ * 消费共享状态 + setGroupId 切群。
  */
 function App() {
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null)
@@ -32,7 +35,7 @@ function App() {
       }}
     >
       <BusEventProvider groupId={activeGroupId} setGroupId={setActiveGroupId}>
-        <Layout />
+        <RouterProvider router={router} />
       </BusEventProvider>
     </ConfigProvider>
   )

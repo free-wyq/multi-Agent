@@ -64,10 +64,19 @@ export default function MonitorPage() {
   const workerMembers = members.filter((m) => m.agent_id !== coordinatorId)
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      {/* 群组选择 */}
-      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「执行监控」与 Tab 标题「监控」重复，移除；
-          Select 独占该行右对齐。 */}
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 16,
+        height: '100%',
+        minHeight: 0,
+        overflowY: 'auto',
+        padding: 16,
+      }}
+    >
+      {/* L4-05：迁 /monitor 全屏路由，根容器加 height:100%+overflowY:auto 接通高度链。
+          原 SH-05 降级为抽屉 Tab 时移除了页级 h2，全屏路由下 Select 独占顶部右对齐。 */}
       <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
         <Select
           style={{ width: 240 }}

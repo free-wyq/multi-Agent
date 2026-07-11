@@ -11,6 +11,8 @@ import {
 import { useBusEventContext } from '../contexts/BusEventContext'
 import ChatShell from '../components/ChatShell'
 import ChatPanel from '../components/ChatPanel'
+import GroupInfoDrawer from '../components/GroupInfoDrawer'
+import RightRail from '../components/RightRail'
 
 /**
  * SH-03 ChatPage：聊天主页（SH-07 后为默认主页）。
@@ -43,6 +45,9 @@ export default function ChatPage() {
   const [createOpen, setCreateOpen] = useState(false)
   const [createForm] = Form.useForm()
   const [genNameLoading, setGenNameLoading] = useState(false)
+
+  // L2-03：群信息抽屉开关（ChatPanel onOpenInfo 触发，修 dead code）。
+  const [infoOpen, setInfoOpen] = useState(false)
 
   // MT-04: 自动生成团队名称/描述的 loading 态（LLM 调用耗时数秒，禁用按钮防重复点击）
   // 已在原 GroupPage 验证，ChatPage 复用同一交互。
@@ -140,14 +145,37 @@ export default function ChatPage() {
         groups={groups}
         loading={loading}
         onNewSession={() => setCreateOpen(true)}
+        rightRail={
+          <RightRail
+            group={chatGroup}
+            agents={agents}
+            members={members}
+            membersLoading={membersLoading}
+          />
+        }
       >
         <ChatPanel
           group={chatGroup}
           agents={agents}
           members={members}
           loading={membersLoading}
+          onOpenInfo={() => setInfoOpen(true)}
         />
       </ChatShell>
+
+      {/* L2-03：群信息抽屉（ChatPanel 群信息按钮 onOpenInfo 触发）。
+          group/groupId/members/membersLoading/agents 复用本页已加载状态；
+          onChanged 刷新群组/成员/智能体列表（增删成员/换群主/改策略/删群后）。 */}
+      <GroupInfoDrawer
+        open={infoOpen}
+        onClose={() => setInfoOpen(false)}
+        group={chatGroup}
+        groupId={chatGroupId}
+        members={members}
+        membersLoading={membersLoading}
+        agents={agents}
+        onChanged={fetchData}
+      />
 
       {/* 新建群组 Modal（onNewSession 入口） */}
       <Modal
