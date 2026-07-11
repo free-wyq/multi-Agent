@@ -18,96 +18,32 @@
 
 ```mermaid
 graph TB
-    subgraph RUNTIME["运行时进程（npm run dev 同时拉起）"]
-        direction TB
-        ELEC["electron/main.ts<br/>Electron 主进程<br/>spawn uvicorn:8000 · 加载前端"]
-        VITE["Vite dev :5173<br/>或打包产物 file://"]
-        UV["uvicorn main:app<br/>Python 后端 :8000"]
-        ELEC --> VITE
-        ELEC --> UV
-        WIN["BrowserWindow · WebView<br/>渲染 React"]
-        ELEC --> WIN
+    subgraph DESK["Electron 桌面壳"]
+        WIN["BrowserWindow<br/>渲染 React · 双击即用"]
     end
 
-    subgraph FE["前端 Renderer · React + AntD + ReactFlow"]
-        PAGES["pages/<br/>Agent·Group·Task·Monitor<br/>·Skill·Mcp·Schedule"]
-        COMP["components/<br/>LeaderPanel·WorkerTrace·LogPanel<br/>·PlanConfirmCard·StopTaskButton"]
-        APITS["services/api.ts<br/>REST fetch + onBusEvent(WS)"]
-        HOOK["hooks/useBusEvent.ts<br/>events·agentStatuses·plan·logs"]
-        PAGES --> COMP
-        PAGES --> HOOK
-        HOOK --> APITS
+    subgraph FE["前端 · React + AntD + ReactFlow"]
+        UI["页面 + 组件<br/>api.ts · useBusEvent"]
     end
+
+    subgraph BE["后端 · FastAPI + LangGraph"]
+        API["REST + WebSocket 路由"]
+        ENG["LangGraph 引擎<br/>Coordinator 调度 + Worker create_react_agent<br/>asyncio.Queue 收件箱 · APScheduler 定时"]
+        BUS["事件总线 BusManager<br/>WebSocket per-group 推送"]
+        DB[("SQLite · aiosqlite WAL")]
+        API --> ENG
+        ENG --> BUS
+        API --> DB
+        ENG --> DB
+    end
+
+    LLM["外部 LLM<br/>OpenAI 兼容端点"]
+
     WIN --> FE
-
-    subgraph BE["后端 FastAPI · main.py"]
-        LIFE["lifespan<br/>init_db → registry.load_from_store<br/>→ load_schedule(APScheduler)"]
-        ROUTERS["api/ 9 个 router<br/>agents·groups·tasks·messages<br/>·skills·mcp·scheduled_tasks<br/>·system·plan"]
-        WSEP["websocket.py<br/>ws/bus/groupId"]
-        CFGEP["system.py<br/>GET·PUT /api/config 热切换 CF-04/05<br/>GET /api/status 聚合 SA-02"]
-        ROUTERS --> LIFE
-        ROUTERS --> CFGEP
-    end
-    WIN -->|"HTTP REST"| ROUTERS
-    WIN <-.WS.-> WSEP
-
-    subgraph ENGINE["引擎层 · LangGraph engine/"]
-        REG["registry.py<br/>AgentEngine×N 常驻 asyncio.Task<br/>状态机 idle/executing/offline"]
-        INBOX["inbox.py<br/>asyncio.Queue 收件箱<br/>push_task / push_notify 唤醒"]
-        COORD["coordinator.py · StateGraph<br/>7节点: classify→llm_decide→<br/>chat/dispatch/dispatch_next/summarize"]
-        WORK["worker.py · StateGraph<br/>brain 决策 chat/ask/execute"]
-        LOOP["agent_loop.py<br/>create_react_agent + astream_events<br/>框架内 ReAct（PL-08 流式）"]
-        TOOLS["tools.py @tool<br/>read/write/edit_file·list_dir·run_command"]
-        MCP["mcp_manager.py<br/>langchain-mcp-adapters→BaseTool"]
-        SKILL["技能注入 system_prompt"]
-        SCHED["scheduler.py · APScheduler<br/>Cron/Interval/Date → push_task"]
-        REG --> INBOX
-        INBOX --> COORD
-        INBOX --> WORK
-        WORK --> LOOP
-        LOOP --> TOOLS
-        LOOP --> MCP
-        LOOP --> SKILL
-        SCHED --> INBOX
-    end
-    ROUTERS --> REG
-
-    subgraph EVENTS["事件总线 events/bus.py"]
-        BUS["BusManager<br/>每 group 一组 WebSocket<br/>emit_task_token/think/tool/log<br/>·agent_status·coordinator_plan/think"]
-    end
-    REG --> BUS
-    LOOP --> BUS
-    COORD --> BUS
-    BUS --> WSEP
-    WSEP -.实时事件.-> HOOK
-
-    subgraph STORE["持久化 store/"]
-        CRUD["crud.py · 五实体 CRUD"]
-        DB[("SQLite<br/>aiosqlite WAL")]
-        CRUD --> DB
-    end
-    ROUTERS --> CRUD
-    REG --> CRUD
-
-    subgraph WS_DIR["工作区隔离 workspace.py"]
-        WD["DATA_DIR/workspaces/groupId/<br/>safe_path 防穿越"]
-    end
-    TOOLS --> WD
-
-    subgraph LLM_LAYER["LLM 层 llm/"]
-        CFG["config.py<br/>get_config/set_config 单一真源 CF-01<br/>实时读 env + 脱敏"]
-        CLIENT["client.py<br/>OpenAI 兼容 chat_completion"]
-        PROMPT["prompts.py"]
-        CFG --> CLIENT
-        CLIENT --> PROMPT
-    end
-    COORD --> LLM_LAYER
-    LOOP --> LLM_LAYER
-
-    ENV[(".env<br/>OPENAI_API_KEY/BASE_URL/LLM_MODEL")]
-    ENV -.-> CFG
-    LLMAPI["DeepSeek / OpenAI 兼容端点"]
-    CLIENT -->|"httpx"| LLMAPI
+    WIN -->|"HTTP REST"| API
+    WIN <-.WebSocket.-> BUS
+    BUS -.实时事件.-> UI
+    ENG -->|"httpx"| LLM
 ```
 
 ### 关键链路说明
@@ -125,87 +61,36 @@ graph TB
 ## 功能架构图
 
 ```mermaid
-graph LR
-    USER(("用户<br/>技术管理者"))
-
-    subgraph APP["Multi-Agent 桌面应用"]
-        direction TB
-
-        subgraph M_AGENT["智能体中心"]
-            A1["角色定义 + system prompt<br/>5 种默认模板"]
-            A2["技能挂载 PL-06"]
-            A3["MCP 工具挂载 PL-07"]
-            A4["状态实时显示<br/>idle/executing/offline"]
-        end
-
-        subgraph M_GROUP["群组协作"]
-            G1["群主 + 成员群组"]
-            G2["群聊对话 @mention 路由"]
-            G3["30s 防循环"]
-        end
-
-        subgraph M_COORD["协调者调度 Leader"]
-            C1["意图分析 + 任务拆解<br/>DAG 依赖"]
-            C2["并行派发独立步骤<br/>M4 fan-out"]
-            C3["汇报汇总"]
-            C4["计划可视化<br/>coordinator_plan/think"]
-        end
-
-        subgraph M_EXEC["子智能体执行 Worker"]
-            E1["框架内工具操作文件/命令"]
-            E2["流式思考 + 工具卡片<br/>task_tool/task_think"]
-            E3["recursion_limit 容错"]
-        end
-
-        subgraph M_TASK["任务管理"]
-            T1["DAG 依赖图可视化 ReactFlow"]
-            T2["每任务日志/交付物"]
-        end
-
-        subgraph M_SKILL["技能系统 M7"]
-            S1["内置技能库"]
-            S2["LLM 生成技能"]
-        end
-
-        subgraph M_MCP["MCP 外部工具 M9"]
-            M1["标准协议接入"]
-            M2["外部能力扩展"]
-        end
-
-        subgraph M_SCHED["定时任务 M8"]
-            SC1["Cron/间隔/一次性"]
-            SC2["执行历史"]
-        end
-
-        subgraph M_MON["执行监控 M11"]
-            MO1["Leader 面板<br/>思考链+计划+时间线"]
-            MO2["Worker 标签页<br/>工具卡片+状态徽标"]
-        end
-
-        subgraph M_WS["工作区隔离"]
-            W1["每群组独立目录"]
-            W2["safe_path 沙箱"]
-        end
-    end
-
-    USER --> M_AGENT
-    USER --> M_GROUP
-    USER --> M_TASK
-    USER --> M_SCHED
-    USER --> M_MON
-
-    M_GROUP --> M_COORD
-    M_COORD --> M_EXEC
-    M_COORD --> M_MON
-    M_EXEC --> M_MON
-    M_EXEC --> M_WS
-    M_AGENT --> M_SKILL
-    M_AGENT --> M_MCP
-    M_SKILL --> M_EXEC
-    M_MCP --> M_EXEC
-    M_SCHED --> M_COORD
-    M_COORD --> M_TASK
-    M_EXEC --> M_TASK
+mindmap
+  root((Multi-Agent<br/>协作平台))
+    智能体中心
+      角色模板 · 一键招聘
+      技能挂载
+      MCP 外部工具
+      状态实时显示
+    群组协作
+      群聊对话
+      @mention 路由
+      防循环
+    协调调度
+      意图分析与任务拆解
+      DAG 依赖并行派发
+      计划可视化
+      汇总汇报
+    子智能体执行
+      框架内工具
+      流式思考
+      工具卡片
+      工作区隔离
+    任务管理
+      DAG 依赖图
+      日志与产物
+    定时任务
+      Cron 间隔 一次性
+      执行历史
+    执行监控
+      Leader 思考链
+      Worker 工具流
 ```
 
 ### 功能模块与代码对照
