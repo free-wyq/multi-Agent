@@ -10,7 +10,7 @@
 
 **核心定位**：桌面端工具，双击即用，零基础设施。
 
-**技术栈**：Electron（桌面壳）+ Python 后端（FastAPI + LangGraph + SQLAlchemy）+ React 前端（Vite + Ant Design + ReactFlow）。引擎全部基于开源框架（LangGraph `StateGraph`、`create_react_agent`、`astream_events`、APScheduler、langchain-mcp-adapters），不调外部 Claude Code CLI，不自研调度引擎——招投标技术背书。
+**技术栈**：Electron（桌面壳）+ Python 后端（FastAPI + LangGraph + SQLAlchemy）+ React 前端（Vite + Ant Design + ReactFlow）。引擎全部基于开源框架（LangGraph `StateGraph`、`create_react_agent`、`astream_events`、APScheduler、langchain-mcp-adapters），不调外部 Claude Code CLI，不自研调度引擎。
 
 ## 整体架构图
 
@@ -171,7 +171,7 @@ sequenceDiagram
 | 实现 | `coordinator.py` 的 `StateGraph`（7 节点 + conditional edge） | `worker.py` 的 `StateGraph`（brain 决策）+ `agent_loop.py` 的 `create_react_agent` |
 | 职责 | 意图分析、任务拆解、DAG 调度、汇总 | 执行具体工作（随场景而异：开发/编译/测试、文档撰写、数据处理等） |
 | 运行形态 | 主进程内常驻 `asyncio.Task` | `create_react_agent` 框架内 ReAct 循环 |
-| 框架背书 | LangGraph `StateGraph` + `MemorySaver` checkpointer + `thread_id` | `langgraph.prebuilt.create_react_agent` + `astream_events(version="v2")` |
+| 框架能力 | LangGraph `StateGraph` + `MemorySaver` checkpointer + `thread_id` | `langgraph.prebuilt.create_react_agent` + `astream_events(version="v2")` |
 
 ### 2. 编排用 LangGraph 原生术语
 

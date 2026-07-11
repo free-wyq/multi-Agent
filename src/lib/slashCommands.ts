@@ -34,12 +34,13 @@
 import type { ReactNode } from 'react'
 import { createElement } from 'react'
 
+import AgentDetailPanel from '../components/AgentDetailPanel'
 import ModelCard from '../components/ModelCard'
 import SessionsCard from '../components/SessionsCard'
 import SkillsCard from '../components/SkillsCard'
 import StatusCard from '../components/StatusCard'
 import ToolsCard from '../components/ToolsCard'
-import { configApi, groupApi, messageApi, slashApi, skillApi } from '../services/api'
+import { agentApi, configApi, groupApi, messageApi, slashApi, skillApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
 
 // SC-04 handleModel 用到 LlmConfig（configApi 返回类型）——已由 ModelCard 内部 import，
@@ -292,6 +293,53 @@ async function handleSessions(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
+ * SC-09 `/agent [名称]` handler：聚合智能体详情，AgentDetailPanel 渲染。
+ *
+ * 调 `agentApi.list()`（GET /api/agents 全量拉取）后前端按 args 解析目标 agent：
+ *  - 有参（`/agent 小后端`）→ 按 name 精确匹配，命中多个同名取第一个（命中详情），无匹配 → 空卡片提示。
+ *  - 无参（`/agent`）→ 列全部 agent 名册（AgentDetailPanel 多 agent 模式：紧凑列表 + 提示按名查详情）。
+ *
+ * 名称匹配是大小写不敏感 + trim 的（用户输入 `/agent 小后端` 前后空格容忍）；args 既可能是
+ * name 也可能是 id（agent id 形如 `agent_xxx`），按「先 name 精确 → name 包含 → id 精确」三级
+ * fallback 解析，提高命中容错。命中后 AgentDetailPanel 展示完整聚合详情（system_prompt 摘要 +
+ * mounted_skills/mcp + allowed/denied tools + model + max_turns，即 AD-01 只读聚合）。
+ *
+ * 不调单个 agentApi.get(id) 而是全量 list 后前端匹配——list 一次拉全（单机规模百级以内），
+ * 前端 O(n) 匹配即可，避免「先 list 找 id 再 get(id)」两跳往返。list 返回的 AgentDefinition
+ * 已含全部字段（mounted_skills/mcp/tools/model/max_turns），无需再 get 补全。
+ *
+ * 错误处理：拉取失败推 ⚠️ 字符串卡片告知（网络错 / 后端 500），不中断聊天流。
+ */
+async function handleAgent(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const agents = await agentApi.list()
+    const query = ctx.args.trim().toLowerCase()
+
+    if (!query) {
+      // 无参：列全部名册（多 agent 模式提示按名查详情）
+      ctx.renderCard(createElement(AgentDetailPanel, { agents }))
+      return
+    }
+
+    // 三级 fallback：name 精确 → name 包含 → id 精确（大小写不敏感）
+    let matched = agents.filter((a) => a.name.toLowerCase() === query)
+    if (matched.length === 0) {
+      matched = agents.filter((a) => a.name.toLowerCase().includes(query))
+    }
+    if (matched.length === 0) {
+      matched = agents.filter((a) => a.id.toLowerCase() === query)
+    }
+
+    // 多命中取第一个展示详情（同名的少见；用户想精确可传更完整的 name）
+    ctx.renderCard(createElement(AgentDetailPanel, { agents: matched.slice(0, 1) }))
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取智能体详情失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -352,7 +400,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'agent',
     description: '查看智能体详情聚合卡片',
     usage: '/agent [名称]',
-    handler: stub('agent'),
+    handler: handleAgent,
   },
   {
     name: 'mcp',
