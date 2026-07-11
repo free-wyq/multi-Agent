@@ -178,11 +178,14 @@ main_loop() {
 任务：$CURRENT_TASK
 
 ## 流程
-1. 【必做第一步】用 Read 工具读取 .task.md，确认第一个 [ ] 未完成任务与上面一致。
-   - 如果脚本侧已经打勾导致找不到，直接结束本轮即可。
-2. 读取 .claude/memory/ 了解项目背景与已有决策。
-3. 执行该任务（代码写到文件）。遇到任何决策点自己拍板，不要询问。
-4. 更新 .claude/memory/progress.md（追加「已完成」、记录关键决策与理由）。
+1. 【必做第一步·已完成检测】该任务对应的代码/文件可能已经存在并实现完整。
+   - 用 Read/Grep 检查任务涉及的目标文件是否已存在、关键函数/接口是否已实现。
+   - 若已存在且实现完整 → 直接结束本轮（脚本会自动打勾），不要重写、不要修改。
+   - 若不存在或实现不完整 → 继续执行下面的流程。
+2. 用 Read 工具读取 .task.md，确认第一个 [ ] 未完成任务与上面一致。
+3. 读取 .claude/memory/ 了解项目背景与已有决策。
+4. 执行该任务（代码写到文件）。遇到任何决策点自己拍板，不要询问。
+5. 更新 .claude/memory/progress.md（追加「已完成」、记录关键决策与理由）。
 
 ## 规则
 - 一次只做一个任务，不考虑后续任务。
@@ -213,6 +216,30 @@ main_loop() {
 
     log "⏱️ 第 $LOOP_COUNT 轮结束，耗时 ${dur_min}m（打勾: $TICK_RESULT）"
     write_status "idle" "$CURRENT_TASK" "$NEW_REMAINING" "$NEW_COMPLETED"
+
+    # 每轮结束自动 commit（仅本地，不 push）
+    # 由脚本提交而非 Claude，保证提交信息统一、不误提交运行产物
+    if [ -d .git ]; then
+      git add -A 2>/dev/null || true
+      if ! git diff --cached --quiet 2>/dev/null; then
+        # 从任务行提取编号 [CF-01] 作为 scope，提取描述作 message
+        local task_tag task_desc commit_msg
+        task_tag=$(echo "$CURRENT_TASK" | grep -oE '\[[A-Z]+-[0-9]+\]' | head -1 | tr -d '[]')
+        task_desc=$(echo "$CURRENT_TASK" | sed 's/^- \[[ x]\] //; s/\[[A-Z]*-[0-9]*\] *//' | head -c 200)
+        if [ -n "$task_tag" ]; then
+          commit_msg="feat($task_tag): $task_desc"
+        else
+          commit_msg="feat: $task_desc"
+        fi
+        if git commit -m "$commit_msg" --no-verify --quiet 2>>"$LOG_FILE"; then
+          log "📦 已提交: $commit_msg"
+        else
+          log "⚠️ 提交失败"
+        fi
+      else
+        log "📦 无改动，跳过提交"
+      fi
+    fi
 
     # 每 5 轮普通压缩一次；压缩后下一轮 Prompt 会强制重读 .task.md（见上）
     if [ $((LOOP_COUNT % 5)) -eq 0 ]; then
