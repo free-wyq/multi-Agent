@@ -20,6 +20,7 @@ import {
 import PlanConfirmCard from './PlanConfirmCard'
 import StopTaskButton from './StopTaskButton'
 import SlashAutocomplete from './SlashAutocomplete'
+import ChatMessageBubble from './ChatMessageBubble'
 import './ChatPanel.css'
 
 const { Text } = Typography
@@ -184,6 +185,29 @@ export default function ChatPanel({
     !!plan &&
     plan.length > 0 &&
     plan.some((s) => s.status === 'pending')
+
+  // ST-02：流式 token 接入聊天气泡逐字渲染。
+  // BusEventContext.streaming[task_id] 是 PL-08 逐字增量拼接的「正在生成」缓冲。
+  // 对每个 executing 且有 current_task_id 的 agent，若其 task 缓冲非空，在消息流末尾追加一条
+  // 流式气泡（ChatMessageBubble isStreaming=true），content=streaming[taskId]，尾部闪烁光标。
+  // 已被 logs 收尾事件（task_complete/failed/dispatch，见 useBusEvent 清缓冲逻辑）收编为持久
+  // 气泡的 task 不再展示流式气泡——streaming[tid] 被清空后 streamings 自然过滤掉。
+  // 多 agent 同时执行时各占一条流式气泡（按 agentStatuses 顺序）。
+  const streamingBubbles = chatGroupId
+    ? Object.values(agentStatuses)
+        .filter(
+          (a) =>
+            a.status === 'executing' &&
+            a.current_task_id &&
+            streaming[a.current_task_id],
+        )
+        .map((a) => ({
+          agentId: a.id,
+          agentName: a.name,
+          taskId: a.current_task_id as string,
+          content: streaming[a.current_task_id as string] as string,
+        }))
+    : []
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
   useEffect(() => {
@@ -560,6 +584,22 @@ export default function ChatPanel({
             )
           })
         )}
+        {/* ST-02：流式生成气泡——executing agent 的 streaming[task_id] 逐字渲染。
+         * 接在 chatMessages 之后渲染，自然落在消息流末尾（最新生成内容在底部）。
+         * ChatMessageBubble isStreaming=true → 气泡淡蓝描边 + 尾部闪烁光标。
+         * task_complete/failed 后 streaming[tid] 被清空（useBusEvent 收尾逻辑），bubble 自动消失；
+         * ST-04 会把定稿文本落为持久化 message 进 chatMessages。 */}
+        {streamingBubbles.map((b) => (
+          <ChatMessageBubble
+            key={`streaming-${b.taskId}`}
+            senderId={b.agentId}
+            senderName={b.agentName}
+            avatar={<ChatAvatar id={b.agentId} agents={agents} />}
+            content={b.content}
+            timestamp={new Date().toISOString()}
+            isStreaming
+          />
+        ))}
         <div ref={chatEndRef} />
       </div>
 
