@@ -16,9 +16,8 @@
  *  - ctx 不持 api 单例：handler 按需 `import { ... } from '../services/api'` 直接调
  *    （api 是模块级单例，无需经 ctx 透传）。ctx 只放「handler 无法自行获取」的 UI 耦合能力
  *    （renderCard/clearChat）+ 运行时上下文（groupId/args/busState）。
- *  - 本文件是 .ts（非 .tsx），不可写 JSX。故 stub handler 用 renderCard(字符串) 推占位
- *    （string 是合法 ReactNode）。SC-03~SC-10 实现富卡片时，handler 可 import .tsx 渲染器
- *    或在本文件用 React.createElement——届时该任务自决，本轮只保证注册表完整可编译。
+ *  - 本文件是 .ts（非 .tsx），不可写 JSX。handler 输出富卡片时用 React.createElement(组件, props)
+ *    等价 JSX，或 import .tsx 渲染器（SC-03~SC-10 均采用 createElement 桥接 .tsx 卡片组件）。
  *
  * 命令清单（与 .task.md SC-03~SC-10 一一对应）：
  *  /new       SC-03  清空会话 + reset-session
@@ -35,12 +34,23 @@ import type { ReactNode } from 'react'
 import { createElement } from 'react'
 
 import AgentDetailPanel from '../components/AgentDetailPanel'
+import McpListCard from '../components/McpListCard'
 import ModelCard from '../components/ModelCard'
+import ScheduleListCard from '../components/ScheduleListCard'
 import SessionsCard from '../components/SessionsCard'
 import SkillsCard from '../components/SkillsCard'
 import StatusCard from '../components/StatusCard'
 import ToolsCard from '../components/ToolsCard'
-import { agentApi, configApi, groupApi, messageApi, slashApi, skillApi } from '../services/api'
+import {
+  agentApi,
+  configApi,
+  groupApi,
+  messageApi,
+  mcpApi,
+  scheduledTaskApi,
+  slashApi,
+  skillApi,
+} from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
 
 // SC-04 handleModel 用到 LlmConfig（configApi 返回类型）——已由 ModelCard 内部 import，
@@ -340,15 +350,50 @@ async function handleAgent(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
- * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
+ * SC-10 `/mcp` handler：内联展示 MCP 连接列表，McpListCard 渲染。
  *
- * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
- * 由对应 SC 任务改写（可直接在本文件用 React.createElement，或 import .tsx 渲染器）。
- * 占位让「补全 → 选中 → 回车」链路立即可验证，不阻塞 SC-02/SC-11 接入。
+ * 调 `mcpApi.list()`（GET /api/mcp 全部 MCP 连接）→ renderCard(McpListCard)。MCP 连接是全局
+ * 资源不绑群组，list() 全量返回；args 忽略（/mcp 不接受参数，未来若加 /mcp <名称> 过滤可在
+ * 此按 args 过滤 connections 数组，前端过滤无需后端改）。
+ *
+ * /mcp 是只读列表概览——区别于 /tools 聚合「内置 + 各 agent 的 mounted_mcp 工具」（按 agent
+ * 维度看实际可调工具），/mcp 是「MCP 连接配置层」概览（看装了哪些连接、stdio/sse 传输、启没启用、
+ * 命令/URL 预览）。两者互补：/mcp 看连接配置，/tools 看工具清单。
+ *
+ * 错误处理：拉取失败推 ⚠️ 字符串卡片告知（网络错 / 后端 500），不中断聊天流。
  */
-function stub(name: string): SlashCommandHandler {
-  return (ctx) => {
-    ctx.renderCard(`「/${name}」命令开发中…`)
+async function handleMcp(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const connections = await mcpApi.list()
+    ctx.renderCard(createElement(McpListCard, { connections }))
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取 MCP 连接列表失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
+ * SC-10 `/schedule` handler：内联展示定时任务列表，ScheduleListCard 渲染。
+ *
+ * 调 `scheduledTaskApi.list()`（GET /api/scheduled-tasks 全部定时任务）→ renderCard(ScheduleListCard)。
+ * 定时任务是全局资源不绑群组（task.group_id 指明 fire 时 push 到哪个群引擎，但列表本身全量），
+ * list() 全量返回；args 忽略（/schedule 不接受参数，未来若加 /schedule <名称> 过滤可在此按 args
+ * 过滤 tasks 数组，前端过滤无需后端改）。
+ *
+ * /schedule 是只读列表概览——看配了哪些定时任务、各什么频率（cron/interval/once）、启没启用、
+ * 派给哪个 agent + 派发内容预览。不带操作（立即执行/暂停/恢复走 SchedulePage）。
+ *
+ * 错误处理：拉取失败推 ⚠️ 字符串卡片告知（网络错 / 后端 500），不中断聊天流。
+ */
+async function handleSchedule(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const tasks = await scheduledTaskApi.list()
+    ctx.renderCard(createElement(ScheduleListCard, { tasks }))
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取定时任务列表失败：${e instanceof Error ? e.message : String(e)}`,
+    )
   }
 }
 
@@ -356,8 +401,7 @@ function stub(name: string): SlashCommandHandler {
  * slash 命令注册表（单一真源）。SC-02 自动补全直接消费本数组。
  *
  * 顺序即补全下拉默认展示顺序——高频/入门命令靠前（new/model/status 常用），
- * 资源浏览类靠后。SC-03~SC-10 实现各 handler 时仅需替换对应 `handler: stub('xxx')`
- * 为真实函数，不动 name/description/usage（自动补全元数据稳定）。
+ * 资源浏览类靠后。SC-03~SC-10 各 handler 已全部实现为真实函数（SC-10 收尾后无残留 stub）。
  */
 export const SLASH_COMMANDS: SlashCommand[] = [
   {
@@ -406,13 +450,13 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'mcp',
     description: '查看 MCP 连接列表',
     usage: '/mcp',
-    handler: stub('mcp'),
+    handler: handleMcp,
   },
   {
     name: 'schedule',
     description: '查看定时任务列表',
     usage: '/schedule',
-    handler: stub('schedule'),
+    handler: handleSchedule,
   },
 ]
 
