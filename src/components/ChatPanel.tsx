@@ -110,6 +110,17 @@ function getMemberDisplayName(member: GroupMember) {
   return member.alias || member.agent_name
 }
 
+/** ST-04 定稿气泡数据：task_complete/failed 收尾后，持久化回复尚未落地期间渲染的过渡气泡。 */
+interface FinalizedBubble {
+  key: string
+  agentId: string
+  agentName: string
+  taskId: string
+  content: string
+  isFailed: boolean
+  timestamp: number
+}
+
 interface ChatPanelProps {
   /** 当前会话的群组（null/未选群时展示占位）。 */
   group: Group | null
@@ -223,6 +234,45 @@ export default function ChatPanel({
     }
     return m
   }, [events])
+
+  // ST-04：task_complete/failed 时定稿流式气泡——用持久化消息替换缓冲。
+  // events 中 kind 'complete'/'failed' 标志 task 收尾（携带 result[:500]）。对每个收尾
+  // task，若其流式缓冲已清（不在 streaming，即 useBusEvent 收尾逻辑已清空），渲染一条
+  // 定稿气泡（ChatMessageBubble isStreaming=false）：content=收尾事件 result，toolEvents
+  // 保留 ST-03 工具摘要行。填补「流式气泡消失 ↔ 持久化回复出现」的间隙——避免生成内容
+  // + 工具调用瞬间蒸发。
+  // 自动退场：当该 agent 的持久化回复消息落进 chatMessages（sender_id 匹配 + 时间晚于
+  // 收尾事件）即过滤掉定稿气泡——持久化回复接管，无永久重复。匹配按 sender+时间而非
+  // task_id：logs 追加路径会把所有 WS 消息 coerce 成 type:'log' 且 task_id 可能丢失，
+  // 故用「该 agent 在收尾时间戳之后的消息」判定回复已落地（_reply 是收尾后唯一后续消息）。
+  const finalizedBubbles = useMemo(() => {
+    const out: FinalizedBubble[] = []
+    const seen = new Set<string>()
+    for (const e of events) {
+      if (e.kind !== 'complete' && e.kind !== 'failed') continue
+      if (!e.taskId || seen.has(e.taskId)) continue
+      seen.add(e.taskId)
+      // 仍在流式（缓冲未清）→ 流式气泡自己渲染，不定稿
+      if (streaming[e.taskId]) continue
+      // 持久化回复已落进 chatMessages → 已被替换，不再渲染定稿气泡
+      const replied = chatMessages.some(
+        (m) =>
+          m.sender_id === e.agentId &&
+          new Date(m.created_at).getTime() >= e.timestamp,
+      )
+      if (replied) continue
+      out.push({
+        key: `finalized-${e.taskId}`,
+        agentId: e.agentId,
+        agentName: agentStatuses[e.agentId]?.name || e.agentId,
+        taskId: e.taskId,
+        content: e.content || '',
+        isFailed: e.kind === 'failed',
+        timestamp: e.timestamp,
+      })
+    }
+    return out
+  }, [events, streaming, chatMessages, agentStatuses])
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
   useEffect(() => {
@@ -603,7 +653,7 @@ export default function ChatPanel({
          * 接在 chatMessages 之后渲染，自然落在消息流末尾（最新生成内容在底部）。
          * ChatMessageBubble isStreaming=true → 气泡淡蓝描边 + 尾部闪烁光标。
          * task_complete/failed 后 streaming[tid] 被清空（useBusEvent 收尾逻辑），bubble 自动消失；
-         * ST-04 会把定稿文本落为持久化 message 进 chatMessages。 */}
+         * ST-04 在此之后渲染定稿气泡（finalizedBubbles）填补间隙，待持久化回复落地后退场。 */}
         {streamingBubbles.map((b) => (
           <ChatMessageBubble
             key={`streaming-${b.taskId}`}
@@ -614,6 +664,22 @@ export default function ChatPanel({
             timestamp={new Date().toISOString()}
             toolEvents={toolEventsByTask[b.taskId] || []}
             isStreaming
+          />
+        ))}
+        {/* ST-04：定稿气泡——task_complete/failed 后持久化回复落地前的过渡气泡。
+         * content=收尾事件 result（result[:500]），保留 ST-03 工具摘要行，isStreaming=false。
+         * 持久化回复（_reply）落地后自动退场（finalizedBubbles 内 replied 判定过滤），
+         * 避免重复。失败任务用灰调气泡标记（isFailed → 调用方加 failed 描边 class）。 */}
+        {finalizedBubbles.map((b) => (
+          <ChatMessageBubble
+            key={b.key}
+            senderId={b.agentId}
+            senderName={b.agentName}
+            avatar={<ChatAvatar id={b.agentId} agents={agents} />}
+            content={b.content}
+            timestamp={new Date(b.timestamp).toISOString()}
+            toolEvents={toolEventsByTask[b.taskId] || []}
+            isFailed={b.isFailed}
           />
         ))}
         <div ref={chatEndRef} />

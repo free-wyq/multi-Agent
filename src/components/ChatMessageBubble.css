@@ -9,6 +9,12 @@
   box-shadow: 0 0 0 1px rgba(22, 119, 255, 0.25) inset;
 }
 
+/* ── 失败定稿态气泡（ST-04：task_failed 后持久化回复落地前的过渡）── */
+.chat-bubble--failed {
+  /* 内嵌红描边标记任务失败，与流式蓝描边视觉同构、语义对照 */
+  box-shadow: 0 0 0 1px rgba(255, 77, 79, 0.4) inset;
+}
+
 /* ── 流式闪烁光标 ── */
 .chat-streaming-cursor {
   display: inline-block;

@@ -23,6 +23,8 @@ interface ChatMessageBubbleProps {
   toolEvents?: TraceEvent[]
   /** 是否正在流式生成（PL-08 逐字 token）。true → 气泡加 streaming 描边 + 正文尾追加闪烁光标。 */
   isStreaming?: boolean
+  /** ST-04：是否失败定稿（task_failed 收尾）。true → 气泡加红描边标记失败语义。 */
+  isFailed?: boolean
   /** 是否用户自己发的消息（决定左右对齐 + self/other 气泡样式 + @mention 是否高亮）。 */
   isUser?: boolean
   /** 气泡正文的自定义渲染（用于 @mention 高亮等富文本）。未提供时直接渲染 content 纯文本。 */
@@ -99,6 +101,7 @@ export default function ChatMessageBubble({
   timestamp,
   toolEvents = [],
   isStreaming = false,
+  isFailed = false,
   isUser = false,
   renderContent,
 }: ChatMessageBubbleProps) {
@@ -167,6 +170,7 @@ export default function ChatMessageBubble({
             'chat-bubble',
             isUser ? 'chat-bubble--self' : 'chat-bubble--other',
             isStreaming ? 'chat-bubble--streaming' : '',
+            isFailed ? 'chat-bubble--failed' : '',
           ]
             .filter(Boolean)
             .join(' ')}
