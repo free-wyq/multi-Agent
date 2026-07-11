@@ -10,6 +10,8 @@ reply_content, dispatch_plan) rather than mutating engine state directly.
 from __future__ import annotations
 
 import logging
+import time
+import uuid
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -17,8 +19,14 @@ from langgraph.graph import END, START, StateGraph
 
 from engine.dispatcher import dispatch_ready_steps
 from engine.state import CoordinatorState
-from events import emit_coordinator_plan, emit_coordinator_think, emit_message_added
-from llm.client import chat_completion, get_llm_config
+from events import (
+    emit_coordinator_plan,
+    emit_coordinator_stats,
+    emit_coordinator_think,
+    emit_coordinator_token,
+    emit_message_added,
+)
+from llm.client import chat_completion, chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.prompts import (
     COORDINATOR_SYSTEM,
@@ -42,12 +50,24 @@ def set_reply_callback(cb: Any) -> None:
     _REPLY_CB = cb
 
 
-async def _unified_reply(group_id: str, agent_id: str, content: str) -> None:
+async def _unified_reply(
+    group_id: str,
+    agent_id: str,
+    content: str,
+    data: dict[str, Any] | None = None,
+) -> None:
     """Persist an agent_reply message + emit + mention route (Rust engine.reply).
 
     Delegates persistence to crud.create_message and emission to emit_message_added.
     Mention routing is performed by the engine's callback (set via
     ``set_reply_callback``) so recent_routes anti-loop state is owned by the engine.
+
+    ``data`` is written onto the persisted message so it survives reload /
+    reconnect. The coordinator chat path passes the streaming run-stats
+    (``{reply_id, elapsed_ms, tokens}``) here so the finalized bubble can keep
+    rendering the "Ns · ↓ N tokens" status line after the streaming bubble
+    retires (stats don't vanish on completion). Other callers (announce /
+    summarize / recovery) leave ``data=None`` — no behavior change.
     """
     msg = await crud.create_message(
         {
@@ -57,7 +77,7 @@ async def _unified_reply(group_id: str, agent_id: str, content: str) -> None:
             "receiver_id": "broadcast",
             "type": "agent_reply",
             "content": content,
-            "data": None,
+            "data": data,
         }
     )
     await emit_message_added(msg.model_dump())
@@ -584,12 +604,14 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
 
     config = get_llm_config()
     try:
-        raw = await chat_completion(
+        reply_id, raw, tokens, elapsed_ms = await _stream_coordinator_decision(
             config,
             [
                 {"role": "system", "content": COORDINATOR_SYSTEM},
                 {"role": "user", "content": prompt},
             ],
+            state["group_id"],
+            state["agent_id"],
         )
         decision = _parse_coordinator_decision(raw)
     except Exception as e:
@@ -599,6 +621,20 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "content": "抱歉，我这边理解有点困难，能再说一次吗？",
             "plan": [],
         }
+        reply_id, tokens, elapsed_ms = "", 0, 0
+
+    # Stamp the streaming run-stats onto the chat action so node_chat persists
+    # them onto the agent_reply's data — the finalized bubble then keeps
+    # rendering "Ns · ↓ N tokens" after the streaming bubble retires (stats
+    # stay visible, don't vanish on completion). Only chat replies carry this;
+    # dispatch/summarize go through their own _unified_reply call sites with
+    # no stats (their "stats" are the plan, not a single LLM turn).
+    if decision["action"] == "chat":
+        decision["_stream_stats"] = {
+            "reply_id": reply_id,
+            "elapsed_ms": elapsed_ms,
+            "tokens": tokens,
+        }
 
     await emit_coordinator_think(
         state["group_id"], state["agent_id"], decision["action"], decision["content"]
@@ -607,13 +643,24 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
         "action_taken": decision["action"],
         "reply_content": decision["content"],
         "dispatch_plan": decision.get("plan", []),
+        # carry the per-turn streaming stats through the graph to node_chat
+        "_stream_stats": decision.get("_stream_stats"),
     }
 
 
 async def node_chat(state: CoordinatorState) -> dict:
-    """Persist + emit the reply_content via the unified reply path."""
+    """Persist + emit the reply_content via the unified reply path.
+
+    Carries the streaming run-stats (``state['_stream_stats']``) onto the
+    persisted agent_reply's ``data`` so the finalized bubble keeps rendering
+    the "Ns · ↓ N tokens" status line after the streaming bubble retires —
+    the stats stay visible, they don't vanish on completion.
+    """
     await _unified_reply(
-        state["group_id"], state["agent_id"], state.get("reply_content", "")
+        state["group_id"],
+        state["agent_id"],
+        state.get("reply_content", ""),
+        data=state.get("_stream_stats"),
     )
     return {}
 
@@ -827,6 +874,239 @@ def build_coordinator_graph():
 
 
 # ── decision parser (Rust parse_coordinator_decision) ─────────────────────
+
+
+# ── coordinator streaming helpers ─────────────────────────────────────────
+
+
+# Coordinator LLM output is a JSON envelope ({"action","content","plan"}). The
+# user-visible text lives in the ``content`` string field. While the LLM
+# streams, we receive raw JSON fragment deltas (tokens) — not the decoded
+# content value. To render the reply token-by-token we must *decode on the fly*:
+# feed the deltas to a small JSON-aware state machine that, once it enters the
+# ``content`` field's string value, emits each decoded character as soon as it
+# arrives (honouring ``\"``/``\\``/``\n`` escapes), and stays silent on the JSON
+# skeleton (keys, braces, the ``action``/``plan`` fields).
+class _ContentExtractor:
+    """Extract the decoded ``content`` string from a streaming JSON envelope.
+
+    Feed raw ``feed(delta)`` chunks as they arrive from the LLM. ``take()``
+    returns the decoded content emitted since the last call (an incremental
+    substring of the final content value, suitable for ``emit_coordinator_token``).
+
+    The machine scans for ``"content"`` after the first ``{``, then tracks the
+    subsequent string state (normal / after-backslash / done). Only characters
+    inside that string are emitted — the JSON skeleton, the ``action``/``plan``
+    fields, and any leading prose before ``{`` are skipped silently. A missing
+    or non-string ``content`` field yields nothing (the caller falls back to the
+    full raw text via extract_json, which is unaffected).
+    """
+
+    _KEY = '"content"'
+
+    def __init__(self) -> None:
+        # byte-ish buffer of unprocessed input; kept as str (deltas may split a
+        # key/escape across chunks, so we retain a small lookback)
+        self._buf = ""
+        # True once we've located the "content" key and its opening quote
+        self._in_content = False
+        # True when the previous char was an unescaped backslash (next char is
+        # literal, not a string terminator / escape control)
+        self._escaped = False
+        # accumulated decoded content not yet taken
+        self._out = ""
+        # track whether the "content" key matched so far (prefix length)
+        self._key_idx = 0
+        # whether we've seen the opening brace yet (prose before { is skipped)
+        self._brace_seen = False
+
+    def feed(self, delta: str) -> None:
+        if not delta:
+            return
+        self._buf += delta
+        # process as much as we can; we stop when a char might be part of a
+        # multi-char token (partial key / escape) that could be completed by a
+        # later delta. We re-scan the buffer in a loop, trimming consumed head.
+        i = 0
+        n = len(self._buf)
+        hold = False
+        while i < n:
+            ch = self._buf[i]
+            if not self._brace_seen:
+                if ch == "{":
+                    self._brace_seen = True
+                    i += 1
+                    continue
+                # skip prose before the first brace
+                i += 1
+                continue
+            if not self._in_content:
+                # try to match the "content" key at position i
+                if self._buf[i : i + len(self._KEY)] == self._KEY:
+                    self._key_idx = len(self._KEY)
+                    i += len(self._KEY)
+                    continue
+                # partial match of the key at the buffer tail → wait for more
+                tail = self._buf[i:]
+                if len(tail) < len(self._KEY) and self._KEY.startswith(tail):
+                    hold = True
+                    break
+                # not matching the key: look for the colon + opening quote after
+                # a complete key match, or skip one char otherwise.
+                if self._key_idx == len(self._KEY):
+                    # we matched the full key; now expect optional ws + ':' + ws + '"'
+                    if ch in ' \t\r\n':
+                        i += 1
+                        continue
+                    if ch == ":":
+                        i += 1
+                        continue
+                    if ch == '"':
+                        self._in_content = True
+                        self._escaped = False
+                        i += 1
+                        continue
+                    # content was a non-string (null/number/obj) — reset key,
+                    # keep scanning for a later "content" (rare; LLM contract is str)
+                    self._key_idx = 0
+                    i += 1
+                    continue
+                # reset partial key tracking and advance
+                self._key_idx = 0
+                i += 1
+                continue
+            # inside the content string
+            if self._escaped:
+                # previous was backslash: this char is the escape body
+                mapping = {
+                    '"': '"',
+                    "\\": "\\",
+                    "/": "/",
+                    "n": "\n",
+                    "t": "\t",
+                    "r": "\r",
+                    "b": "\b",
+                    "f": "\f",
+                }
+                self._out += mapping.get(ch, ch)
+                self._escaped = False
+                i += 1
+                continue
+            if ch == "\\":
+                # consume the backslash; the next char (possibly in a later
+                # delta) completes the escape. Hold here so a chunk split mid-
+                # escape ("\" then "n" in two deltas) decodes correctly.
+                self._escaped = True
+                i += 1
+                hold = True
+                # don't break yet — if there's more in buf we can keep going,
+                # but the escape needs the next char which may be index i now.
+                # Re-loop: if i < n we process the escape body immediately.
+                continue
+            if ch == '"':
+                # closing quote — content value ended
+                self._in_content = False
+                self._key_idx = 0
+                i += 1
+                continue
+            # normal literal char
+            self._out += ch
+            i += 1
+        # retain the unconsumed tail (held partial token) for the next feed
+        if hold:
+            self._buf = self._buf[i:]
+        else:
+            self._buf = ""
+
+    def take(self) -> str:
+        """Return and clear the decoded content accumulated since the last call."""
+        if not self._out:
+            return ""
+        out = self._out
+        self._out = ""
+        return out
+
+
+async def _stream_coordinator_decision(
+    config: dict[str, Any],
+    messages: list[dict[str, str]],
+    group_id: str,
+    coordinator_id: str,
+) -> tuple[str, str, int, int]:
+    """Stream the coordinator LLM, emitting per-token + live-stats events.
+
+    Consumes ``chat_completion_stream``: each ``(delta, completion_tokens)``
+    chunk feeds the ``_ContentExtractor`` (only the decoded ``content`` field
+    value is pushed to the frontend via ``emit_coordinator_token`` — the JSON
+    skeleton/keys are never rendered as reply text). Live statistics
+    (``emit_coordinator_stats``) are emitted ~every 200ms during the stream and
+    once more at the end with ``phase="done"`` and the real
+    ``completion_tokens``.
+
+    Returns ``(reply_id, raw_full, tokens, elapsed_ms)``:
+
+    - ``reply_id`` — the UUID per-turn streaming key (so the caller can stamp
+      it onto the persisted agent_reply's ``data`` and the frontend can keep the
+      stats line alive after the streaming bubble retires).
+    - ``raw_full`` — the assembled raw LLM output for ``extract_json`` to parse
+      action/plan (unchanged from the non-streaming path).
+    - ``tokens`` — the final token count (real ``completion_tokens`` if the
+      provider sent usage, else the coarse char-based estimate).
+    - ``elapsed_ms`` — total wall-clock from stream start to finish.
+    """
+    reply_id = uuid.uuid4().hex
+    extractor = _ContentExtractor()
+    raw_parts: list[str] = []
+    final_tokens = 0
+    # throttle stats emits to ~200ms; Date.now()/time is fine here (engine side)
+    start = time.monotonic()
+    last_stats_ts = 0.0
+    # running estimate of emitted content chars → a coarse token estimate for
+    # the live counter before the authoritative usage chunk arrives
+    live_tokens = 0
+
+    async for delta, usage in chat_completion_stream(config, messages):
+        if delta:
+            raw_parts.append(delta)
+            extractor.feed(delta)
+            piece = extractor.take()
+            if piece:
+                live_tokens += max(1, len(piece) // 3)
+                await emit_coordinator_token(group_id, coordinator_id, reply_id, piece)
+        if usage is not None:
+            final_tokens = usage
+        # throttled stats: at most every 200ms, + a final emit after the loop
+        now = time.monotonic()
+        if now - last_stats_ts >= 0.2:
+            elapsed_ms = int((now - start) * 1000)
+            try:
+                await emit_coordinator_stats(
+                    group_id,
+                    coordinator_id,
+                    reply_id,
+                    elapsed_ms,
+                    live_tokens,
+                    "streaming",
+                )
+            except Exception:
+                logger.exception("[coordinator] failed to emit streaming stats")
+            last_stats_ts = now
+
+    raw_full = "".join(raw_parts)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    real_tokens = final_tokens if final_tokens else live_tokens
+    try:
+        await emit_coordinator_stats(
+            group_id,
+            coordinator_id,
+            reply_id,
+            elapsed_ms,
+            real_tokens,
+            "done",
+        )
+    except Exception:
+        logger.exception("[coordinator] failed to emit final stats")
+    return reply_id, raw_full, real_tokens, elapsed_ms
 
 
 def _parse_coordinator_decision(raw: str) -> dict:

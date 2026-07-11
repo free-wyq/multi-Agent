@@ -37,6 +37,10 @@ export interface BusEventContextValue {
   agentStatuses: Record<string, AgentStatusInfo>
   plan: PlanStep[] | null
   streaming: Record<string, string>
+  /** 协调者流式回复：reply_id → 累积的 content delta（coordinator_token 逐字拼接）。 */
+  coordStreaming: Record<string, string>
+  /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase }（coordinator_stats 节流更新）。 */
+  coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string }>
 }
 
 /**
@@ -75,6 +79,8 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       agentStatuses: bus.agentStatuses,
       plan: bus.plan,
       streaming: bus.streaming,
+      coordStreaming: bus.coordStreaming,
+      coordStats: bus.coordStats,
     }),
     [
       groupId,
@@ -85,6 +91,8 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       bus.agentStatuses,
       bus.plan,
       bus.streaming,
+      bus.coordStreaming,
+      bus.coordStats,
     ],
   )
 

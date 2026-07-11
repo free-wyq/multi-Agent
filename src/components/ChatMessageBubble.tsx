@@ -29,6 +29,10 @@ interface ChatMessageBubbleProps {
   isUser?: boolean
   /** 气泡正文的自定义渲染（用于 @mention 高亮等富文本）。未提供时直接渲染 content 纯文本。 */
   renderContent?: (content: string) => React.ReactNode
+  /** 状态行（Claude-Code 风格 "Ns · ↓ N tokens · thinking"）。
+   *  协调者流式气泡用：渲染在气泡下方时间戳旁，实时刷新耗时/token/阶段。
+   *  普通气泡不传（undefined → 不渲染），保持向后兼容。 */
+  statusLine?: React.ReactNode
 }
 
 /** 单条 task_tool 事件 → 摘要行数据。 */
@@ -104,6 +108,7 @@ export default function ChatMessageBubble({
   isFailed = false,
   isUser = false,
   renderContent,
+  statusLine,
 }: ChatMessageBubbleProps) {
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -241,6 +246,7 @@ export default function ChatMessageBubble({
         <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
           {new Date(timestamp).toLocaleTimeString()}
         </div>
+        {statusLine && <div className="chat-status-line">{statusLine}</div>}
       </div>
     </div>
   )

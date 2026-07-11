@@ -19,6 +19,16 @@ export interface LogEntry {
   taskId: string
   message: string
   timestamp: number
+  /** 原始 BusEventData.type（agent_reply/user_input/task_log/coordinator_think/...）。
+   *  ChatPanel 据此过滤：只把 agent_reply 桥接成聊天气泡，其余 trace 事件
+   *  （coordinator_think/task_token/task_think/...）不进气泡——否则 coordinator_think
+   *  携带的完整回复文本会被渲染成气泡，与随后 agent_reply 持久化消息重复（「回复两次」缺陷根因）。 */
+  type: string
+  /** 原始 BusEventData.data（透传）。
+   *  协调者 chat 回复的 data 带 {reply_id, elapsed_ms, tokens} 流式统计——
+   *  ChatPanel 桥接成 chatMessages 时保留 data，定稿气泡据此渲染「Ns · ↓ N tokens」
+   *  状态行（流式统计在完成后保留可见，不随流式气泡退场消失）。 */
+  data: unknown
 }
 
 export interface TaskStatusEvent {
@@ -86,6 +96,8 @@ export function useBusEvent(groupId: string | null) {
       agentStatuses: ctx.agentStatuses,
       plan: ctx.plan,
       streaming: ctx.streaming,
+      coordStreaming: ctx.coordStreaming,
+      coordStats: ctx.coordStats,
     }
   }
 
@@ -95,6 +107,14 @@ export function useBusEvent(groupId: string | null) {
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatusInfo>>({})
   const [plan, setPlan] = useState<PlanStep[] | null>(null)
   const [streaming, setStreaming] = useState<Record<string, string>>({})
+  // 协调者流式回复（与 worker task_token 同构，但按 reply_id 而非 task_id 归并）：
+  //  - coordStreaming[reply_id] = 累积的 content delta（逐字拼接）
+  //  - coordStats[reply_id] = 最新 { elapsed_ms, tokens, phase }（~200ms 节流 + done 终态）
+  // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
+  const [coordStreaming, setCoordStreaming] = useState<Record<string, string>>({})
+  const [coordStats, setCoordStats] = useState<
+    Record<string, { elapsed_ms: number; tokens: number; phase: string }>
+  >({})
 
   // 播种 agent status
   useEffect(() => {
@@ -145,6 +165,8 @@ export function useBusEvent(groupId: string | null) {
 
     // 重拉消息历史：把全量历史重新灌入 logs（供 GroupPage 聊天列表复原）。
     // 按 created_at 升序返回的最近 limit 条，重建 LogEntry（id 去重保留）。
+    // 历史消息持久化时 type 就是真实类型（agent_reply/user_input/task_log），
+    // 重建时带 type 供 ChatPanel 按类型过滤（见 LogEntry.type 注释）。
     messageApi
       .listByGroup(groupId)
       .then((msgs: Message[]) => {
@@ -157,6 +179,8 @@ export function useBusEvent(groupId: string | null) {
             taskId: m.task_id || '',
             message: m.content || '',
             timestamp: parseTs(m.created_at),
+            type: m.type,
+            data: m.data,
           }))
         setLogs(rebuilt.slice(-200))
       })
@@ -190,8 +214,14 @@ export function useBusEvent(groupId: string | null) {
       }
       setEvents((prev) => [...prev.slice(-499), ev])
 
-      // → logs (GroupPage 依赖 content truthy)
-      if (d.content) {
+      // → logs (GroupPage / LogPanel 依赖 content truthy)
+      // 复制原始 type 到 LogEntry.type，供 ChatPanel 按类型过滤——只 agent_reply/
+      // user_input/task_log 桥接成聊天气泡，coordinator_think 等思考事件不进气泡
+      // （见 LogEntry.type 注释，避免与 agent_reply 持久化消息重复渲染）。
+      // coordinator_token 例外：content 是逐字 delta（truthy），若进 logs 会把每个
+      // token 都当一条日志灌进 LogPanel，且 coordinator_token 不在 CHAT_MESSAGE_TYPES
+      // 白名单（本就不该成气泡）。从源头排除，避免流式 delta 污染日志流。
+      if (d.content && d.type !== 'coordinator_token') {
         const entry: LogEntry = {
           id: d.id || `ipc-${ts}`,
           agentId: d.sender_id,
@@ -199,6 +229,8 @@ export function useBusEvent(groupId: string | null) {
           taskId: d.task_id || '',
           message: d.content,
           timestamp: ts,
+          type: d.type,
+          data: d.data,
         }
         setLogs((prev) => [...prev.slice(-200), entry])
       }
@@ -272,6 +304,60 @@ export function useBusEvent(groupId: string | null) {
           })
         }
       }
+
+      // → coordinator 流式回复（与 worker task_token 同构，按 reply_id 归并）
+      // coordinator_token：逐字 delta 累加到 coordStreaming[reply_id]。
+      // coordinator_stats：更新 coordStats[reply_id] 的运行统计（耗时/token 数/phase）。
+      // phase="done" 时清空 coordStreaming[reply_id] —— 流式气泡退场，让随后落地
+      // 的持久化 agent_reply 接管（同 worker 的 streaming→finalized 模式）。
+      // coordStats[reply_id] 也一并清空，避免陈旧统计行残留误导用户（下一轮新
+      // reply_id 会创建新条目，旧 reply_id 不再写入，清掉最干净）。
+      if (d.type === 'coordinator_token') {
+        const replyId =
+          d.data && typeof d.data === 'object'
+            ? (d.data as Record<string, unknown>).reply_id
+            : null
+        if (d.content && typeof replyId === 'string') {
+          const rid = replyId
+          setCoordStreaming((prev) => ({
+            ...prev,
+            [rid]: (prev[rid] || '') + d.content,
+          }))
+        }
+      } else if (d.type === 'coordinator_stats') {
+        const dd =
+          d.data && typeof d.data === 'object'
+            ? (d.data as Record<string, unknown>)
+            : null
+        const replyId = dd ? (dd['reply_id'] as string | undefined) : undefined
+        if (dd && typeof replyId === 'string') {
+          const phase = String(dd['phase'] || 'streaming')
+          const elapsedMs = Number(dd['elapsed_ms'] || 0)
+          const tokens = Number(dd['tokens'] || 0)
+          if (phase === 'done') {
+            // 流式完成：清空流式缓冲 + 统计，让持久化 agent_reply 接管气泡。
+            // （agent_reply 由 _unified_reply → emit_message_added 落地，毫秒级。）
+            const rid = replyId
+            setCoordStreaming((prev) => {
+              if (!(rid in prev)) return prev
+              const next = { ...prev }
+              delete next[rid]
+              return next
+            })
+            setCoordStats((prev) => {
+              if (!(rid in prev)) return prev
+              const next = { ...prev }
+              delete next[rid]
+              return next
+            })
+          } else {
+            setCoordStats((prev) => ({
+              ...prev,
+              [replyId]: { elapsed_ms: elapsedMs, tokens, phase },
+            }))
+          }
+        }
+      }
     }, handleReconnect).then((fn) => {
       if (cancelled) {
         fn()
@@ -286,5 +372,5 @@ export function useBusEvent(groupId: string | null) {
     }
   }, [groupId, handleReconnect])
 
-  return { logs, statusEvents, events, agentStatuses, plan, streaming }
+  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordStats }
 }

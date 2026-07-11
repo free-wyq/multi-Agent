@@ -27,6 +27,27 @@ import './ChatPanel.css'
 
 const { Text } = Typography
 
+/**
+ * 可渲染成聊天气泡的 BusEvent/Message type 白名单。
+ *
+ * 为什么需要白名单：WS 事件流把所有 content truthy 的事件都灌进 logs，但只有
+ * 「消息语义」的事件（agent_reply 智能体回复 / user_input 用户消息 / task_log
+ * 任务日志 / slash_card slash 命令卡片）才该出现在聊天气泡流里。其余是 trace
+ * 事件——coordinator_think 协调者思考、task_token 流式 token、task_think/tool
+ * 工作过程、agent_status 状态迁移、coordinator_plan 计划——它们有自己的展示区
+ * （LeaderPanel 思考链 / 流式气泡 / 计划卡片），不该再混进消息气泡流。
+ *
+ * 特别是 coordinator_think：它携带协调者完整回复文本，若也桥接成气泡，会与随后
+ * node_chat 持久化的 agent_reply 消息（id 不同，去重命中不了）同时渲染 → 「协调者
+ * 回复两次」缺陷。白名单从源头排除这类重复。
+ */
+const CHAT_MESSAGE_TYPES = new Set([
+  'agent_reply',
+  'user_input',
+  'task_log',
+  'slash_card',
+])
+
 /** antd Input.TextArea 的 ref 类型（antd v6 未从顶层导出 TextAreaRef，用 ComponentRef 推导）。 */
 type TextAreaRef = ComponentRef<typeof Input.TextArea>
 
@@ -42,6 +63,27 @@ function getAgentColor(id: string, agents: AgentDefinition[]): string {
   }
   const agent = agents.find((a) => a.id === id)
   return agent ? (ROLE_COLORS[agent.role] ?? '#8b5cf6') : '#722ed1'
+}
+
+/** 毫秒 → 人类可读耗时：<1s 显示 ms，否则保留 1 位小数秒（与 ChatMessageBubble 一致）。 */
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** 从持久化 agent_reply 的 data 字段提取协调者流式统计。
+ *  node_chat 经 _unified_reply 把 {reply_id, elapsed_ms, tokens} 落盘到 message.data，
+ *  定稿气泡据此渲染「Ns · ↓ N tokens · 完成」状态行——流式期间的统计在完成后保留可见，
+ *  不随流式气泡退场消失。非协调者 chat 回复（dispatch/summarize announce、user_input、
+ *  task_log、slash_card）data 无 elapsed_ms → null，不渲染状态行。 */
+function extractCoordStats(
+  data: Record<string, unknown> | null,
+): { elapsed_ms: number; tokens: number } | null {
+  if (!data) return null
+  const elapsed = Number(data.elapsed_ms)
+  if (!Number.isFinite(elapsed) || elapsed <= 0) return null
+  const tokens = Number(data.tokens)
+  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0 }
 }
 
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
@@ -169,7 +211,7 @@ export default function ChatPanel({
   onOpenInfo,
   hideHeader,
 }: ChatPanelProps) {
-  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events } = useBusEventContext()
+  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordStats } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -230,6 +272,20 @@ export default function ChatPanel({
         }))
     : []
 
+  // 协调者流式气泡：coordinator_token 按 reply_id 累积的 delta，配合 coordinator_stats
+  // 渲染 Claude-Code 风格状态行（"Ns · ↓ N tokens · thinking"）。
+  // 与 worker 流式气泡区别：协调者无 task_id（不经 create_react_agent），按 reply_id 归并；
+  // sender 是 group.coordinator_id（真实 agent_id，ChatAvatar/SenderName 据此解析角色色/名）。
+  // phase="done" 时 useBusEvent 清空 coordStreaming[reply_id] → 气泡自然退场，
+  // 由随后落地的持久化 agent_reply 接管（同 worker streaming→finalized 模式）。
+  const coordinatorStreamingBubbles = chatGroupId
+    ? Object.entries(coordStreaming).map(([replyId, content]) => ({
+        replyId,
+        content,
+        stats: coordStats[replyId],
+      }))
+    : []
+
   // ST-03：task_tool 事件接入聊天气泡——按 task 聚合工具摘要行。
   // events 是全局 TraceEvent 流（useBusEvent cap 500），按 taskId 分组 kind==='tool'
   // 事件；流式气泡按其 current_task_id 取对应工具行，渲染在气泡顶部（ChatMessageBubble
@@ -284,10 +340,18 @@ export default function ChatPanel({
   }, [events, streaming, chatMessages, agentStatuses])
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
+  // 按类型白名单过滤：只 agent_reply/user_input/task_log/slash_card 桥接成聊天气泡，
+  // 其余 trace 事件（coordinator_think/task_token/task_think/task_tool/agent_status/
+  // coordinator_plan/...）不进气泡——否则 coordinator_think 携带的完整回复文本会被
+  // 渲染成气泡，与随后 node_chat 的 agent_reply 持久化消息（id 不同，不去重）重复，
+  // 即「协调者回复两次」缺陷根因。logs 只取最后一条（旧契约，保留）。
+  // 注意：lastLog 若是 coordinator_think 直接 return，不落进 chatMessages。
   useEffect(() => {
     if (logs.length === 0) return
     const lastLog = logs[logs.length - 1]
     if (lastLog.agentId === 'user') return
+    // 只把可成气泡的消息类型桥接进 chatMessages；思考/token/工具等 trace 事件跳过
+    if (!CHAT_MESSAGE_TYPES.has(lastLog.type)) return
     setChatMessages((prev) => {
       const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
       if (prev.some((m) => m.id === wsMsgId)) return prev
@@ -297,9 +361,9 @@ export default function ChatPanel({
         task_id: lastLog.taskId || null,
         sender_id: lastLog.agentId,
         receiver_id: 'broadcast',
-        type: 'log',
+        type: lastLog.type,
         content: lastLog.message,
-        data: null,
+        data: (lastLog.data ?? null) as Record<string, unknown> | null,
         created_at: new Date(lastLog.timestamp).toISOString(),
       }]
     })
@@ -670,6 +734,20 @@ export default function ChatPanel({
                   <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
                     {new Date(msg.created_at).toLocaleTimeString()}
                   </div>
+                  {/* 定稿协调者回复的状态行：从持久化 agent_reply.data 取流式统计
+                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens}），渲染「Ns · ↓ N tokens · 完成」。
+                      流式期间的统计在完成后保留可见——不随流式气泡退场消失。
+                      非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
+                      data 无 elapsed_ms → extractCoordStats 返回 null → 不渲染状态行。 */}
+                  {(() => {
+                    const stats = extractCoordStats(msg.data)
+                    if (!stats) return null
+                    return (
+                      <div className="chat-status-line">
+                        {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens · 完成`}
+                      </div>
+                    )
+                  })()}
                 </div>
               </div>
             )
@@ -692,6 +770,37 @@ export default function ChatPanel({
             isStreaming
           />
         ))}
+        {/* 协调者流式气泡：coordinator_token 按 reply_id 累积的 delta + coordinator_stats 状态行。
+         * sender 用 group.coordinator_id（真实 agent_id），与持久化 agent_reply 的 sender_id 一致，
+         * 头像/名按角色解析；statusLine 实时显示 "Ns · ↓ N tokens · thinking"。
+         * phase="done" 时 coordStreaming 被清空 → 气泡退场，持久化 agent_reply 接管。 */}
+        {coordinatorStreamingBubbles.map((b) => {
+          const stats = b.stats
+          const elapsedStr = stats
+            ? stats.elapsed_ms < 1000
+              ? `${stats.elapsed_ms}ms`
+              : `${(stats.elapsed_ms / 1000).toFixed(1)}s`
+            : '0s'
+          const tokens = stats?.tokens ?? 0
+          const phaseLabel =
+            stats?.phase === 'done' ? '完成' : '思考中'
+          return (
+            <ChatMessageBubble
+              key={`coord-streaming-${b.replyId}`}
+              senderId={group?.coordinator_id ?? 'coordinator'}
+              senderName="群主(协调者)"
+              avatar={
+                <ChatAvatar id={group?.coordinator_id ?? 'coordinator'} agents={agents} />
+              }
+              content={b.content}
+              timestamp={new Date().toISOString()}
+              isStreaming={stats?.phase !== 'done'}
+              statusLine={
+                <>{`${elapsedStr} · ↓ ${tokens} tokens · ${phaseLabel}`}</>
+              }
+            />
+          )
+        })}
         {/* ST-04：定稿气泡——task_complete/failed 后持久化回复落地前的过渡气泡。
          * content=收尾事件 result（result[:500]），保留 ST-03 工具摘要行，isStreaming=false。
          * 持久化回复（_reply）落地后自动退场（finalizedBubbles 内 replied 判定过滤），

@@ -110,3 +110,12 @@
 .chat-tool-payload-label:first-child {
   margin-top: 0;
 }
+
+/* ── 状态行（Claude-Code 风格 "Ns · ↓ N tokens · thinking"）── */
+/* 协调者流式气泡的实时统计行：小号灰字，与时间戳同行级。 */
+.chat-status-line {
+  font-size: 11px;
+  color: #999;
+  margin-top: 2px;
+  font-family: 'monospace';
+}
