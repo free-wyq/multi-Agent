@@ -1,31 +1,36 @@
 """OpenAI-compatible chat completion client (Rust llm.rs chat_completion).
 
-Reads config from environment (OPENAI_API_KEY / OPENAI_BASE_URL / LLM_MODEL)
-which are loaded by config.py at import time. Uses httpx.AsyncClient with
-bearer auth and a 120s timeout.
+``get_llm_config()`` delegates to ``config.get_config()`` — the single source
+of truth for LLM settings — and adapts the snake_case fields to the camelCase
+keys this module historically returned (so ``chat_completion`` and its callers
+in worker.py / coordinator.py / api/*.py keep working unchanged). Uses
+httpx.AsyncClient with bearer auth and a 120s timeout.
 """
 from __future__ import annotations
 
-import os
 from typing import Any
 
 import httpx
 
+from config import get_config
+
 
 def get_llm_config() -> dict[str, Any]:
-    """Build the LLM config dict from environment variables.
+    """Build the LLM config dict, delegating to ``config.get_config()``.
 
-    Reads keys loaded by config.py (which calls dotenv at import). Falls back
-    to ANTHROPIC_API_KEY if OPENAI_API_KEY is absent, and to the OpenAI default
-    base URL if OPENAI_BASE_URL is unset.
+    The single source of truth is ``config.get_config()`` (live env read, so
+    ``config.set_config(model)`` hot-switches are picked up without a restart).
+    This wrapper only adapts the field names to the camelCase shape
+    ``chat_completion`` consumes (apiKey / baseUrl / model / temperature /
+    maxTokens), preserving the pre-CF-02 return contract for all callers.
     """
+    cfg = get_config()
     return {
-        "apiKey": os.environ.get("OPENAI_API_KEY", "")
-        or os.environ.get("ANTHROPIC_API_KEY", ""),
-        "baseUrl": os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
-        "model": os.environ.get("LLM_MODEL", "glm-5.1"),
-        "temperature": 0.0,
-        "maxTokens": 4096,
+        "apiKey": cfg["api_key"],
+        "baseUrl": cfg["base_url"],
+        "model": cfg["model"],
+        "temperature": cfg["temperature"],
+        "maxTokens": cfg["max_tokens"],
     }
 
 

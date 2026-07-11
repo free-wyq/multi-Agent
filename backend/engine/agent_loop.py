@@ -40,7 +40,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from config import LLM_MODEL, OPENAI_API_KEY, OPENAI_BASE_URL
+from config import get_config
 from engine.tools import tools_for_group
 
 logger = logging.getLogger("multi-agent.agent_loop")
@@ -167,7 +167,8 @@ async def run_agent_loop(
 
     Returns ``{"success": bool, "exit_code": int, "output": str}``.
     """
-    model_name = agent_model or LLM_MODEL
+    cfg = get_config()
+    model_name = agent_model or cfg["model"]
     tools = tools_for_group(group_id)
     mcp_tools = list(_EXTRA_TOOLS)
     tools = tools + mcp_tools
@@ -176,9 +177,9 @@ async def run_agent_loop(
     try:
         model = ChatOpenAI(
             model=model_name,
-            base_url=OPENAI_BASE_URL,
-            api_key=OPENAI_API_KEY,
-            temperature=0,
+            base_url=cfg["base_url"],
+            api_key=cfg["api_key"],
+            temperature=cfg["temperature"],
         )
     except Exception as exc:
         logger.exception("[agent_loop %s] failed to init model", agent_name)
