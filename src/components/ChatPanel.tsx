@@ -217,6 +217,7 @@ export default function ChatPanel({
   const [sending, setSending] = useState(false)
   const [chatInput, setChatInput] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
 
   // ── @mention 自动补全 ──
   const [mentionOpen, setMentionOpen] = useState(false)
@@ -369,9 +370,11 @@ export default function ChatPanel({
     })
   }, [logs, chatGroupId])
 
-  // 滚动到底部
+  // 滚动到底部（仅滚动消息列表容器内部，不触发页面级滚动）。
   useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+    const el = messagesContainerRef.current
+    if (!el) return
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [chatMessages])
 
   // 切换群组时加载历史消息（chatGroupId 来自全局 active group）。
@@ -380,7 +383,7 @@ export default function ChatPanel({
       setChatLoading(true)
       messageApi
         .listByGroup(chatGroupId)
-        .then((data) => setChatMessages(data.reverse()))
+        .then((data) => setChatMessages(data))
         .catch(() => setChatMessages([]))
         .finally(() => setChatLoading(false))
     } else {
@@ -631,7 +634,7 @@ export default function ChatPanel({
   }
 
   return (
-    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
       {/* 聊天头部 — 钉钉风格：标题 + 人数，右侧停止按钮 + 群信息按钮。
           hideHeader 时整段不渲染（左右布局由 ChatView 统一画标题区，避免双头部）。 */}
       {group && !hideHeader && (
@@ -674,8 +677,11 @@ export default function ChatPanel({
         </div>
       )}
 
-      {/* 消息列表 */}
-      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+      {/* 消息列表 — minHeight:0 是钉死输入框的关键：flex 列布局中 flex 子项默认
+          min-height:auto（不小于内容高），消息多了列表会撑高把输入框顶出可视区，
+          表现为「输入框随消息一起漂浮滚动」。minHeight:0 解除该下限 → flex:1 收缩到
+          父容器剩余高度，overflowY:auto 才真正在列表内部滚动，输入框（flexShrink:0）钉底。 */}
+      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' }}>
         {showPlanCard && plan && chatGroupId && (
           <PlanConfirmCard groupId={chatGroupId} plan={plan} />
         )}

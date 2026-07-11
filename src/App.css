@@ -2,6 +2,11 @@ html, body, #root {
   margin: 0;
   padding: 0;
   height: 100%;
+  /* overflow:hidden 锁死页面级滚动：app shell 永远等于视口高，绝不整体滚动。
+   * 没有它时，一旦内部某处高度算多（flex 子项 min-height:auto 撑高、或某子树超出），
+   * body 就成了滚动容器 → 左侧菜单跟着右侧聊天一起被带着滚（「整页漂浮」缺陷根因）。
+   * 锁死后所有滚动只能发生在指定的 overflow:auto 容器里：左侧菜单列表、右侧消息列表。 */
+  overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   background: #f0f2f5;
 }
