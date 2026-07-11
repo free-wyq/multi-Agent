@@ -14,41 +14,53 @@
 
 ## 整体架构图
 
+按运行时进程分层：Electron 壳同时拉起 Python 后端与 React 前端；前端经 REST + WebSocket 与后端通信；后端 FastAPI 之下是 LangGraph 引擎层、事件总线、SQLite 持久化与工作区隔离。
+
 ```mermaid
 graph TB
-    subgraph DESKTOP["桌面壳 · Electron (main process)"]
-        MAIN["electron/main.ts<br/>拉起 Python uvicorn:8000<br/>+ 加载 Vite dev server / 打包产物"]
-        WIN["BrowserWindow<br/>WebView 渲染 React"]
-        MAIN --> WIN
+    subgraph RUNTIME["运行时进程（npm run dev 同时拉起）"]
+        direction TB
+        ELEC["electron/main.ts<br/>Electron 主进程<br/>spawn uvicorn:8000 · 加载前端"]
+        VITE["Vite dev :5173<br/>或打包产物 file://"]
+        UV["uvicorn main:app<br/>Python 后端 :8000"]
+        ELEC --> VITE
+        ELEC --> UV
+        WIN["BrowserWindow · WebView<br/>渲染 React"]
+        ELEC --> WIN
     end
 
-    subgraph FE["前端 Renderer · React + Vite + Ant Design"]
-        PAGES["pages/<br/>AgentPage · GroupPage · TaskPage<br/>MonitorPage · SkillPage"]
-        COMP["components/<br/>LeaderPanel · WorkerTrace · LogPanel<br/>AgentAvatar · Layout"]
-        API_TS["services/api.ts<br/>REST fetch + WebSocket onBusEvent"]
-        HOOK["hooks/useBusEvent.ts<br/>logs / events / agentStatuses / plan"]
+    subgraph FE["前端 Renderer · React + AntD + ReactFlow"]
+        PAGES["pages/<br/>Agent·Group·Task·Monitor<br/>·Skill·Mcp·Schedule"]
+        COMP["components/<br/>LeaderPanel·WorkerTrace·LogPanel<br/>·PlanConfirmCard·StopTaskButton"]
+        APITS["services/api.ts<br/>REST fetch + onBusEvent(WS)"]
+        HOOK["hooks/useBusEvent.ts<br/>events·agentStatuses·plan·logs"]
         PAGES --> COMP
         PAGES --> HOOK
-        HOOK --> API_TS
+        HOOK --> APITS
     end
+    WIN --> FE
 
-    subgraph BE["后端 · Python FastAPI (uvicorn :8000)"]
-        ROUTERS["api/ routers<br/>agents·groups·tasks·messages·skills<br/>mcp·scheduled_tasks·system·websocket"]
-        WS_EP["websocket.py<br/>ws/bus/{groupId}"]
-        LIFE["main.py lifespan<br/>init_db → registry.load_from_store → load_schedule"]
+    subgraph BE["后端 FastAPI · main.py"]
+        LIFE["lifespan<br/>init_db → registry.load_from_store<br/>→ load_schedule(APScheduler)"]
+        ROUTERS["api/ 9 个 router<br/>agents·groups·tasks·messages<br/>·skills·mcp·scheduled_tasks<br/>·system·plan"]
+        WSEP["websocket.py<br/>ws/bus/groupId"]
+        CFGEP["system.py<br/>GET·PUT /api/config 热切换 CF-04/05<br/>GET /api/status 聚合 SA-02"]
         ROUTERS --> LIFE
+        ROUTERS --> CFGEP
     end
+    WIN -->|"HTTP REST"| ROUTERS
+    WIN <-.WS.-> WSEP
 
-    subgraph ENGINE["引擎层 · LangGraph 1.2 (engine/)"]
-        REG["registry.py · AgentEngine + AgentRegistry<br/>常驻 asyncio.Task · 状态机 idle/executing/offline"]
-        INBOX["inbox.py · asyncio.Queue<br/>push_task / push_notify 唤醒"]
-        COORD["coordinator.py · StateGraph<br/>7 节点: classify→llm_decide→<br/>chat/dispatch/dispatch_next/summarize"]
+    subgraph ENGINE["引擎层 · LangGraph engine/"]
+        REG["registry.py<br/>AgentEngine×N 常驻 asyncio.Task<br/>状态机 idle/executing/offline"]
+        INBOX["inbox.py<br/>asyncio.Queue 收件箱<br/>push_task / push_notify 唤醒"]
+        COORD["coordinator.py · StateGraph<br/>7节点: classify→llm_decide→<br/>chat/dispatch/dispatch_next/summarize"]
         WORK["worker.py · StateGraph<br/>brain 决策 chat/ask/execute"]
-        LOOP["agent_loop.py<br/>langchain create_agent + astream_events<br/>框架内 ReAct 循环"]
-        TOOLS["tools.py · @tool 框架内工具<br/>read_file/write_file/edit_file/list_dir/run_command"]
-        MCP["mcp_manager.py<br/>langchain-mcp-adapters → BaseTool"]
+        LOOP["agent_loop.py<br/>create_react_agent + astream_events<br/>框架内 ReAct（PL-08 流式）"]
+        TOOLS["tools.py @tool<br/>read/write/edit_file·list_dir·run_command"]
+        MCP["mcp_manager.py<br/>langchain-mcp-adapters→BaseTool"]
         SKILL["技能注入 system_prompt"]
-        SCHED["scheduler.py · APScheduler<br/>Cron/Interval/Date 触发 → 复用 push_task"]
+        SCHED["scheduler.py · APScheduler<br/>Cron/Interval/Date → push_task"]
         REG --> INBOX
         INBOX --> COORD
         INBOX --> WORK
@@ -58,44 +70,57 @@ graph TB
         LOOP --> SKILL
         SCHED --> INBOX
     end
+    ROUTERS --> REG
 
-    subgraph STORE["持久化 · SQLAlchemy async + aiosqlite (WAL)"]
-        CRUD["store/crud.py · 五实体 CRUD<br/>agents/groups/members/tasks/messages"]
-        DB[("SQLite<br/>+ scheduled_tasks/skills/mcp")]
+    subgraph EVENTS["事件总线 events/bus.py"]
+        BUS["BusManager<br/>每 group 一组 WebSocket<br/>emit_task_token/think/tool/log<br/>·agent_status·coordinator_plan/think"]
+    end
+    REG --> BUS
+    LOOP --> BUS
+    COORD --> BUS
+    BUS --> WSEP
+    WSEP -.实时事件.-> HOOK
+
+    subgraph STORE["持久化 store/"]
+        CRUD["crud.py · 五实体 CRUD"]
+        DB[("SQLite<br/>aiosqlite WAL")]
         CRUD --> DB
     end
-
-    subgraph EVENTS["事件总线 · events/bus.py"]
-        BUS["BusManager · 每 group 一组 WebSocket<br/>emit_task_tool/think/log/dispatch/complete<br/>+ agent_status + coordinator_plan/think"]
-    end
-
-    subgraph WS_DIR["工作区隔离 · engine/workspace.py"]
-        WD["DATA_DIR/workspaces/{group_id}/<br/>safe_path 防路径穿越"]
-    end
-
-    subgraph LLM_LAYER["LLM 层 (llm/)"]
-        CLIENT["client.py · OpenAI 兼容 chat_completion"]
-        PROMPT["prompts.py · worker/coordinator 提示词"]
-    end
-
-    ENV[(".env<br/>OPENAI_API_KEY / BASE_URL / LLM_MODEL")]
-    LLMAPI["DeepSeek / OpenAI 兼容端点"]
-
-    WIN -->|"HTTP REST"| ROUTERS
-    WIN -.WS.-> WS_EP
-    ROUTERS --> REG
     ROUTERS --> CRUD
+    REG --> CRUD
+
+    subgraph WS_DIR["工作区隔离 workspace.py"]
+        WD["DATA_DIR/workspaces/groupId/<br/>safe_path 防穿越"]
+    end
+    TOOLS --> WD
+
+    subgraph LLM_LAYER["LLM 层 llm/"]
+        CFG["config.py<br/>get_config/set_config 单一真源 CF-01<br/>实时读 env + 脱敏"]
+        CLIENT["client.py<br/>OpenAI 兼容 chat_completion"]
+        PROMPT["prompts.py"]
+        CFG --> CLIENT
+        CLIENT --> PROMPT
+    end
     COORD --> LLM_LAYER
     LOOP --> LLM_LAYER
-    LLM_LAYER -->|"httpx"| LLMAPI
-    ENV -.-> LLM_LAYER
-    REG --> EVENTS
-    LOOP --> EVENTS
-    COORD --> EVENTS
-    EVENTS --> WS_EP
-    TOOLS --> WD
-    WS_EP -.实时事件.-> HOOK
+
+    ENV[(".env<br/>OPENAI_API_KEY/BASE_URL/LLM_MODEL")]
+    ENV -.-> CFG
+    LLMAPI["DeepSeek / OpenAI 兼容端点"]
+    CLIENT -->|"httpx"| LLMAPI
 ```
+
+### 关键链路说明
+
+| 链路 | 走向 |
+|---|---|
+| 用户发消息 | React → `POST /api/messages` → `push_notify` → coordinator 的 inbox 队列唤醒 |
+| 协调者调度 | coordinator StateGraph `dispatch` 节点拆 DAG → `push_task` 给 worker inbox |
+| worker 执行 | worker `brain` 决策 → `agent_loop` 的 `create_react_agent` 跑 ReAct（工具在框架内，不调外部 CLI） |
+| 流式输出 | `astream_events` 的 `on_chat_model_stream` → `emit_task_token` → BusManager → WS → 前端气泡逐字渲染 |
+| 配置热切换 | `PUT /api/config` → `set_config` 写 os.environ → 引擎下次 invoke 的 `get_config()` 实时读到（CF-05，已验证） |
+| 状态聚合 | `GET /api/status` → `registry.list_all_status()` 一次拉全（SA-01/02，消除前端 N+1 轮询） |
+| 定时任务 | APScheduler 触发 → 复用 `push_task` 注入 worker inbox，与人工派发同路径 |
 
 ## 功能架构图
 
