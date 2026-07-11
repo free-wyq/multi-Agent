@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import type { ReactNode } from 'react'
 import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
-import type { InputRef } from 'antd'
+import type { ComponentRef } from 'react'
 import { RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
 import {
   messageApi,
@@ -10,11 +11,21 @@ import {
   type Message,
 } from '../services/api'
 import { useBusEventContext } from '../contexts/BusEventContext'
+import {
+  getSlashCommand,
+  matchSlashCommands,
+  parseSlashCommand,
+  type SlashCommandContext,
+} from '../lib/slashCommands'
 import PlanConfirmCard from './PlanConfirmCard'
 import StopTaskButton from './StopTaskButton'
+import SlashAutocomplete from './SlashAutocomplete'
 import './ChatPanel.css'
 
 const { Text } = Typography
+
+/** antd Input.TextArea 的 ref 类型（antd v6 未从顶层导出 TextAreaRef，用 ComponentRef 推导）。 */
+type TextAreaRef = ComponentRef<typeof Input.TextArea>
 
 /** 获取智能体角色主题色 */
 function getAgentColor(id: string, agents: AgentDefinition[]): string {
@@ -45,7 +56,7 @@ function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
       </div>
     )
   }
-  const color = id === 'coordinator' || id === 'broadcast' ? '#722ed1' : getAgentColor(id, agents)
+  const color = id === 'coordinator' || id === 'broadcast' || id === 'system' ? '#722ed1' : getAgentColor(id, agents)
   return (
     <div className="chat-avatar" style={{ borderColor: color }}>
       <img
@@ -67,6 +78,7 @@ function SenderName({ id, agents }: { id: string; agents: AgentDefinition[] }) {
   if (id === 'user') return '用户'
   if (id === 'coordinator') return '群主(协调者)'
   if (id === 'broadcast') return '系统广播'
+  if (id === 'system') return '系统'
   const agent = agents.find((a) => a.id === id)
   return agent?.name ?? id.slice(0, 8) + '...'
 }
@@ -116,7 +128,10 @@ interface ChatPanelProps {
  *
  * 从 GroupPage 抽出聊天主区（原「中间对话区」），状态自治：
  *  - 消息流：本地 `chatMessages` state，loadMessages 拉历史 + WS logs 追加（与 GroupPage 逻辑一致）。
- *  - 输入框：chatInput + @mention 自动补全（成员候选/光标插入/键盘导航），Enter 发送/Shift+Enter 换行（SC-11 升级前先用单行 Input + Enter 发送，保留原行为零回归）。
+ *  - 输入框（SC-11 升级）：单行 Input → 多行 TextArea（autoSize 1~6 行），Enter 发送 /
+ *    Shift+Enter 换行；保留 @mention 自动补全；接入 slash 命令拦截——回车时若整行是 /name args
+ *    则走 getSlashCommand(name).handler(ctx) 而非默认发送。slash 补全下拉（SlashAutocomplete）
+ *    输入 `/`（+ 前缀）时弹出，↑↓/Enter 选择。
  *  - 计划卡：PlanConfirmCard（plan 含 pending 步骤时展示于消息列表顶部）。
  *  - 停止按钮：从 BusEventContext.agentStatuses 找 executing agent，头部展示 StopTaskButton。
  *
@@ -132,7 +147,7 @@ export default function ChatPanel({
   loading,
   onOpenInfo,
 }: ChatPanelProps) {
-  const { groupId: chatGroupId, logs, plan, agentStatuses } = useBusEventContext()
+  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -143,8 +158,14 @@ export default function ChatPanel({
   const [mentionOpen, setMentionOpen] = useState(false)
   const [mentionQuery, setMentionQuery] = useState('')
   const [mentionIndex, setMentionIndex] = useState(0)
-  const inputRef = useRef<InputRef | null>(null)
+  const inputRef = useRef<TextAreaRef | null>(null)
   const [inputCursor, setInputCursor] = useState(0)
+
+  // ── slash 命令补全（SC-11）──
+  const [slashOpen, setSlashOpen] = useState(false)
+  const [slashIndex, setSlashIndex] = useState(0)
+  const [slashQuery, setSlashQuery] = useState('')
+  const slashCommands = slashOpen ? matchSlashCommands(slashQuery) : []
 
   const mentionCandidates = members.filter((m) =>
     getMemberDisplayName(m).toLowerCase().includes(mentionQuery.toLowerCase()),
@@ -211,6 +232,7 @@ export default function ChatPanel({
     const content = chatInput.trim()
     setChatInput('')
     setMentionOpen(false)
+    setSlashOpen(false)
 
     const tempId = `temp-${Date.now()}`
     const optimisticMsg: Message = {
@@ -248,13 +270,60 @@ export default function ChatPanel({
     }
   }
 
-  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // SC-11：slash 命令执行——构造 SlashCommandContext 注入 handler，由 handler 自决副作用
+  // （renderCard 推卡片进聊天流 / clearChat 清空视图 / 读 busState 纯本地聚合）。
+  // 各 handler 当前为 stub（SC-01），SC-03~SC-10 替换为真实实现后自动生效。
+  const handleSlashCommand = async (name: string, args: string) => {
+    const cmd = getSlashCommand(name)
+    if (!cmd) {
+      message.warning(`未知命令：/${name}`)
+      return
+    }
+    const ctx: SlashCommandContext = {
+      groupId: chatGroupId,
+      args,
+      renderCard: (node: ReactNode) => {
+        setChatMessages((prev) => [
+          ...prev,
+          {
+            id: `slash-${name}-${Date.now()}`,
+            group_id: chatGroupId || '',
+            task_id: null,
+            sender_id: 'system',
+            receiver_id: 'broadcast',
+            type: 'slash_card',
+            content: typeof node === 'string' ? node : null,
+            data: typeof node === 'string' ? null : { node },
+            created_at: new Date().toISOString(),
+          },
+        ])
+      },
+      clearChat: () => {
+        setChatMessages([])
+        setSlashOpen(false)
+        setMentionOpen(false)
+      },
+      busState: { agentStatuses, plan, streaming },
+    }
+    try {
+      await cmd.handler(ctx)
+    } catch (e) {
+      message.error(`/${name} 执行失败：${e instanceof Error ? e.message : String(e)}`)
+    }
+    setChatInput('')
+    setSlashOpen(false)
+  }
+
+  const handleInputChange = (
+    e: React.ChangeEvent<HTMLTextAreaElement>,
+  ) => {
     const value = e.target.value
     const cursor = e.target.selectionStart ?? value.length
     setChatInput(value)
     setInputCursor(cursor)
 
     const beforeCursor = value.slice(0, cursor)
+    // @mention 检测：光标前最近一个 @ 触发成员补全（@ 后非空格字符为 query）。
     const atMatch = beforeCursor.match(/@([^\s]*)$/)
     if (atMatch) {
       setMentionQuery(atMatch[1])
@@ -262,6 +331,18 @@ export default function ChatPanel({
       setMentionIndex(0)
     } else {
       setMentionOpen(false)
+    }
+    // slash 命令检测：仅当 `/` 出现在行首（前面只有空白或无字符）时触发——
+    // 避免句中 `/`（如「用 a/b 方案」）误触。query = `/` 之后到光标的文本。
+    const lineStart = beforeCursor.lastIndexOf('\n') + 1
+    const lineToCursor = beforeCursor.slice(lineStart)
+    const slashMatch = lineToCursor.match(/^\/(\S*)$/)
+    if (slashMatch) {
+      setSlashQuery(slashMatch[1])
+      setSlashOpen(true)
+      setSlashIndex(0)
+    } else {
+      setSlashOpen(false)
     }
   }
 
@@ -278,33 +359,97 @@ export default function ChatPanel({
 
     setTimeout(() => {
       const newCursor = atIndex + name.length + 2
-      inputRef.current?.input?.setSelectionRange?.(newCursor, newCursor)
+      const textarea = inputRef.current?.resizableTextArea?.textArea
+      textarea?.setSelectionRange(newCursor, newCursor)
       inputRef.current?.focus()
     }, 0)
   }, [chatInput, inputCursor])
 
-  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
-    if (e.key === 'Enter') {
-      if (mentionOpen && mentionCandidates.length > 0) {
+  // slash 补全选中：把当前行首 `/query` 替换为 `/name `（name 后加空格，便于继续输参数）。
+  const selectSlashCommand = useCallback((cmd: { name: string }) => {
+    const cursor = inputCursor
+    const before = chatInput.slice(0, cursor)
+    const after = chatInput.slice(cursor)
+    const lineStart = before.lastIndexOf('\n') + 1
+    const slashIdx = before.indexOf('/', lineStart)
+    if (slashIdx === -1) {
+      setSlashOpen(false)
+      return
+    }
+    // 保留 `/` 之前内容 + `/name ` + 光标后内容（丢弃 `/` 到光标间的旧 query）。
+    const head = chatInput.slice(0, slashIdx)
+    const rewritten = head + `/${cmd.name} ` + after
+    setChatInput(rewritten)
+    setSlashOpen(false)
+    setTimeout(() => {
+      const newCursor = (head + `/${cmd.name} `).length
+      const textarea = inputRef.current?.resizableTextArea?.textArea
+      textarea?.setSelectionRange(newCursor, newCursor)
+      inputRef.current?.focus()
+    }, 0)
+  }, [chatInput, inputCursor])
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    // ── 补全下拉打开时，优先处理导航/选择（拦截 Enter/Arrow/Escape）──
+    if (slashOpen && slashCommands.length > 0) {
+      if (e.key === 'Enter' || e.key === 'Tab') {
+        e.preventDefault()
+        const cmd = slashCommands[slashIndex]
+        if (cmd) selectSlashCommand(cmd)
+        return
+      }
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setSlashIndex((i) => (i + 1) % slashCommands.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setSlashIndex((i) => (i - 1 + slashCommands.length) % slashCommands.length)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setSlashOpen(false)
+        return
+      }
+    }
+    if (mentionOpen && mentionCandidates.length > 0) {
+      if (e.key === 'Enter' || e.key === 'Tab') {
         e.preventDefault()
         const candidate = mentionCandidates[mentionIndex]
         if (candidate) insertMention(candidate)
         return
       }
-      e.preventDefault()
-      handleSendMessage()
-      return
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        setMentionIndex((idx) => (idx + 1) % mentionCandidates.length)
+        return
+      }
+      if (e.key === 'ArrowUp') {
+        e.preventDefault()
+        setMentionIndex((idx) => (idx - 1 + mentionCandidates.length) % mentionCandidates.length)
+        return
+      }
+      if (e.key === 'Escape') {
+        e.preventDefault()
+        setMentionOpen(false)
+        return
+      }
     }
-    if (!mentionOpen) return
-    if (e.key === 'ArrowDown') {
+    // ── 无补全下拉：Enter 发送 / Shift+Enter 换行（TextArea 默认 Enter 换行，这里反转）──
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+      // slash 命令拦截：整行以 /name 开头时走 handler 而非默认发送。
+      const parsed = parseSlashCommand(chatInput)
+      if (parsed) {
+        e.preventDefault()
+        void handleSlashCommand(parsed.name, parsed.args)
+        return
+      }
       e.preventDefault()
-      setMentionIndex((idx) => (idx + 1) % mentionCandidates.length)
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setMentionIndex((idx) => (idx - 1 + mentionCandidates.length) % mentionCandidates.length)
-    } else if (e.key === 'Escape') {
-      setMentionOpen(false)
+      void handleSendMessage()
     }
+    // Shift+Enter 不拦截 → TextArea 默认换行行为
   }
 
   return (
@@ -368,6 +513,27 @@ export default function ChatPanel({
         ) : (
           chatMessages.map((msg) => {
             const isUser = msg.sender_id === 'user'
+            // SC-11：slash 命令卡片（type=slash_card）——handler 经 ctx.renderCard 推入，
+            // content 存字符串（stub 占位），data.node 存富卡片 ReactNode（SC-03~10 实现）。
+            // 渲染为系统消息气泡（左对齐，不复用 HighlightMessage 的 @mention 高亮）。
+            if (msg.type === 'slash_card') {
+              return (
+                <div key={msg.id} className="chat-msg" style={{ flexDirection: 'row' }}>
+                  <ChatAvatar id="system" agents={agents} />
+                  <div className="chat-bubble-wrap">
+                    <div className="chat-sender-name">
+                      <SenderName id="system" agents={agents} />
+                    </div>
+                    <div className="chat-bubble chat-bubble--other">
+                      {msg.data?.node as ReactNode ?? msg.content}
+                    </div>
+                    <div className="chat-timestamp">
+                      {new Date(msg.created_at).toLocaleTimeString()}
+                    </div>
+                  </div>
+                </div>
+              )
+            }
             return (
               <div
                 key={msg.id}
@@ -400,6 +566,14 @@ export default function ChatPanel({
       {/* 输入框 */}
       {chatGroupId && (
         <div style={{ padding: '12px 16px', borderTop: '1px solid #f0f0f0', background: '#fff', flexShrink: 0, position: 'relative' }}>
+          {slashOpen && slashCommands.length > 0 && (
+            <SlashAutocomplete
+              commands={slashCommands}
+              activeIndex={slashIndex}
+              onSelect={selectSlashCommand}
+              onHover={setSlashIndex}
+            />
+          )}
           {mentionOpen && mentionCandidates.length > 0 && (
             <div
               style={{
@@ -439,22 +613,22 @@ export default function ChatPanel({
               ))}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8 }}>
-            <Input
+          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
+            <Input.TextArea
               ref={inputRef}
               value={chatInput}
               onChange={handleInputChange}
               onKeyDown={handleInputKeyDown}
-              placeholder="输入消息... 使用 @ 点名成员"
+              placeholder="输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行"
               disabled={sending}
-              size="large"
+              autoSize={{ minRows: 1, maxRows: 6 }}
+              style={{ flex: 1, resize: 'none' }}
             />
             <Button
               type="primary"
               icon={<SendOutlined />}
               onClick={handleSendMessage}
               loading={sending}
-              size="large"
             >
               发送
             </Button>
