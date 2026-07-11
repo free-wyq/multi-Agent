@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
@@ -9,6 +9,7 @@ import {
   type Group,
   type GroupMember,
   type Message,
+  type TraceEvent,
 } from '../services/api'
 import { useBusEventContext } from '../contexts/BusEventContext'
 import {
@@ -148,7 +149,7 @@ export default function ChatPanel({
   loading,
   onOpenInfo,
 }: ChatPanelProps) {
-  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming } = useBusEventContext()
+  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -208,6 +209,20 @@ export default function ChatPanel({
           content: streaming[a.current_task_id as string] as string,
         }))
     : []
+
+  // ST-03：task_tool 事件接入聊天气泡——按 task 聚合工具摘要行。
+  // events 是全局 TraceEvent 流（useBusEvent cap 500），按 taskId 分组 kind==='tool'
+  // 事件；流式气泡按其 current_task_id 取对应工具行，渲染在气泡顶部（ChatMessageBubble
+  // toolEvents）。task 与执行 worker 1:1，按 taskId 过滤即该 agent 当前任务的全部工具调用。
+  // useMemo 稳住引用：task_tool 远少于 task_token，但分组仍 memo 避免每帧重算波及子组件。
+  const toolEventsByTask = useMemo(() => {
+    const m: Record<string, TraceEvent[]> = {}
+    for (const e of events) {
+      if (e.kind !== 'tool' || !e.taskId) continue
+      ;(m[e.taskId] || (m[e.taskId] = [])).push(e)
+    }
+    return m
+  }, [events])
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
   useEffect(() => {
@@ -597,6 +612,7 @@ export default function ChatPanel({
             avatar={<ChatAvatar id={b.agentId} agents={agents} />}
             content={b.content}
             timestamp={new Date().toISOString()}
+            toolEvents={toolEventsByTask[b.taskId] || []}
             isStreaming
           />
         ))}

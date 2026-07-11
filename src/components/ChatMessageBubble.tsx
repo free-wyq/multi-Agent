@@ -40,6 +40,8 @@ interface ToolRow {
   payload: unknown
   /** 是否 end 阶段（返回结果）。start=调用中，end=已返回。 */
   isEnd: boolean
+  /** end 阶段配对到同名 start 后算出的耗时（ms）；start 或未配对 end 无此值。 */
+  elapsedMs?: number
   /** 时间戳（用于排序 + 展示）。 */
   timestamp: number
 }
@@ -50,6 +52,12 @@ function toPreview(v: unknown, max = 80): string {
   const s = typeof v === 'string' ? v : JSON.stringify(v)
   if (s.length <= max) return s
   return s.slice(0, max) + '…'
+}
+
+/** 毫秒 → 人类可读耗时：<1s 显示 ms，否则保留 1 位小数秒。 */
+function formatElapsed(ms: number): string {
+  if (ms < 1000) return `${ms}ms`
+  return `${(ms / 1000).toFixed(1)}s`
 }
 
 /** 工具名 → Tag 颜色（与 WorkerTrace 工具卡视觉呼应：start 绿 / end 灰）。 */
@@ -97,24 +105,36 @@ export default function ChatMessageBubble({
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
 
-  // toolEvents → 按时间序的摘要行（每条 task_tool 一行）
+  // toolEvents → 按时间序的摘要行（每条 task_tool 一行）。
+  // 先按时间序排，再按工具名 LIFO 配对 start/end 算耗时：end 弹出最近同名未配对 start，
+  // 差值即该次调用耗时（嵌套同名调用按内层先闭合）；clamp 0 防时钟倒序产生负值。
   const toolRows = useMemo<ToolRow[]>(() => {
-    return toolEvents
-      .map((e) => {
-        const data = (e.data || {}) as Record<string, unknown>
-        const isEnd = data['phase'] === 'end'
-        const name = String(data['name'] || '(unknown)')
-        const payload = isEnd ? data['output'] : data['args']
-        return {
-          key: e.id,
-          name,
-          argsPreview: isEnd ? '' : toPreview(data['args']),
-          payload,
-          isEnd,
-          timestamp: e.timestamp,
+    const sorted = [...toolEvents].sort((a, b) => a.timestamp - b.timestamp)
+    const pending: Record<string, number[]> = {}
+    return sorted.map((e) => {
+      const data = (e.data || {}) as Record<string, unknown>
+      const isEnd = data['phase'] === 'end'
+      const name = String(data['name'] || '(unknown)')
+      const payload = isEnd ? data['output'] : data['args']
+      let elapsedMs: number | undefined
+      if (isEnd) {
+        const stack = pending[name]
+        if (stack && stack.length > 0) {
+          elapsedMs = Math.max(0, e.timestamp - stack.pop()!)
         }
-      })
-      .sort((a, b) => a.timestamp - b.timestamp)
+      } else {
+        ;(pending[name] || (pending[name] = [])).push(e.timestamp)
+      }
+      return {
+        key: e.id,
+        name,
+        argsPreview: isEnd ? '' : toPreview(data['args']),
+        payload,
+        isEnd,
+        elapsedMs,
+        timestamp: e.timestamp,
+      }
+    })
   }, [toolEvents])
 
   const toggleExpand = (key: string) => {
@@ -180,6 +200,11 @@ export default function ChatMessageBubble({
                       {row.argsPreview && (
                         <span className="chat-tool-row-args" title={toPreview(row.payload, 500)}>
                           {row.argsPreview}
+                        </span>
+                      )}
+                      {row.isEnd && row.elapsedMs != null && (
+                        <span className="chat-tool-row-elapsed">
+                          耗时 {formatElapsed(row.elapsedMs)}
                         </span>
                       )}
                     </div>
