@@ -823,6 +823,45 @@ export const configApi = {
   put: (model: string) => http<LlmConfig>('PUT', '/api/config', { model }),
 }
 
+// ── Slash helper API (BE-01: 后端代解析前端无法独立完成的 slash 命令) ────
+
+/** 单条工具预览（/tools 聚合结果项，name + 截断 description）。 */
+export interface ToolPreviewItem {
+  name: string
+  description: string
+}
+
+/** POST /api/slash command=tools 的响应（BE-01 _slash_tools）。 */
+export interface SlashToolsResult {
+  ok: boolean
+  command: string
+  /** 失败时后端给的中文可读错误（MCP 加载失败等）。 */
+  error?: string
+  /** agent_id（请求时传的，回显；未传则为 null/undefined）。 */
+  agent_id?: string | null
+  group_id?: string | null
+  tools: {
+    /** 内置工具（engine.tools.tools_for_group，workspace 无关）。 */
+    internal: ToolPreviewItem[]
+    /** 各 mounted_mcp 暴露的工具（langchain-mcp-adapters 自省，flattened）。 */
+    mcp: ToolPreviewItem[]
+  }
+  total: number
+}
+
+export const slashApi = {
+  /** POST /api/slash command=tools：聚合内置工具 + agent 已挂载 MCP 工具（BE-01）。
+   *  agentId/groupId 可选——agentId 决定查哪个 agent 的 mounted_mcp，groupId 决定 workspace
+   *  绑定（内置工具 closure 捕获 group_id）。两者皆空仍返回内置 roster（workspace 无关）。
+   *  undefined 字段在 http() 内不被序列化，故不传 agent_id/group_id 时后端用默认 None。 */
+  tools: (agentId?: string, groupId?: string) =>
+    http<SlashToolsResult>('POST', '/api/slash', {
+      command: 'tools',
+      ...(agentId ? { agent_id: agentId } : {}),
+      ...(groupId ? { group_id: groupId } : {}),
+    }),
+}
+
 // ── M11 黑盒透明化类型 ────────────────────────────────────
 
 export interface TraceEvent {

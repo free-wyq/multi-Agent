@@ -35,7 +35,8 @@ import type { ReactNode } from 'react'
 import { createElement } from 'react'
 
 import ModelCard from '../components/ModelCard'
-import { configApi, groupApi, messageApi } from '../services/api'
+import ToolsCard from '../components/ToolsCard'
+import { configApi, groupApi, messageApi, slashApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
 
 // SC-04 handleModel 用到 LlmConfig（configApi 返回类型）——已由 ModelCard 内部 import，
@@ -175,6 +176,35 @@ async function handleModel(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
+ * SC-05 `/tools [智能体名]` handler：聚合内置工具 + 各 mounted_mcp 工具，ToolsCard 渲染。
+ *
+ * 调 BE-01 `POST /api/slash` command=tools——后端是单一真源：内置工具定义在
+ * engine.tools.tools_for_group（前端硬编码会漂移），MCP 工具需 async 自省（前端逐连接
+ * GET /api/mcp/{id}/tools 是 N+1 且看不到合并集）。一次调用返回 internal + mcp 两段。
+ *
+ * agentId 解析：`/tools` 无参 → 不传 agentId（后端只返回内置 roster，不查 mounted_mcp）；
+ * `/tools 智能体名` → 在 agents 里按 name 匹配定位 agent_id，传给后端查该 agent 的 mounted_mcp。
+ * 无参时不查 MCP 是合理的默认——内置工具 workspace 无关总能列，MCP 工具依赖具体 agent 挂载，
+ * 用户想看某 agent 的全套工具时显式传名（/tools 小后端）。
+ *
+ * groupId：始终传 ctx.groupId（内置工具 closure 捕获 group_id 绑定 workspace；虽 tools_for_group
+ * 对空 group_id 也返回 roster，传了更准确）。未选群仍可调（workspace 无关部分照常）。
+ *
+ * 错误处理：网络错 / 后端 500 推 ⚠️ 字符串卡片；后端返 ok=false（MCP 加载失败）不抛错——
+ * result.ok=false 时 ToolsCard 顶部红色 Alert 展示 error，仍展示已加载的 internal 段。
+ */
+async function handleTools(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const result = await slashApi.tools(ctx.args || undefined, ctx.groupId || undefined)
+    ctx.renderCard(createElement(ToolsCard, { result }))
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取工具列表失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -216,8 +246,8 @@ export const SLASH_COMMANDS: SlashCommand[] = [
   {
     name: 'tools',
     description: '查看当前可用工具（内置 + 已挂载 MCP）',
-    usage: '/tools',
-    handler: stub('tools'),
+    usage: '/tools [智能体名]',
+    handler: handleTools,
   },
   {
     name: 'skills',
