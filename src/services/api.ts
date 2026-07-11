@@ -842,6 +842,59 @@ export const configApi = {
   put: (model: string) => http<LlmConfig>('PUT', '/api/config', { model }),
 }
 
+// ── LLM Provider API (多模型服务商配置) ──────────────────────
+
+/**
+ * LLM 服务商配置（后端 GET /api/providers 返回的脱敏形态）。
+ *
+ * 后端 store/crud._provider_to_model 把真实 api_key 换成首尾各 3 字符的 mask 预览，
+ * 原始密钥永不离开进程；has_key 让 UI 显示「已配置」而不暴露密钥本身。
+ * is_active 标识当前生效的 provider（同一时刻只有一个 active）。
+ */
+export interface LlmProvider {
+  id: string
+  name: string
+  provider: string
+  model: string
+  base_url: string
+  /** 脱敏密钥预览（首 3 + 尾 3），非原始密钥。 */
+  api_key: string
+  has_key: boolean
+  temperature: number
+  max_tokens: number
+  is_active: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 创建/更新服务商的 payload。api_key 可选——更新时留空表示「不修改」。
+ */
+export interface LlmProviderPayload {
+  name: string
+  provider?: string
+  model?: string
+  base_url?: string
+  api_key?: string
+  temperature?: number
+  max_tokens?: number
+  is_active?: boolean
+}
+
+export const providerApi = {
+  /** GET /api/providers：列出所有服务商（密钥脱敏）。 */
+  list: () => http<LlmProvider[]>('GET', '/api/providers'),
+  /** POST /api/providers：新增服务商。is_active=true 时自动设为当前。 */
+  create: (payload: LlmProviderPayload) => http<LlmProvider>('POST', '/api/providers', payload),
+  /** PUT /api/providers/{id}：更新服务商。api_key 留空不修改。 */
+  update: (id: string, payload: LlmProviderPayload) =>
+    http<LlmProvider>('PUT', `/api/providers/${id}`, payload),
+  /** DELETE /api/providers/{id}：删除服务商。删 active 时自动选下一个。 */
+  remove: (id: string) => http<{ ok: boolean }>('DELETE', `/api/providers/${id}`),
+  /** POST /api/providers/{id}/activate：设为当前服务商。 */
+  activate: (id: string) => http<LlmProvider>('POST', `/api/providers/${id}/activate`),
+}
+
 // ── Slash helper API (BE-01: 后端代解析前端无法独立完成的 slash 命令) ────
 
 /** 单条工具预览（/tools 聚合结果项，name + 截断 description）。 */

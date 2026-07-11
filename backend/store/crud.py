@@ -20,6 +20,7 @@ from models import (
     Group,
     GroupFile,
     GroupMember,
+    LlmProvider,
     McpConnection,
     Message,
     ScheduledTask,
@@ -31,6 +32,7 @@ from models import (
 from store.entities import (
     AgentEntity,
     GroupEntity,
+    LlmProviderEntity,
     McpConnectionEntity,
     MemberEntity,
     MessageEntity,
@@ -50,6 +52,7 @@ _PREFIX_MAP = {
     "mcp": "mcp_",
     "sched": "sched_",
     "schedrun": "schedrun_",
+    "provider": "prov_",
 }
 
 
@@ -219,6 +222,10 @@ async def create_group(payload: Any) -> Group:
         coordinator_id=coord_id,
         description=payload.description,
         status="active",
+        # 透传 payload.config（single_chat 等群组级标记）。后端 GroupCreatePayload 用
+        # extra="allow" 容纳未声明字段，前端单聊建群时传 {single_chat:true} 落库后供
+        # 左栏区分单聊群（不显示在多智能体列表）。未传 config 时为 None（默认）。
+        config=payload.config if hasattr(payload, "config") else None,
         created_at=ts,
         updated_at=ts,
     )
@@ -1162,3 +1169,280 @@ async def finish_scheduled_task_run(
         await db.commit()
         await db.refresh(row)
         return _schedrun_to_model(row)
+
+
+# ── LLM Provider helpers ────────────────────────────────────────
+
+
+def _provider_to_model(p: LlmProviderEntity) -> LlmProvider:
+    """Map ORM row to masked Pydantic LlmProvider.
+
+    The raw ``api_key`` is masked via ``config._mask_key`` — the model's
+    ``api_key`` field carries a preview (first 3 + last 3 chars), NEVER the
+    raw secret. ``has_key`` lets the UI show configured status without the key.
+    """
+    import config as _config
+
+    raw_key = p.api_key or ""
+    return LlmProvider.model_validate(
+        {
+            "id": p.id,
+            "name": p.name,
+            "provider": p.provider,
+            "model": p.model,
+            "base_url": p.base_url,
+            "api_key": _config._mask_key(raw_key),
+            "has_key": bool(raw_key),
+            "temperature": p.temperature,
+            "max_tokens": p.max_tokens,
+            "is_active": bool(p.is_active),
+            "created_at": p.created_at,
+            "updated_at": p.updated_at,
+        }
+    )
+
+
+def _provider_to_cache_dict(p: LlmProviderEntity) -> dict:
+    """Build the raw config dict (with raw api_key) for ``config.set_active_cache``.
+
+    INTERNAL only — never returned over HTTP. The raw key is needed so the
+    engine can actually authenticate to the provider.
+    """
+    return {
+        "provider": p.provider,
+        "model": p.model,
+        "base_url": p.base_url,
+        "api_key": p.api_key or "",
+        "temperature": p.temperature,
+        "max_tokens": p.max_tokens,
+    }
+
+
+async def list_providers() -> list[LlmProvider]:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(LlmProviderEntity).order_by(LlmProviderEntity.created_at)
+            )
+        ).scalars().all()
+        return [_provider_to_model(r) for r in rows]
+
+
+async def get_provider(provider_id: str) -> LlmProvider | None:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(LlmProviderEntity, provider_id)
+        return _provider_to_model(row) if row else None
+
+
+async def get_active_provider_entity() -> LlmProviderEntity | None:
+    """Return the ORM row of the active provider (raw api_key intact).
+
+    INTERNAL use only — cache loader + routes that need the raw key to
+    persist. NOT for HTTP output (use ``get_provider`` for that, which masks).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = (
+            await db.execute(
+                select(LlmProviderEntity).where(LlmProviderEntity.is_active == 1)
+            )
+        ).scalars().first()
+        return row
+
+
+async def _deactivate_all(db) -> None:
+    """Set is_active=0 on all provider rows (single-active invariant)."""
+    rows = (
+        await db.execute(select(LlmProviderEntity).where(LlmProviderEntity.is_active == 1))
+    ).scalars().all()
+    for r in rows:
+        r.is_active = 0
+
+
+async def create_provider(payload: Any) -> LlmProvider:
+    """Insert a new provider. If ``is_active`` is True, deactivate all others
+    first (single-active invariant). Returns the masked model."""
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    entity = LlmProviderEntity(
+        id=_next_id("provider"),
+        name=payload.name,
+        provider=payload.provider or "openai",
+        model=payload.model or "",
+        base_url=payload.base_url or "",
+        api_key=payload.api_key or "",
+        temperature=float(payload.temperature if payload.temperature is not None else 0.0),
+        max_tokens=int(payload.max_tokens if payload.max_tokens is not None else 4096),
+        is_active=1 if getattr(payload, "is_active", False) else 0,
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        if entity.is_active:
+            await _deactivate_all(db)
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _provider_to_model(entity)
+
+
+async def update_provider(provider_id: str, payload: Any) -> LlmProvider | None:
+    """Update whitelisted fields on a provider. ``api_key`` empty/None means
+    "leave unchanged" (so editing other fields doesn't wipe the stored key).
+    If ``is_active`` is set True, deactivate all others. Returns masked model."""
+    from store.database import SessionLocal
+
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(LlmProviderEntity, provider_id)
+        if not row:
+            return None
+        for k, v in data.items():
+            if k == "api_key":
+                # empty/None → leave unchanged (don't clobber the stored key)
+                if v:
+                    row.api_key = v
+                continue
+            if k in ("name", "provider", "model", "base_url", "temperature", "max_tokens"):
+                setattr(row, k, v)
+            elif k == "is_active":
+                if v and not row.is_active:
+                    await _deactivate_all(db)
+                    row.is_active = 1
+                elif not v:
+                    row.is_active = 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return _provider_to_model(row)
+
+
+async def delete_provider(provider_id: str) -> tuple[bool, bool]:
+    """Delete a provider. Returns (deleted, reassigned).
+
+    If the deleted provider was the active one, pick the first remaining
+    provider and mark it active (so there's always an active provider if any
+    exists). ``reassigned`` is True when this reassignment happened, so the
+    caller knows to refresh the cache from the new active.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(LlmProviderEntity, provider_id)
+        if not row:
+            return (False, False)
+        was_active = bool(row.is_active)
+        await db.delete(row)
+        await db.commit()
+        reassigned = False
+        if was_active:
+            # pick first remaining by created_at
+            remaining = (
+                await db.execute(
+                    select(LlmProviderEntity).order_by(LlmProviderEntity.created_at)
+                )
+            ).scalars().first()
+            if remaining:
+                remaining.is_active = 1
+                remaining.updated_at = _now_iso()
+                await db.commit()
+                reassigned = True
+        return (True, reassigned)
+
+
+async def set_active_provider(provider_id: str) -> LlmProvider | None:
+    """Set all is_active=0, target is_active=1, commit. Returns masked model."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(LlmProviderEntity, provider_id)
+        if not row:
+            return None
+        await _deactivate_all(db)
+        row.is_active = 1
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return _provider_to_model(row)
+
+
+async def update_provider_model(provider_id: str, model: str) -> LlmProviderEntity | None:
+    """Targeted update of just the ``model`` column on a provider.
+
+    Used by ``PUT /api/config`` hot-switch so the model change persists to the
+    active provider in DB (not just the cache). Returns the ORM row (raw key
+    intact) so the caller can refresh the cache, or None if not found.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(LlmProviderEntity, provider_id)
+        if not row:
+            return None
+        row.model = model
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+        return row
+
+
+async def load_active_provider_into_cache() -> None:
+    """Populate ``config._ACTIVE_CACHE`` from the DB-backed active provider.
+
+    Called from ``init_db`` at startup. If an active provider row exists, its
+    raw config (with the real api_key) is loaded into the cache so the sync
+    ``get_config()`` path returns it. If NO provider row exists at all (first
+    run on an existing install), seed one from env (preserving the .env-driven
+    behavior) and cache it.
+    """
+    import config
+
+    from store.database import SessionLocal
+
+    active = await get_active_provider_entity()
+    if active:
+        config.set_active_cache(_provider_to_cache_dict(active))
+        return
+
+    # No active provider — check if any provider row exists at all.
+    async with SessionLocal() as db:
+        any_row = (
+            await db.execute(select(LlmProviderEntity).limit(1))
+        ).scalars().first()
+        if any_row:
+            # rows exist but none active — activate the first one
+            any_row.is_active = 1
+            any_row.updated_at = _now_iso()
+            await db.commit()
+            await db.refresh(any_row)
+            config.set_active_cache(_provider_to_cache_dict(any_row))
+            return
+
+        # No provider row at all — seed one from env (preserves .env behavior)
+        import os
+
+        ts = _now_iso()
+        seeded = LlmProviderEntity(
+            id=_next_id("provider"),
+            name="默认",
+            provider=os.environ.get("LLM_PROVIDER", "openai"),
+            model=os.environ.get("LLM_MODEL", "glm-5.1"),
+            base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
+            api_key=os.environ.get("OPENAI_API_KEY", "")
+            or os.environ.get("ANTHROPIC_API_KEY", ""),
+            temperature=0.0,
+            max_tokens=4096,
+            is_active=1,
+            created_at=ts,
+            updated_at=ts,
+        )
+        db.add(seeded)
+        await db.commit()
+        await db.refresh(seeded)
+        config.set_active_cache(_provider_to_cache_dict(seeded))

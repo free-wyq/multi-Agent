@@ -1,17 +1,22 @@
 """Configuration: load project root .env and expose settings.
 
-LLM config single source of truth: ``get_config()`` reads the environment
-live on every call (not cached at import), so ``set_config(model)`` — which
-writes back to ``os.environ`` — takes effect on the next engine invoke without
-a process restart. ``get_config_public()`` masks the API key for safe HTTP
-exposure (GET /api/config). ``get_llm_config()`` and the engine ChatOpenAI
-callers are migrated to these getters in CF-02/CF-03.
+LLM config source of truth: the **active provider** cache. ``get_config()``
+returns the in-memory ``_ACTIVE_CACHE`` dict (populated at startup from the
+DB-backed active ``LlmProviderEntity`` and refreshed on every provider
+switch / model hot-switch). If the cache is not yet populated (pre-init or
+no provider configured), it falls back to the env-driven dict so early
+startup and tests that don't boot the DB still get a valid config.
 
-The module-level ``OPENAI_API_KEY`` / ``OPENAI_BASE_URL`` / ``LLM_MODEL``
-constants are kept for backward compatibility with not-yet-migrated callers
-(import-time snapshots; ``get_config()`` is the fresh source). ``LLM_PROVIDER``
-was read-but-never-used dead config and has been removed; provider is now
-surfaced live via ``get_config()["provider"]``.
+``get_config()`` MUST stay sync — it is called from sync code paths
+(``llm/client.py get_llm_config()``) that run inside async engine code. The
+DB is async (aiosqlite), so the cache bridges sync callers to the async
+store: async route handlers + startup populate/refresh the cache; sync
+``get_config()`` just reads it.
+
+``get_config_public()`` masks the API key for safe HTTP exposure
+(GET /api/config). ``set_config(model)`` updates both ``os.environ`` (env
+fallback path) and the cache's ``model`` key (if cache is set), so
+PUT /api/config model switches are visible on the next GET without a restart.
 """
 from __future__ import annotations
 
@@ -50,6 +55,13 @@ _DEFAULT_MODEL = "glm-5.1"
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_PROVIDER = "openai"
 
+# In-memory cache of the ACTIVE provider's raw config. Populated by the async
+# loader at startup (``crud.load_active_provider_into_cache``) and refreshed by
+# async route handlers on every provider switch / model change. ``get_config()``
+# reads this synchronously so it never blocks on the async DB. None = not yet
+# loaded (fall back to env-driven dict).
+_ACTIVE_CACHE: dict[str, Any] | None = None
+
 
 def _mask_key(key: str) -> str:
     """Mask an API key for safe display: show first 3 + last 3 chars.
@@ -64,22 +76,8 @@ def _mask_key(key: str) -> str:
     return f"{key[:3]}***{key[-3:]}"
 
 
-def get_config() -> dict[str, Any]:
-    """Single source of truth for the LLM config.
-
-    Reads the environment live on every call (not an import-time snapshot) so
-    ``set_config()`` model switches are picked up by the next engine invoke
-    without a restart. Returns snake_case fields:
-
-    - ``provider``: LLM_PROVIDER (default ``openai``)
-    - ``model``: LLM_MODEL (default ``glm-5.1``)
-    - ``base_url``: OPENAI_BASE_URL (default OpenAI)
-    - ``api_key``: OPENAI_API_KEY, falling back to ANTHROPIC_API_KEY
-    - ``temperature`` / ``max_tokens``: sampling defaults
-
-    Engine callers (``ChatOpenAI``, ``chat_completion``) consume this dict;
-    never read ``OPENAI_API_KEY`` etc. directly in new code.
-    """
+def _env_config() -> dict[str, Any]:
+    """Build the config dict from environment variables (the pre-cache fallback)."""
     return {
         "provider": os.environ.get("LLM_PROVIDER", _DEFAULT_PROVIDER),
         "model": os.environ.get("LLM_MODEL", _DEFAULT_MODEL),
@@ -89,6 +87,25 @@ def get_config() -> dict[str, Any]:
         "temperature": _DEFAULT_TEMPERATURE,
         "max_tokens": _DEFAULT_MAX_TOKENS,
     }
+
+
+def get_config() -> dict[str, Any]:
+    """Single source of truth for the LLM config (SYNC — must not await).
+
+    Returns the in-memory ``_ACTIVE_CACHE`` copy if populated (the normal
+    runtime path — set by the async loader from the DB-backed active provider).
+    Falls back to the env-driven dict if the cache is not yet loaded (pre-init
+    or no provider configured). Returns snake_case fields:
+
+    - ``provider`` / ``model`` / ``base_url`` / ``api_key``
+    - ``temperature`` / ``max_tokens``
+
+    Engine callers (``ChatOpenAI``, ``chat_completion``) consume this dict;
+    never read ``OPENAI_API_KEY`` etc. directly in new code.
+    """
+    if _ACTIVE_CACHE is not None:
+        return dict(_ACTIVE_CACHE)
+    return _env_config()
 
 
 def get_config_public() -> dict[str, Any]:
@@ -112,19 +129,43 @@ def get_config_public() -> dict[str, Any]:
     }
 
 
+def set_active_cache(cfg: dict[str, Any]) -> None:
+    """Populate the in-memory active-provider cache (called by async loaders/routes).
+
+    Normalizes the dict to the 6 keys ``get_config()`` returns. Called from:
+    - ``init_db`` → ``crud.load_active_provider_into_cache`` at startup
+    - ``POST /api/providers/{id}/activate`` route handler
+    - ``PUT /api/config`` model hot-switch route handler
+    - ``POST/PUT/DELETE /api/providers`` when the active provider changes
+    """
+    global _ACTIVE_CACHE
+    _ACTIVE_CACHE = {
+        "provider": cfg.get("provider", _DEFAULT_PROVIDER),
+        "model": cfg.get("model", _DEFAULT_MODEL),
+        "base_url": cfg.get("base_url", _DEFAULT_BASE_URL),
+        "api_key": cfg.get("api_key", ""),
+        "temperature": float(cfg.get("temperature", _DEFAULT_TEMPERATURE)),
+        "max_tokens": int(cfg.get("max_tokens", _DEFAULT_MAX_TOKENS)),
+    }
+
+
 def set_config(model: str | None = None) -> dict[str, Any]:
-    """Hot-update the LLM config by writing back to ``os.environ``.
+    """Hot-update the LLM model (env fallback path + cache sync).
 
-    None / empty args are skipped (no-op for that key). Because
-    ``get_config()`` reads the environment live, the change is effective on the
-    next engine invoke — no restart needed (CF-05). Returns the fresh
-    ``get_config()`` so the caller can echo the post-write state.
+    Writes ``model`` back to ``os.environ`` (so the env fallback branch of
+    ``get_config()`` sees it) AND updates ``_ACTIVE_CACHE["model"]`` if the
+    cache is set (so the cache path sees it too). None / empty ``model`` is a
+    no-op. Returns the fresh ``get_config()``.
 
-    Currently only ``model`` is mutable (PUT /api/config switches model);
-    base_url / provider remain env-driven.
+    NOTE: the primary model-switch path is now ``PUT /api/config`` which
+    persists to the active provider in DB + refreshes the cache directly.
+    This function is the fallback when no active provider row exists and is
+    kept for backward compatibility (and the env-fallback test path).
     """
     if model:
         os.environ["LLM_MODEL"] = model
+        if _ACTIVE_CACHE is not None:
+            _ACTIVE_CACHE["model"] = model
     return get_config()
 
 # MT-17: default wall-clock timeout (seconds) for a worker task execution.

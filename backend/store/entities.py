@@ -14,7 +14,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import JSON, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import JSON, Float, ForeignKey, Index, Integer, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -209,3 +209,34 @@ class ScheduledTaskRunEntity(Base):
     result: Mapped[str | None] = mapped_column(String, nullable=True)
     started_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
     finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
+
+
+class LlmProviderEntity(Base):
+    """A configured LLM service provider (PRD 多模型服务商).
+
+    Multiple providers can be configured (OpenAI / DeepSeek / Kimi / GLM …);
+    exactly one is active at a time (``is_active=1``). The active provider's
+    raw config (model/base_url/api_key/temperature/max_tokens) is loaded into
+    ``config._ACTIVE_CACHE`` at startup and on switch, so the sync
+    ``config.get_config()`` call path stays sync (the DB is async — the cache
+    bridges sync callers to the async store). The raw ``api_key`` is stored
+    plaintext (single-user local desktop app, same trust level as ``.env``)
+    but NEVER returned raw over HTTP — the crud mapper masks it via
+    ``config._mask_key`` before building the Pydantic output model.
+    """
+
+    __tablename__ = "llm_providers"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    provider: Mapped[str] = mapped_column(String, nullable=False, default="openai")
+    model: Mapped[str] = mapped_column(String, nullable=False, default="glm-5.1")
+    base_url: Mapped[str] = mapped_column(
+        String, nullable=False, default="https://api.openai.com/v1"
+    )
+    api_key: Mapped[str] = mapped_column(String, nullable=False, default="")
+    temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
+    is_active: Mapped[bool] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)

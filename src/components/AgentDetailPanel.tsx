@@ -334,8 +334,12 @@ function AgentDetailView({
  * 数据流：mount/unmount 返回最新 AgentDefinition → onUpdated 同步父 local → 卡片立即刷新。
  * model/tools 保存后同样 onUpdated。Modal 内 options（skills/mcps 全量列表）懒加载：
  * 首次打开 Modal 才拉取（避免未编辑就发请求）。
+ *
+ * 导出（布局重构 2026-07-11）：单聊 ChatView 标题区复用本组件作为「智能体设置」入口——
+ * 单聊时点 ⚙/编辑打开同一 Modal，挂载技能/MCP + 改 model/tools，与 AgentDetailPanel
+ * 卡片里的编辑入口完全同源，避免重复实现一套单 agent 编辑 UI。
  */
-function AgentEditButton({
+export function AgentEditButton({
   agent,
   onUpdated,
   small,

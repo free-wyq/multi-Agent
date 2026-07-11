@@ -1,26 +1,23 @@
 import { useState } from 'react'
 import { ConfigProvider } from 'antd'
-import { RouterProvider } from 'react-router-dom'
-import { router } from './router'
 import { BusEventProvider } from './contexts/BusEventContext'
+import { SelectionProvider } from './contexts/SelectionContext'
+import Layout from './components/Layout'
 
 /**
- * App — 顶层：ConfigProvider（主题）→ BusEventProvider（全局唯一群组 WS）→ RouterProvider。
+ * App — 顶层：ConfigProvider（主题）→ BusEventProvider（全局唯一群组 WS）→
+ * SelectionProvider（左栏选择模型）→ Layout（左右两栏）。
  *
- * WS-03：在 provider 层持有 `activeGroupId` 并包裹 `BusEventProvider`，全应用共享一条
- * 群组 WS 连接。`activeGroupId` 经 provider 的 `setGroupId` 下发到 context——任何子组件
- * 选中群组时调 `useBusEventContext().setGroupId(id)` 即可切换全局聚焦群组，provider 重新
- * 订阅对应事件流，全应用跟随。
+ * 布局重构 2026-07-11：去 react-router。单聊/群聊都收敛到「一个 groupId + ChatPanel」，
+ * 左栏 Sidebar 触发选择（selectAgent find-or-create single_chat 群 / selectGroup 直接切群），
+ * 两者最终都调 BusEventContext.setGroupId 切换 WS 订阅。SelectionProvider 在
+ * BusEventProvider 内（它消费 groupId/setGroupId），Layout 在 SelectionProvider 内
+ * （Sidebar/ChatView 消费选择态）。
  *
- * L1-02：接入 react-router-dom v7（createHashRouter）。RouterProvider 替换原直接渲染的
- * <Layout/>——Layout 作根 layout route（router.tsx 中 element: <Layout/>），其内部 Content
- * 渲染 <Outlet/> 承载 7 个子路由。关键顺序：BusEventProvider 在 RouterProvider 外层，故
- * 跨路由切换（/agents ↔ / ↔ /tasks）时 provider 不卸载，WS 连接 + activeGroupId 不中断——
- * 路由切换只换 Outlet 内容，全局 WS 态在 Layout + 各页间共享，零重连。
+ * activeGroupId 起始 null（未选群不订阅 WS，避免冷启动对空群组建连）；切换群组时旧 WS 在
+ * useBusEvent effect cleanup 中 unlisten，零泄漏。
  *
- * `activeGroupId` 起始为 null（未选群不订阅 WS，避免冷启动对空群组建连）；切换群组时旧
- * WS 在 `useBusEvent` effect cleanup 中 unlisten，零泄漏。子组件经 `useBusEventContext()`
- * 消费共享状态 + setGroupId 切群。
+ * 品牌蓝统一为 #0A5ACF（极简开发者工具风格）。
  */
 function App() {
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null)
@@ -29,18 +26,18 @@ function App() {
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: '#1677ff',
+          colorPrimary: '#0A5ACF',
           borderRadius: 6,
         },
       }}
     >
       <BusEventProvider groupId={activeGroupId} setGroupId={setActiveGroupId}>
-        <RouterProvider router={router} />
+        <SelectionProvider>
+          <Layout />
+        </SelectionProvider>
       </BusEventProvider>
     </ConfigProvider>
   )
 }
 
 export default App
-
-

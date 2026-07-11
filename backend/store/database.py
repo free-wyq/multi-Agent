@@ -108,6 +108,7 @@ async def init_db() -> None:
     ``create_all`` only adds missing tables, not columns; the additive column
     migration (``_migrate_schema``) runs at import for pre-existing DBs.
     """
+    from store.crud import load_active_provider_into_cache
     from store.entities import Base
     from store.seed import seed_demo_data
 
@@ -115,3 +116,6 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     await seed_demo_data(SessionLocal)
+    # Load the active LLM provider into the sync cache so get_config() returns
+    # the DB-backed config (not the env fallback) from the very first call.
+    await load_active_provider_into_cache()

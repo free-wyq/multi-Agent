@@ -10,6 +10,7 @@ from .group import (
     GroupMember,
     get_leader_strategy,
 )
+from .llm_provider import LlmProvider, LlmProviderCreatePayload
 from .mcp import McpConnection, McpConnectionCreatePayload
 from .message import (
     BusEventData,
@@ -47,4 +48,6 @@ __all__ = [
     "ScheduledTask",
     "ScheduledTaskCreatePayload",
     "ScheduledTaskRun",
+    "LlmProvider",
+    "LlmProviderCreatePayload",
 ]

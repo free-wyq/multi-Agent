@@ -131,10 +131,17 @@ interface ChatPanelProps {
   members: GroupMember[]
   /** 消息加载中态。 */
   loading?: boolean
-  /** 群信息抽屉开关 setter（ChatPanel 头部「群信息」按钮触发，抽屉本体留 ChatPage 管）。 */
+  /** 群信息抽屉开关 setter（ChatPanel 头部「群信息」按钮触发，抽屉本体留 ChatView 管）。 */
   onOpenInfo?: () => void
   /** 清空聊天记录回调（重置时由父统一协调 messageApi.clearByGroup + reset-session，SH-04 仅触发回调）。 */
   onClearMessages?: () => void
+  /**
+   * 隐藏 ChatPanel 自带的聊天头部（标题+成员数+停止按钮+群信息按钮）。
+   *
+   * 左右布局重构后由 ChatView 统一渲染标题区（单聊显 agent 名/角色、群聊显群名+成员数+⚙群信息），
+   * ChatPanel 不再自画头部，避免双头部。默认 false 保持向后兼容（独立使用时仍自带头部）。
+   */
+  hideHeader?: boolean
 }
 
 /**
@@ -160,6 +167,7 @@ export default function ChatPanel({
   members,
   loading,
   onOpenInfo,
+  hideHeader,
 }: ChatPanelProps) {
   const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
@@ -560,8 +568,9 @@ export default function ChatPanel({
 
   return (
     <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
-      {/* 聊天头部 — 钉钉风格：标题 + 人数，右侧停止按钮 + 群信息按钮 */}
-      {group && (
+      {/* 聊天头部 — 钉钉风格：标题 + 人数，右侧停止按钮 + 群信息按钮。
+          hideHeader 时整段不渲染（左右布局由 ChatView 统一画标题区，避免双头部）。 */}
+      {group && !hideHeader && (
         <div
           style={{
             padding: '12px 20px',

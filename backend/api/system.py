@@ -1,10 +1,14 @@
 """System routes: health check (Electron readiness), data dir, agent status
-(per-group + SA-02 aggregate all-groups), LLM config (CF-04 GET/PUT /api/config)."""
+(per-group + SA-02 aggregate all-groups), LLM config (CF-04 GET/PUT /api/config),
+LLM provider CRUD (多模型服务商配置)."""
 from __future__ import annotations
+
+from typing import Any
 
 from fastapi import APIRouter
 from pydantic import BaseModel
 
+import config as _config
 from config import DATA_DIR, get_config_public, set_config
 from engine.registry import registry
 
@@ -71,13 +75,148 @@ async def get_llm_config_route() -> dict:
 async def update_llm_config_route(body: ConfigUpdateBody) -> dict:
     """Hot-switch the active LLM model.
 
-    Writes the new model back to ``os.environ`` via ``set_config`` so the
-    engine picks it up on the next invoke (CF-05 — no restart). Blank/None
-    ``model`` is a no-op that echoes the current config. Returns the masked
-    post-write state (same shape as GET).
+    Persists the new model to the ACTIVE provider in DB (if one exists) and
+    refreshes the in-memory cache so ``get_config()`` returns it on the next
+    sync call — no restart needed (CF-05). If there is no active provider row,
+    falls back to the old ``set_config(model)`` env path. Blank/None ``model``
+    is a no-op that echoes the current config. Returns the masked post-write
+    state (same shape as GET).
     """
-    set_config(model=body.model)
+    if body.model:
+        from store import crud
+
+        active = await crud.get_active_provider_entity()
+        if active:
+            row = await crud.update_provider_model(active.id, body.model)
+            if row:
+                _config.set_active_cache(
+                    {
+                        "provider": row.provider,
+                        "model": row.model,
+                        "base_url": row.base_url,
+                        "api_key": row.api_key or "",
+                        "temperature": row.temperature,
+                        "max_tokens": row.max_tokens,
+                    }
+                )
+            else:
+                set_config(model=body.model)
+        else:
+            set_config(model=body.model)
     return get_config_public()
+
+
+# ── LLM Provider CRUD (多模型服务商配置) ──────────────────────
+
+from models import LlmProvider, LlmProviderCreatePayload  # noqa: E402
+
+
+@router.get("/api/providers")
+async def list_providers_route() -> list[LlmProvider]:
+    """List all configured LLM providers (api_key masked on each)."""
+    from store import crud
+
+    return await crud.list_providers()
+
+
+@router.post("/api/providers")
+async def create_provider_route(body: LlmProviderCreatePayload) -> LlmProvider:
+    """Create a new provider. If ``is_active`` is True, all others are
+    deactivated (single-active invariant) and the cache is refreshed."""
+    from store import crud
+
+    provider = await crud.create_provider(body)
+    if provider.is_active:
+        entity = await crud.get_active_provider_entity()
+        if entity:
+            _config.set_active_cache(
+                {
+                    "provider": entity.provider,
+                    "model": entity.model,
+                    "base_url": entity.base_url,
+                    "api_key": entity.api_key or "",
+                    "temperature": entity.temperature,
+                    "max_tokens": entity.max_tokens,
+                }
+            )
+    return provider
+
+
+@router.put("/api/providers/{provider_id}")
+async def update_provider_route(
+    provider_id: str, body: LlmProviderCreatePayload
+) -> LlmProvider | dict:
+    """Update a provider's fields. ``api_key`` empty/None means "leave
+    unchanged" (so editing other fields doesn't wipe the stored key). If the
+    updated provider is the active one, the cache is refreshed."""
+    from store import crud
+
+    provider = await crud.update_provider(provider_id, body)
+    if provider is None:
+        return {"ok": False, "error": "provider not found"}
+    if provider.is_active:
+        entity = await crud.get_active_provider_entity()
+        if entity:
+            _config.set_active_cache(
+                {
+                    "provider": entity.provider,
+                    "model": entity.model,
+                    "base_url": entity.base_url,
+                    "api_key": entity.api_key or "",
+                    "temperature": entity.temperature,
+                    "max_tokens": entity.max_tokens,
+                }
+            )
+    return provider
+
+
+@router.delete("/api/providers/{provider_id}")
+async def delete_provider_route(provider_id: str) -> dict:
+    """Delete a provider. If the active one was deleted, the first remaining
+    provider is auto-activated and the cache is refreshed from it."""
+    from store import crud
+
+    deleted, reassigned = await crud.delete_provider(provider_id)
+    if not deleted:
+        return {"ok": False, "error": "provider not found"}
+    if reassigned:
+        entity = await crud.get_active_provider_entity()
+        if entity:
+            _config.set_active_cache(
+                {
+                    "provider": entity.provider,
+                    "model": entity.model,
+                    "base_url": entity.base_url,
+                    "api_key": entity.api_key or "",
+                    "temperature": entity.temperature,
+                    "max_tokens": entity.max_tokens,
+                }
+            )
+    return {"ok": True}
+
+
+@router.post("/api/providers/{provider_id}/activate")
+async def activate_provider_route(provider_id: str) -> LlmProvider | dict:
+    """Set a provider as the active one (deactivates all others) and refresh
+    the cache so ``get_config()`` returns this provider's config immediately."""
+    from store import crud
+
+    provider = await crud.set_active_provider(provider_id)
+    if provider is None:
+        return {"ok": False, "error": "provider not found"}
+    entity = await crud.get_active_provider_entity()
+    if entity:
+        _config.set_active_cache(
+            {
+                "provider": entity.provider,
+                "model": entity.model,
+                "base_url": entity.base_url,
+                "api_key": entity.api_key or "",
+                "temperature": entity.temperature,
+                "max_tokens": entity.max_tokens,
+            }
+        )
+    return provider
 
 
 # ── Slash helper (BE-01: backend parsing the frontend can't do alone) ────
