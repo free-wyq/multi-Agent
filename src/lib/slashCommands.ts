@@ -35,8 +35,9 @@ import type { ReactNode } from 'react'
 import { createElement } from 'react'
 
 import ModelCard from '../components/ModelCard'
+import SkillsCard from '../components/SkillsCard'
 import ToolsCard from '../components/ToolsCard'
-import { configApi, groupApi, messageApi, slashApi } from '../services/api'
+import { configApi, groupApi, messageApi, slashApi, skillApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
 
 // SC-04 handleModel 用到 LlmConfig（configApi 返回类型）——已由 ModelCard 内部 import，
@@ -205,6 +206,28 @@ async function handleTools(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
+ * SC-06 `/skills` handler：浏览已安装技能列表，SkillsCard 渲染。
+ *
+ * 调 `GET /api/skills`（skillApi.list）——本地已落库技能（builtin/custom/market 三来源），
+ * 区别于 SkillPage 的「市场浏览」（SkillMarketEntry，待安装未落库）。/skills 聚焦「已装的有什么」。
+ *
+ * 无参无群组依赖——技能是全局资源（不绑群组），skillApi.list() 全量返回。args 忽略
+ * （/skills 不接受参数，未来若加 /skills <name> 过滤可在此解析 args，本轮保持全量）。
+ *
+ * 错误处理：拉取失败推 ⚠️ 字符串卡片（网络错 / 后端 500），不中断聊天流。
+ */
+async function handleSkills(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const skills = await skillApi.list()
+    ctx.renderCard(createElement(SkillsCard, { skills }))
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取技能列表失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -253,7 +276,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'skills',
     description: '浏览已安装的技能列表',
     usage: '/skills',
-    handler: stub('skills'),
+    handler: handleSkills,
   },
   {
     name: 'sessions',
