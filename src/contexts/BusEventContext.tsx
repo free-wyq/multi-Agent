@@ -28,6 +28,9 @@ import type { AgentStatusInfo, PlanStep, TraceEvent } from '../services/api'
 export interface BusEventContextValue {
   /** 本 provider 绑定的群组 id（null = 未选群，WS 不订阅，状态全空）。 */
   groupId: string | null
+  /** 切换当前聚焦群组（WS-03：App 层 state 经 provider 下发的 setter）。
+   *  null = 取消聚焦（断开 WS）。供 Layout/页面选中群组时调用。 */
+  setGroupId: (groupId: string | null) => void
   logs: LogEntry[]
   statusEvents: TaskStatusEvent[]
   events: TraceEvent[]
@@ -47,6 +50,8 @@ export const BusEventContext = createContext<BusEventContextValue | null>(null)
 export interface BusEventProviderProps {
   /** 当前激活群组。null/空串时不订阅 WS（useBusEvent 内部判空跳过），状态为空。 */
   groupId: string | null
+  /** 切换激活群组的 setter（WS-03：App 层 state 下发，经 context 暴露给消费方）。 */
+  setGroupId: (groupId: string | null) => void
   children: ReactNode
 }
 
@@ -57,12 +62,13 @@ export interface BusEventProviderProps {
  * `useMemo` 稳定 value 引用：仅在 groupId 变化或某状态字段引用变化时才换 value，
  * 避免父组件无关重渲染时新对象波及所有消费者。
  */
-export function BusEventProvider({ groupId, children }: BusEventProviderProps) {
+export function BusEventProvider({ groupId, setGroupId, children }: BusEventProviderProps) {
   const bus = useBusEvent(groupId)
 
   const value = useMemo<BusEventContextValue>(
     () => ({
       groupId,
+      setGroupId,
       logs: bus.logs,
       statusEvents: bus.statusEvents,
       events: bus.events,
@@ -72,6 +78,7 @@ export function BusEventProvider({ groupId, children }: BusEventProviderProps) {
     }),
     [
       groupId,
+      setGroupId,
       bus.logs,
       bus.statusEvents,
       bus.events,
