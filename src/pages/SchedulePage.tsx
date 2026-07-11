@@ -370,7 +370,7 @@ export default function SchedulePage() {
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-      <h2 style={{ margin: '0 0 16px 0' }}>定时任务</h2>
+      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「定时任务」与 Tab 标题「定时任务」重复，移除。 */}
 
       <div
         style={{

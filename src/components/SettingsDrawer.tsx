@@ -108,8 +108,8 @@ export default function SettingsDrawer({
         // 选 top（默认）——抽屉宽度足够横向排开 7 标签，内容区高度最大化。
         tabPosition="top"
         items={TAB_ITEMS}
-        // 抽屉内嵌各资源页：给 Tab 内容容器加 padding，让各页内容有呼吸（Drawer body padding 已清零）。
-        // 各页自带 max-width 居中 + h2，外层只补水平 padding。
+        // 抽屉内嵌各资源页：SH-05 后各页已移除自带 h2（与 Tab 标题重复），padding 即各页唯一间距来源。
+        // tabBarStyle 给标签条左右留白；各页自带 max-width 居中 + 自身间距，外层不再加内容区 padding。
         tabBarStyle={{ paddingLeft: 16, paddingRight: 16 }}
       />
     </Drawer>

@@ -66,8 +66,9 @@ export default function MonitorPage() {
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       {/* 群组选择 */}
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>执行监控</h2>
+      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「执行监控」与 Tab 标题「监控」重复，移除；
+          Select 独占该行右对齐。 */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
         <Select
           style={{ width: 240 }}
           placeholder="选择群组"

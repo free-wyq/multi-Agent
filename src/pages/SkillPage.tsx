@@ -315,7 +315,7 @@ export default function SkillPage() {
 
   return (
     <div>
-      <h2 style={{ margin: '0 0 16px 0' }}>技能中心</h2>
+      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「技能中心」与 Tab 标题「技能市场」重复，移除。 */}
 
       <Tabs
         activeKey={tabKey}

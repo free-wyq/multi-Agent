@@ -748,7 +748,7 @@ export default function GroupPage() {
   ]
 
   return (
-    <div style={{ display: 'flex', height: 'calc(100vh - 112px)', overflow: 'hidden' }}>
+    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       {/* ── 左侧群组栏 ── */}
       <div
         style={{

@@ -192,8 +192,9 @@ export default function TaskPage() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-        <h2 style={{ margin: 0 }}>任务看板</h2>
+      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「任务看板」与 Tab 标题「任务」重复，移除；
+          Select 独占该行右对齐（原与 h2 space-between，现 flex-end）。 */}
+      <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center' }}>
         <Select
           style={{ width: 240 }}
           placeholder="选择群组"

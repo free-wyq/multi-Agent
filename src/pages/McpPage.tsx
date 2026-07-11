@@ -251,7 +251,7 @@ export default function McpPage() {
 
   return (
     <div style={{ maxWidth: 1200, margin: '0 auto' }}>
-      <h2 style={{ margin: '0 0 16px 0' }}>MCP 工具</h2>
+      {/* SH-05：降级为 SettingsDrawer Tab，页级 h2「MCP 工具」与 Tab 标题「MCP 工具」重复，移除。 */}
 
       <div
         style={{
