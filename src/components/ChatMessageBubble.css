@@ -1,0 +1,106 @@
+/* ST-01 ChatMessageBubble 样式（流式闪烁光标 + 工具调用摘要行 + 可折叠详情）。
+ *
+ * 复用 ChatPanel.css 的全局 .chat-bubble / .chat-bubble--self / --other（全局 class，
+ * import 即注册），本文件只补「流式生成态」「工具摘要行」专有样式，避免污染 ChatPanel.css。 */
+
+/* ── 流式生成态气泡 ── */
+.chat-bubble--streaming {
+  /* 内嵌淡蓝描边提示「正在生成」，不抢内容视觉 */
+  box-shadow: 0 0 0 1px rgba(22, 119, 255, 0.25) inset;
+}
+
+/* ── 流式闪烁光标 ── */
+.chat-streaming-cursor {
+  display: inline-block;
+  width: 7px;
+  height: 1em;
+  margin-left: 2px;
+  background: currentColor;
+  vertical-align: text-bottom;
+  border-radius: 1px;
+  animation: chat-cursor-blink 1s step-end infinite;
+}
+
+@keyframes chat-cursor-blink {
+  0%,
+  50% {
+    opacity: 1;
+  }
+  51%,
+  100% {
+    opacity: 0;
+  }
+}
+
+/* ── 工具调用摘要区（气泡内顶部） ── */
+.chat-tool-block {
+  margin-bottom: 6px;
+}
+
+.chat-tool-block + .chat-bubble-content {
+  /* 工具行下方有内容时分隔 */
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+}
+
+.chat-bubble--self .chat-tool-block + .chat-bubble-content {
+  border-top-color: rgba(255, 255, 255, 0.18);
+}
+
+/* 单条工具摘要行 label */
+.chat-tool-row-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+}
+
+.chat-tool-row-name {
+  font-family: 'monospace';
+  font-weight: 600;
+}
+
+.chat-tool-row-args {
+  color: inherit;
+  opacity: 0.65;
+  font-family: 'monospace';
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 220px;
+}
+
+.chat-tool-row-elapsed {
+  opacity: 0.55;
+  flex-shrink: 0;
+}
+
+/* 工具 payload 详情块（可折叠展开后） */
+.chat-tool-payload {
+  background: #1e1e1e;
+  color: #c9d1d9;
+  padding: 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'monospace';
+  margin: 4px 0 0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.chat-tool-payload-label {
+  font-size: 10px;
+  color: #8b949e;
+  margin-top: 6px;
+  margin-bottom: 2px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.chat-tool-payload-label:first-child {
+  margin-top: 0;
+}
