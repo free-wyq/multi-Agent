@@ -32,9 +32,14 @@
  *  /schedule  SC-10  内联定时任务列表卡片
  */
 import type { ReactNode } from 'react'
+import { createElement } from 'react'
 
-import { groupApi, messageApi } from '../services/api'
+import ModelCard from '../components/ModelCard'
+import { configApi, groupApi, messageApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
+
+// SC-04 handleModel 用到 LlmConfig（configApi 返回类型）——已由 ModelCard 内部 import，
+// 此处仅为 handler 注释引用，不直接用类型故不重复 import（避免 noUnusedLocals 报错）。
 
 /**
  * handler 运行时上下文：由 ChatPanel（SC-11）在拦截到 slash 命令时构造注入。
@@ -132,6 +137,44 @@ async function handleNew(ctx: SlashCommandContext): Promise<void> {
 }
 
 /**
+ * SC-04 `/model [模型名]` handler：查看 / 切换 LLM 模型，结果以 ModelCard 渲染进聊天。
+ *
+ * 两种形态：
+ *  - 无参（`/model`）→ GET /api/config 拉 当前配置 → renderCard(ModelCard) 展示（switched=false）。
+ *  - 有参（`/model glm-4.6`）→ PUT /api/config body={model} 热切换 → renderCard(ModelCard) 展示
+ *    post-write 配置（switched=true，紫色边框 + ✅ 标题给「切换成功」即时反馈）。
+ *
+ * 后端 set_config 把新 model 写回 os.environ，下次 engine invoke 即生效（CF-05 无需重启）。
+ * 返回的脱敏配置（api_key 仅首尾 3 字符预览）直接喂给 ModelCard——密钥真实值永不离开进程，
+ * 前端只展示脱敏预览 + has_key 配置状态。
+ *
+ * 错误处理：GET/PUT 失败推 ⚠️ 字符串卡片告知（网络错 / 后端 500 / 模型名非法等），不中断
+ * （/model 是查看类命令，失败仅是「没看到」，不应阻断聊天流）。
+ *
+ * 参数 trim：`/model  glm-4.6 `（多空格）→ args="glm-4.6"（parseSlashCommand 已 trim，双保险）。
+ * 空串判定：parseSlashCommand 把 `/model`（无参）解析为 args=''，故 `!args` 判走 GET 分支。
+ *
+ * ModelCard 是独立 .tsx 组件（本文件 .ts 不可写 JSX），import 进来 renderCard 推 ReactNode。
+ */
+async function handleModel(ctx: SlashCommandContext): Promise<void> {
+  try {
+    if (!ctx.args) {
+      // 无参：查看当前配置
+      const config = await configApi.get()
+      ctx.renderCard(createElement(ModelCard, { config }))
+    } else {
+      // 有参：热切换模型（写回 os.environ，下次 invoke 生效）
+      const config = await configApi.put(ctx.args)
+      ctx.renderCard(createElement(ModelCard, { config, switched: true }))
+    }
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取/切换模型失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -162,7 +205,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'model',
     description: '查看当前 LLM 模型，或传名称切换',
     usage: '/model [模型名]',
-    handler: stub('model'),
+    handler: handleModel,
   },
   {
     name: 'status',

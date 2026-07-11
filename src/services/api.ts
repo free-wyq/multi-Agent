@@ -794,6 +794,35 @@ export const systemApi = {
   listAllStatus: () => http<Record<string, AgentStatusInfo[]>>('GET', `/api/status`),
 }
 
+/**
+ * LLM 配置（CF-04 GET /api/config 返回的脱敏形态）。
+ *
+ * 后端 config.get_config_public() 把真实 api_key 换成首尾各 3 字符的 mask 预览，
+ * 原始密钥永不离开进程；has_key 让 UI 显示「已配置」而不暴露密钥本身。
+ * provider/base_url 由环境变量驱动（只读），model 可经 PUT 热切换（set_config 写回
+ * os.environ，下次 engine invoke 生效，无需重启——CF-05）。
+ */
+export interface LlmConfig {
+  provider: string
+  model: string
+  base_url: string
+  /** 脱敏密钥预览（首 3 + 尾 3），非原始密钥。 */
+  api_key: string
+  has_key: boolean
+  temperature: number
+  max_tokens: number
+}
+
+// ── Config API (CF-04: LLM 模型查看/热切换) ───────────────────
+
+export const configApi = {
+  /** GET /api/config：当前 LLM 配置（密钥脱敏）。 */
+  get: () => http<LlmConfig>('GET', '/api/config'),
+  /** PUT /api/config body={model}：热切换模型（写回 os.environ，下次 invoke 生效，无需重启）。
+   *  model 为空时 no-op（echo 当前状态）。返回脱敏的 post-write 配置。 */
+  put: (model: string) => http<LlmConfig>('PUT', '/api/config', { model }),
+}
+
 // ── M11 黑盒透明化类型 ────────────────────────────────────
 
 export interface TraceEvent {
