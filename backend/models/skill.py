@@ -40,3 +40,23 @@ class SkillCreatePayload(BaseModel):
     content: str | None = None
     source: str = "custom"
     tags: list[str] = []
+
+
+class SkillUploadPayload(BaseModel):
+    """SK-05: metadata for uploading an existing SKILL.md file as a skill.
+
+    Used by ``POST /api/skills/upload`` as a multipart ``Form()`` body — the
+    file itself is a separate ``UploadFile`` parameter, and this model carries
+    only the optional metadata. ``name`` is optional because the endpoint
+    falls back to the uploaded file's stem (filename without ``.md``) when the
+    user does not supply an explicit name. ``source`` defaults to ``custom``
+    (uploaded skills are user-provided, not ``builtin``/``market``) to stay
+    within the existing ``Skill.source`` taxonomy consumed by SK-09 search.
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None
+    description: str | None = None
+    source: str = "custom"
+    tags: list[str] = []

@@ -11,6 +11,8 @@ import {
   DashboardOutlined,
   MessageOutlined,
   AppstoreAddOutlined,
+  ApiOutlined,
+  ScheduleOutlined,
 } from '@ant-design/icons'
 
 import AgentPage from '../pages/AgentPage'
@@ -18,10 +20,19 @@ import GroupPage from '../pages/GroupPage'
 import TaskPage from '../pages/TaskPage'
 import MonitorPage from '../pages/MonitorPage'
 import SkillPage from '../pages/SkillPage'
+import McpPage from '../pages/McpPage'
+import SchedulePage from '../pages/SchedulePage'
 
 const { Sider, Content } = AntLayout
 
-type PageKey = 'agents' | 'groups' | 'tasks' | 'monitor' | 'skills'
+type PageKey =
+  | 'agents'
+  | 'groups'
+  | 'tasks'
+  | 'monitor'
+  | 'skills'
+  | 'mcp'
+  | 'schedule'
 
 const menuItems: MenuProps['items'] = [
   { key: 'agents', icon: <RobotOutlined />, label: '智能体' },
@@ -29,6 +40,8 @@ const menuItems: MenuProps['items'] = [
   { key: 'tasks', icon: <DashboardOutlined />, label: '任务' },
   { key: 'monitor', icon: <MessageOutlined />, label: '监控' },
   { key: 'skills', icon: <AppstoreAddOutlined />, label: '技能市场' },
+  { key: 'mcp', icon: <ApiOutlined />, label: 'MCP 工具' },
+  { key: 'schedule', icon: <ScheduleOutlined />, label: '定时任务' },
 ]
 
 export default function Layout() {
@@ -77,6 +90,8 @@ export default function Layout() {
           {active === 'tasks' && <TaskPage />}
           {active === 'monitor' && <MonitorPage />}
           {active === 'skills' && <SkillPage />}
+          {active === 'mcp' && <McpPage />}
+          {active === 'schedule' && <SchedulePage />}
         </Content>
       </AntLayout>
     </AntLayout>

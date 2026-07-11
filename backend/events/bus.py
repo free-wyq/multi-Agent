@@ -197,6 +197,38 @@ async def emit_task_think(
     )
 
 
+async def emit_task_token(
+    group_id: str,
+    task_id: str,
+    agent_id: str,
+    phase: str,
+    delta: str,
+) -> None:
+    """Per-token streaming delta (PL-08 on_chat_model_stream → live rendering).
+
+    Projects one ``on_chat_model_stream`` chunk onto a ``task_token`` WS event.
+    The frontend concatenates the ``content`` deltas to render the model's
+    output live (逐字流式). ``phase`` is ``"streaming"`` for every chunk —
+    whether the chunk is part of reasoning-before-a-tool or the final answer
+    is only known once ``on_chain_end|model`` fires, which still emits the
+    complete text as ``task_think``/``task_answer`` (additive, non-breaking).
+    """
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": task_id,
+            "sender_id": agent_id,
+            "receiver_id": "broadcast",
+            "type": "task_token",
+            "content": delta,
+            "data": {"phase": phase},
+            "timestamp": _ts(),
+        },
+    )
+
+
 async def emit_agent_status(
     group_id: str,
     agent_id: str,

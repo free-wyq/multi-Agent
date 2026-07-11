@@ -26,18 +26,21 @@ interface ToolCard {
 }
 
 /**
- * Worker 执行追踪面板：渲染单个智能体的工具卡片 + 思考文本。
+ * Worker 执行追踪面板：渲染单个智能体的工具卡片 + 思考文本 + 流式 token。
  *
  * 工具卡片：filter events kind==='tool'，按时间序，每张卡含工具名、phase（start/end）、
  * 可折叠 args（output）。
  * 思考文本：filter kind in ('think','answer')，浅色块。
+ * 流式 token（PL-08）：取 useBusEvent.streaming[current_task_id] 渲染「正在生成…」浅色块，
+ * 逐字增长；task_complete/failed/dispatch 后该缓冲被清空，块随之消失。
  */
 export default function WorkerTrace({ agentId, agentName, groupId }: WorkerTraceProps) {
-  const { events, agentStatuses } = useBusEvent(groupId)
+  const { events, agentStatuses, streaming } = useBusEvent(groupId)
   const containerRef = useRef<HTMLDivElement>(null)
 
   const status = agentStatuses[agentId]?.status || 'idle'
   const statusInfo = STATUS_BADGE[status] ?? STATUS_BADGE.idle
+  const currentTaskId = agentStatuses[agentId]?.current_task_id || ''
 
   // 工具事件按时间序
   const toolEvents = events.filter(
@@ -49,12 +52,15 @@ export default function WorkerTrace({ agentId, agentName, groupId }: WorkerTrace
     (e) => (e.kind === 'think' || e.kind === 'answer') && e.agentId === agentId,
   )
 
-  // 自动滚底
+  // 当前正在流式生成的内容（PL-08）：仅当该 worker 正在执行且有对应缓冲时
+  const streamingText = currentTaskId ? streaming[currentTaskId] || '' : ''
+
+  // 自动滚底：工具/思考/流式变化都触发
   useEffect(() => {
     if (containerRef.current) {
       containerRef.current.scrollTop = containerRef.current.scrollHeight
     }
-  }, [toolEvents.length, thinkEvents.length])
+  }, [toolEvents.length, thinkEvents.length, streamingText])
 
   // 把 start/end 配对成 ToolCard
   const cards: ToolCard[] = toolEvents.map((e) => {
@@ -180,6 +186,45 @@ export default function WorkerTrace({ agentId, agentName, groupId }: WorkerTrace
               </div>
             )
           })}
+        </>
+      )}
+
+      {/* 流式生成中（PL-08 逐字流式） */}
+      {streamingText && (
+        <>
+          <div style={{ margin: '16px 0 8px', fontSize: 12, color: '#1677ff', fontWeight: 600 }}>
+            正在生成…
+          </div>
+          <div
+            style={{
+              background: '#e6f4ff',
+              borderLeft: '3px solid #1677ff',
+              padding: '8px 12px',
+              borderRadius: 4,
+              marginBottom: 6,
+              fontSize: 13,
+              color: '#333',
+              lineHeight: 1.6,
+              whiteSpace: 'pre-wrap',
+            }}
+          >
+            <span style={{ fontSize: 11, color: '#1677ff', marginRight: 6 }}>
+              [流式]
+            </span>
+            {streamingText}
+            <span
+              style={{
+                display: 'inline-block',
+                width: 7,
+                height: 14,
+                background: '#1677ff',
+                marginLeft: 2,
+                verticalAlign: 'text-bottom',
+                animation: 'wt-blink 1s steps(2) infinite',
+              }}
+            />
+          </div>
+          <style>{`@keyframes wt-blink { 0%,50% { opacity: 1 } 50.01%,100% { opacity: 0 } }`}</style>
         </>
       )}
     </div>

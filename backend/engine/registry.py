@@ -28,14 +28,18 @@ from engine.inbox import (
 from engine.agent_executor import execute_agent_task
 from engine.mention import route_mentions
 from engine.worker import build_worker_graph
+from engine.workspace import scan_workspace_artifacts
 from events import (
     emit_agent_status,
     emit_message_added,
     emit_task_completed,
     emit_task_log,
     emit_task_think,
+    emit_task_token,
     emit_task_tool,
 )
+from config import WORKER_TASK_TIMEOUT
+from models import get_leader_strategy
 from store import crud
 
 logger = logging.getLogger("multi-agent.registry")
@@ -72,6 +76,9 @@ class AgentEngine:
         self._dispatch_plan: list[dict[str, Any]] = []
         self._recent_routes: dict[str, float] = {}
         self._pending_tasks: list[dict[str, Any]] = []  # backlog while executing
+        self._worker_task: asyncio.Task | None = None  # PL-11: cancellable execution body
+        self._cancel_requested: bool = False  # PL-11: set by a stop request
+        self._timeout_fired: bool = False  # MT-17: set by the watchdog when a task times out
 
         if self.is_coordinator:
             self.graph = build_coordinator_graph()
@@ -127,18 +134,103 @@ class AgentEngine:
 
     async def _handle_task(self, task: dict[str, Any]) -> None:
         """Process a task item. Busy -> backlog; otherwise execute (Rust handle_inbox task branch)."""
+        # PL-11: a task marked ``cancelled`` via ``inbox.cancel_task`` while it sat
+        # in the queue or the ``_pending_tasks`` backlog is skipped without
+        # execution. The dequeued item is the same dict ``push_task`` appended to
+        # ``_task_queues`` and ``put`` onto the channel, so the marker set by
+        # ``cancel_task`` is visible here without a re-query. Covers both the
+        # fresh-dequeue path (this call from ``_handle_inbox_item``) and the
+        # backlog-drain path (``_drain_pending`` → ``_handle_task``).
+        if task.get("status") == "cancelled":
+            logger.info(
+                "[engine %s] skipping cancelled task %s", self.name, task["id"]
+            )
+            await self._publish_log(task["id"], "⏹ 任务已取消，跳过执行")
+            return
+
         if self.status == "executing":
             self._pending_tasks.append(task)
             return
 
         self.status = "executing"
         self.current_task_id = task["id"]
+        self._cancel_requested = False  # reset per task (no stale cancel carryover)
         await emit_agent_status(
             self.group_id, self.agent_id, self.name, "executing", task["id"]
         )
         preview = (task.get("content") or "")[:50]
         await self._publish_log(task["id"], f"▶ [{self.name}] 开始执行任务: {preview}...")
 
+        # PL-11: run the execution body as a child asyncio.Task so a cancel
+        # request can interrupt it. ``self._worker_task`` holds the handle so
+        # ``request_cancel`` can cancel it; cleared in ``finally`` so the next
+        # task (drained below) starts with a clean slot.
+        self._worker_task = asyncio.create_task(self._execute_body(task))
+        # MT-17: arm a watchdog that cancels the body if it produces no result
+        # within ``worker_timeout`` (per-group override > WORKER_TASK_TIMEOUT).
+        # Only armed for *worker* engines — the coordinator's dispatch is
+        # non-blocking w.r.t. workers (it fans out then ENDS), so it won't hang
+        # on worker execution, and killing the coordinator graph mid-invoke
+        # risks leaving ``_dispatch_plan`` inconsistent (a coordinator-LLM hang
+        # is better bounded at the httpx client, not here). Scoped to workers
+        # matches the MT-17 "Worker 长时间无响应超时降级" spec precisely.
+        self._timeout_fired = False
+        watchdog = None
+        if not self.is_coordinator:
+            watchdog = await self._arm_timeout_watchdog(
+                task, self._resolve_worker_timeout()
+            )
+        try:
+            await self._worker_task
+        except asyncio.CancelledError:
+            # MT-17: a timeout-driven cancel is indistinguishable from a
+            # user/PL-11 cancel at the asyncio layer — both cancel the child
+            # Task. ``_timeout_fired`` (set by the watchdog before cancelling)
+            # disambiguates: if the watchdog fired, this is a hung-worker
+            # degradation, so we run the timeout-cleanup path instead of the
+            # PL-11 user-stop path.
+            if self._timeout_fired:
+                self._timeout_fired = False
+                logger.warning(
+                    "[engine %s] task %s timed out (no result within watchdog window)",
+                    self.name, task["id"],
+                )
+                await self._on_task_timed_out(task)
+            elif self._cancel_requested:
+                # PL-11: this cancel was requested by ``request_cancel`` (it set
+                # the flag). Absorb it — the engine loop must survive a task
+                # cancel so the agent returns to idle and the backlog drains.
+                # (CancelledError is BaseException in Py3.8+, so ``_run_loop``'s
+                # ``except Exception`` would NOT catch a re-raise — the loop
+                # would die. We must swallow task-cancels here.)
+                self._cancel_requested = False
+                logger.info(
+                    "[engine %s] task %s cancelled by request", self.name, task["id"]
+                )
+                await self._on_task_cancelled(task)
+            else:
+                # Not our cancel → the engine is shutting down (``stop()``
+                # cancelled the loop mid-task). Let it propagate so the loop
+                # exits cleanly.
+                raise
+        finally:
+            self._worker_task = None
+            if watchdog is not None and not watchdog.done():
+                watchdog.cancel()
+
+        await self._reset_idle(task["id"])
+        await self._drain_pending()
+
+    async def _execute_body(self, task: dict[str, Any]) -> None:
+        """The coordinator-or-worker execution body (PL-11: cancellable wrapper).
+
+        Wraps the old ``_handle_task`` post-setup logic so it runs as a child
+        Task. Split out from ``_handle_task`` to enable cancellation without
+        touching the queue loop: cancelling ``self._worker_task`` cancels
+        ``self._execute_body`` (and everything it awaits, incl. the LLM call),
+        while ``_handle_task``'s post-run ``_reset_idle``/``_drain_pending``
+        still execute to leave the engine in a clean idle state.
+        """
         if self.is_coordinator:
             # coordinator does not run the CLI; treat the task as a user demand
             # and trigger the coordinator graph via a synthetic notify.
@@ -157,8 +249,26 @@ class AgentEngine:
         else:
             await self._run_worker_task(task)
 
-        await self._reset_idle(task["id"])
-        await self._drain_pending()
+    def request_cancel(self, task_id: str | None = None) -> bool:
+        """PL-11: cancel the current executing task. Returns whether a cancel was issued.
+
+        Sets ``_cancel_requested`` and cancels the child ``_worker_task``. The
+        next ``await`` in the execution body raises ``CancelledError``, the
+        body unwinds, and ``_handle_task`` catches it, runs ``_reset_idle``,
+        and the engine returns to idle (backlog drained next).
+
+        ``task_id`` is optional: if provided, the cancel is only issued when it
+        matches the engine's ``current_task_id`` (race-guard against stopping
+        the wrong task after a status change). If omitted, cancel whatever is
+        running.
+        """
+        if self.status != "executing" or self._worker_task is None:
+            return False
+        if task_id is not None and task_id != self.current_task_id:
+            return False
+        self._cancel_requested = True
+        self._worker_task.cancel()
+        return True
 
     async def _run_worker_task(self, task: dict[str, Any]) -> None:
         """Worker task execution via the agentic loop (M5: LLM + bind_tools)."""
@@ -186,6 +296,15 @@ class AgentEngine:
                     content,
                     data,
                 )
+            elif kind == "token":
+                # PL-08: per-token streaming delta → task_token WS event
+                await emit_task_token(
+                    group_id,
+                    task_id,
+                    agent_id,
+                    (data or {}).get("phase", "streaming"),
+                    content,
+                )
             elif kind in ("think", "answer"):
                 await emit_task_think(
                     group_id,
@@ -204,6 +323,43 @@ class AgentEngine:
         snippet = (result.get("output") or "")[:200]
         success = bool(result.get("success"))
         exit_code = result.get("exit_code")
+
+        # PL-12: scan the group workspace for file artifacts produced during
+        # this task, then persist them onto the task row so the task card /
+        # download entry can surface them. Only scan on success — a failed or
+        # cancelled task typically leaves no useful artifacts, and the scan
+        # is wasted work. The scan is shallow + bounded (see
+        # ``scan_workspace_artifacts``) so even a workspace that contains a
+        # large generated dependency tree stays cheap. ``set_task_artifact``
+        # is a no-op (returns None) if the task_id isn't persisted (it never
+        # throws) — e.g. coordinator-only synthetic tasks that aren't rows.
+        artifact_path: str | None = None
+        artifact: dict | None = None
+        if success:
+            try:
+                manifest = scan_workspace_artifacts(group_id)
+                files = manifest.get("files") or []
+                if files:
+                    artifact_path = files[0]["path"]
+                    artifact = manifest
+            except Exception:
+                logger.exception(
+                    "[engine %s] artifact scan failed for task %s",
+                    self.name, task_id,
+                )
+            if artifact_path:
+                try:
+                    await crud.set_task_artifact(task_id, artifact_path, artifact)
+                except Exception:
+                    logger.exception(
+                        "[engine %s] failed to persist artifact for task %s",
+                        self.name, task_id,
+                    )
+                await self._publish_log(
+                    task_id, f"📦 产物已记录：{artifact_path}"
+                    + (f"（共 {len((artifact or {}).get('files', []))} 个文件）"
+                       if artifact and len(artifact.get("files", [])) > 1 else "")
+                )
 
         await emit_task_completed(
             group_id,
@@ -243,6 +399,135 @@ class AgentEngine:
                 {"task_id": task_id, "success": success},
             )
 
+    async def _on_task_cancelled(self, task: dict[str, Any]) -> None:
+        """PL-11: cleanup when the current task is cancelled mid-execution.
+
+        Marks the task ``failed`` (canceled) in the inbox queue, emits a
+        ``task_failed`` bus event so the frontend WorkerTrace shows the stop,
+        and posts a short agent_reply so the chat reflects the interruption.
+        Mirrors the success-path side effects (complete_task + emit + reply)
+        but with a canceled result — without this, the inbox task would stay
+        ``claimed`` forever and the UI would show a phantom executing state.
+        """
+        task_id = task["id"]
+        await complete_task(task_id, False, "任务已停止")
+        await emit_task_completed(
+            self.group_id, task_id, self.agent_id, False, "任务已停止", None
+        )
+        await self._publish_log(task_id, "⏹ 任务已被用户停止")
+        await self._reply("⏹ 任务已停止")
+
+    # ── MT-17: worker-task timeout watchdog ─────────────────────────
+
+    def _resolve_worker_timeout(self) -> float:
+        """Resolve the per-task timeout (seconds) for *this* engine's group.
+
+        Precedence: ``config.worker_timeout`` (a per-group override, read fresh
+        via ``crud.get_group`` per task — the group settings Modal may change it
+        without an engine restart) → module-level ``WORKER_TASK_TIMEOUT`` (the
+        env default, 300s). A value <= 0 disables the timeout (hang-tolerant
+        legacy behaviour). Synchronous (returns the resolved default; the
+        per-group override is awaited lazily by the caller via
+        ``_arm_timeout_watchdog``).
+        """
+        return WORKER_TASK_TIMEOUT
+
+    async def _arm_timeout_watchdog(
+        self, task: dict[str, Any], default_timeout: float
+    ) -> asyncio.Task | None:
+        """Arm an asyncio watchdog that cancels a hung worker task.
+
+        A worker that produces no result within ``timeout`` seconds is treated
+        as hung ("长时间无响应"). The watchdog sets ``_timeout_fired`` (so the
+        ``CancelledError`` handler in ``_handle_task`` recognizes a
+        timeout-driven cancel vs a PL-11 user stop) and cancels the child
+        ``_worker_task``. The cancel propagates into the in-flight LLM call /
+        tool execution (``astream_events`` / ``run_command``), the body
+        unwinds, and ``_on_task_timed_out`` synthesizes a failure report-back
+        so the coordinator's MT-15 recovery (retry/skip/reassign/keep_failed)
+        wakes and the plan doesn't deadlock on a "dispatched" step.
+
+        Returns the watchdog ``asyncio.Task`` (caller cancels it in ``finally``
+        when the body settles normally). ``None`` when the timeout is disabled
+        (<=0) — no watchdog is armed, preserving hang-tolerant behaviour.
+        """
+        # Per-group override takes precedence over the env default. Read fresh
+        # per task (group settings are user-mutable) but tolerate read errors
+        # by falling back to the default rather than blocking dispatch.
+        timeout = default_timeout
+        try:
+            grp = await crud.get_group(self.group_id)
+            if grp and grp.config and "worker_timeout" in (grp.config or {}):
+                try:
+                    timeout = float(grp.config.get("worker_timeout") or 0)
+                except (TypeError, ValueError):
+                    timeout = default_timeout
+        except Exception:
+            logger.warning(
+                "[engine %s] worker_timeout config read failed, using default %ss",
+                self.name, default_timeout,
+            )
+        if timeout <= 0:
+            return None
+
+        async def _watch() -> None:
+            try:
+                await asyncio.sleep(timeout)
+            except asyncio.CancelledError:
+                return
+            # fire only if the body is still running (a normal settle cancels
+            # the watchdog before this line — defensive double-check).
+            if self._worker_task is None or self._worker_task.done():
+                return
+            self._timeout_fired = True
+            logger.warning(
+                "[engine %s] worker task %s hung for %.0fs — degrading (cancel)",
+                self.name, task["id"], timeout,
+            )
+            await self._publish_log(
+                task["id"],
+                f"⏱ 任务超时（{timeout:.0f}s 无响应），自动降级处理。",
+            )
+            self._worker_task.cancel()
+
+        return asyncio.create_task(_watch())
+
+    async def _on_task_timed_out(self, task: dict[str, Any]) -> None:
+        """MT-17: cleanup when the worker task hangs past the timeout.
+
+        Mirrors ``_on_task_cancelled`` but framed as a *timeout* (not a user
+        stop): marks the task ``failed`` with a timeout result, emits
+        ``task_failed`` so the frontend WorkerTrace shows the degradation, and
+        posts a short agent_reply so the chat reflects it. Crucially, it also
+        pushes the ``agent_reply`` report-back notify to the coordinator
+        carrying ``{"task_id", "success": False}`` — same channel as
+        ``_run_worker_task`` uses on a genuine failure — so the coordinator's
+        ``node_handle_reply`` (MT-15) recovery decision (retry/skip/reassign/
+        keep_failed) wakes and the plan doesn't deadlock on a "dispatched" step
+        that will never complete.
+        """
+        task_id = task["id"]
+        task_content = task.get("content") or ""
+        timeout_result = f"任务超时（worker 长时间无响应）"
+        await complete_task(task_id, False, timeout_result)
+        await emit_task_completed(
+            self.group_id, task_id, self.agent_id, False, timeout_result, None
+        )
+        await self._publish_log(task_id, "⏱ 任务已超时降级")
+        await self._reply(f"⏱ {timeout_result}")
+        # report-back to coordinator (same channel as _run_worker_task's failure
+        # path) so MT-15 recovery wakes — without this the step stays
+        # "dispatched" forever and the plan deadlocks.
+        if self.coordinator_id and self.coordinator_id != self.agent_id:
+            await push_notify(
+                self.group_id,
+                "agent_reply",
+                self.agent_id,
+                self.coordinator_id,
+                f"步骤完成：{task_content}\n\n结果：{timeout_result}",
+                {"task_id": task_id, "success": False},
+            )
+
     # ── notify handling ──────────────────────────────────────────────
 
     async def _handle_notify(self, notify: dict[str, Any]) -> None:
@@ -263,6 +548,24 @@ class AgentEngine:
         if self.is_coordinator:
             coord_mod.set_reply_callback(reply_cb)
             try:
+                # PL-02/PL-03 + MT-03: read the group's config flags per invoke
+                # so the coordinator graph reflects the *current* group config
+                # (GroupEntity.config). Read fresh each notify rather than caching
+                # on the engine — group config is a user-mutable setting (the
+                # plan-confirm/direct API may toggle auto_confirm; the group
+                # settings Modal may update leader_strategy) and a stale cache
+                # would freeze the wait/confirm vs 直接干 mode and a stale Leader
+                # strategy until the engine restarts. Cost is one DB read per
+                # coordinator notify, negligible vs the LLM call downstream.
+                auto_confirm = False
+                leader_strategy = ""
+                grp = await crud.get_group(self.group_id)
+                if grp:
+                    if grp.config:
+                        auto_confirm = bool(grp.config.get("auto_confirm", False))
+                    # MT-03: leader_strategy via the shared safe accessor so the
+                    # read path has one source of truth for the default + key name.
+                    leader_strategy = get_leader_strategy(grp.config)
                 result = await self.graph.ainvoke(
                     {
                         "group_id": self.group_id,
@@ -275,6 +578,8 @@ class AgentEngine:
                         "memory": self._memory,
                         "dispatch_plan": self._dispatch_plan,
                         "recent_routes": self._recent_routes,
+                        "auto_confirm": auto_confirm,
+                        "leader_strategy": leader_strategy,
                     },
                     config={"configurable": {"thread_id": self.thread_id}},
                 )
@@ -403,8 +708,93 @@ class AgentRegistry:
         if not group:
             del self._engines[group_id]
 
+    async def stop_group(self, group_id: str) -> int:
+        """MT-07: stop every engine in a group (解散团队时停止引擎).
+
+        Iterates a snapshot of the group's engines, stops each (cancels the run
+        loop, unregisters the inbox, emits an ``offline`` status), then drops the
+        now-empty group key from ``_engines``. Returns the number of engines
+        stopped (0 if the group had no live engines — e.g. never started, or
+        already torn down). Safe to call on an unknown / already-stopped group
+        (no-op). Used by ``DELETE /api/groups/{id}`` so deleting a team reclaims
+        its resident engines rather than leaking them until process shutdown.
+        """
+        group = self._engines.get(group_id)
+        if not group:
+            return 0
+        stopped = 0
+        for aid in list(group.keys()):
+            await group[aid].stop()
+            stopped += 1
+        # stop() flips status to offline + unregisters inbox but leaves the entry;
+        # drop the whole group now that every engine is offline.
+        self._engines.pop(group_id, None)
+        logger.info(
+            "[registry] stopped %d engine(s) for group %s (disband)",
+            stopped, group_id,
+        )
+        return stopped
+
     def get_engine(self, group_id: str, agent_id: str) -> AgentEngine | None:
         return self._engines.get(group_id, {}).get(agent_id)
+
+    async def stop_task(
+        self, group_id: str, agent_id: str, task_id: str | None = None
+    ) -> bool:
+        """PL-11: cancel the current executing task on an agent's engine.
+
+        Delegates to ``AgentEngine.request_cancel`` which cancels the child
+        ``_worker_task``; the next ``await`` raises ``CancelledError``, the
+        body unwinds, and ``_handle_task`` runs ``_reset_idle`` to bring the
+        engine back to idle. Returns whether a cancel was actually issued
+        (``False`` if the agent isn't executing or task_id mismatches).
+
+        This method returns *immediately* after issuing the cancel — it does
+        not block on the task to finish unwinding. Callers that need the
+        settled state should poll ``list_group_status`` (the PL-11 self-test
+        does exactly this).
+        """
+        engine = self.get_engine(group_id, agent_id)
+        if engine is None:
+            return False
+        return engine.request_cancel(task_id)
+
+    async def stop_task_by_id(
+        self, task_id: str, group_id: str | None = None
+    ) -> dict[str, Any]:
+        """PL-11: stop the engine currently executing ``task_id`` (if any).
+
+        Scans engines — optionally narrowed to ``group_id`` — for the one whose
+        ``current_task_id == task_id`` and ``status == "executing"``, then cancels
+        it via :meth:`stop_task` (which cancels the child ``_worker_task`` so the
+        next ``await`` raises ``CancelledError``; ``_handle_task`` absorbs it,
+        runs ``_on_task_cancelled``, and the engine returns to idle).
+
+        The ``tq_`` runtime ids are globally unique (uuid4), so at most one engine
+        matches. Returns ``{"cancelled": bool, "group_id": str|None,
+        "agent_id": str|None}`` — ``cancelled`` is False when no engine is
+        executing that task (already finished, or only queued — the queued case is
+        handled by ``inbox.cancel_task`` at the API layer, which complements this).
+
+        ``stop_task`` → ``request_cancel`` is synchronous (no real await), so the
+        dict iteration here never suspends mid-scan; the ``list()`` snapshots are
+        defensive only.
+        """
+        groups: dict[str, dict[str, AgentEngine]] = (
+            {group_id: self._engines.get(group_id, {})}
+            if group_id is not None
+            else self._engines
+        )
+        for gid, group in list(groups.items()):
+            for aid, eng in list(group.items()):
+                if eng.status == "executing" and eng.current_task_id == task_id:
+                    cancelled = await self.stop_task(gid, aid, task_id)
+                    return {
+                        "cancelled": cancelled,
+                        "group_id": gid,
+                        "agent_id": aid,
+                    }
+        return {"cancelled": False, "group_id": None, "agent_id": None}
 
     async def load_from_store(self) -> None:
         """Spin up an engine for every coordinator + member across all groups.

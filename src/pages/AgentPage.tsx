@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import {
   Button,
   Modal,
@@ -10,6 +10,7 @@ import {
   Popconfirm,
   Tooltip,
   Badge,
+  Segmented,
 } from 'antd'
 import {
   PlusOutlined,
@@ -24,8 +25,18 @@ import {
   ThunderboltOutlined,
   ClockCircleOutlined,
   EyeOutlined,
+  BulbOutlined,
+  AppstoreOutlined,
+  UserAddOutlined,
 } from '@ant-design/icons'
-import { agentApi, skillApi, systemApi, type AgentDefinition, type Skill } from '../services/api'
+import {
+  agentApi,
+  skillApi,
+  systemApi,
+  type AgentDefinition,
+  type AgentTemplate,
+  type Skill,
+} from '../services/api'
 import './AgentPage.css'
 
 const ROLES = [
@@ -121,6 +132,18 @@ export default function AgentPage() {
   const [editing, setEditing] = useState<AgentDefinition | null>(null)
   const [form] = Form.useForm()
   const [hoveredId, setHoveredId] = useState<string | null>(null)
+  /* AG-01 自然语言生成智能体 */
+  const [genOpen, setGenOpen] = useState(false)
+  const [genDesc, setGenDesc] = useState('')
+  const [generating, setGenerating] = useState(false)
+  /* AG-11 角色模板广场 */
+  const [templates, setTemplates] = useState<AgentTemplate[]>([])
+  const [tplCategory, setTplCategory] = useState<string>('全部')
+  const [tplLoading, setTplLoading] = useState(false)
+  /* AG-12 雇佣中模板 id 集合（每卡独立 loading，雇佣是 DB create 无 LLM 调用，
+   * 通常秒级完成；用 Set 而非单 bool 以支持多卡各自独立的 loading 态，避免
+   * 一卡雇佣时全卡按钮齐刷刷转圈）。 */
+  const [hiringTplIds, setHiringTplIds] = useState<Set<string>>(new Set())
 
   const fetchAgents = async () => {
     setLoading(true)
@@ -162,6 +185,34 @@ export default function AgentPage() {
   useEffect(() => {
     fetchAgents()
   }, [])
+
+  /* AG-11: 拉取预设角色模板（catalog 静态常量，后端恒可用）。
+   * 全部拉到前端，分类筛选在前端做（catalog 仅 10 条，全量内存筛选比每点 Tab
+   * 发一次请求更快且离线可用）。tplCategory='全部' 时显示全部，否则精确匹配分类。 */
+  const fetchTemplates = async () => {
+    setTplLoading(true)
+    try {
+      const list = await agentApi.listTemplates()
+      setTemplates(list)
+    } catch {
+      message.error('获取角色模板失败')
+    } finally {
+      setTplLoading(false)
+    }
+  }
+
+  const tplCategories = useMemo(() => {
+    const seen: string[] = []
+    templates.forEach((t) => {
+      if (!seen.includes(t.category)) seen.push(t.category)
+    })
+    return seen
+  }, [templates])
+
+  const filteredTemplates = useMemo(() => {
+    if (tplCategory === '全部') return templates
+    return templates.filter((t) => t.category === tplCategory)
+  }, [templates, tplCategory])
 
   const handleCreateOrUpdate = async (values: Record<string, unknown>) => {
     try {
@@ -215,6 +266,70 @@ export default function AgentPage() {
     setModalOpen(true)
   }
 
+  /* AG-01: 自然语言生成完整智能体配置。
+   * 调 agentApi.generate(description) → 后端 LLM 生成 name/role/system_prompt/
+   * skills/extra_skills/description 落库返回 AgentDefinition。生成成功后 fetchAgents
+   * 刷新列表，新生成的 agent 卡片立即可见。
+   * generating 串行锁防重复点击（LLM 调用耗时数秒，期间禁用按钮+loading 态）。 */
+  const handleGenerate = async () => {
+    const desc = genDesc.trim()
+    if (!desc) {
+      message.warning('请描述你想要的智能体')
+      return
+    }
+    setGenerating(true)
+    try {
+      const agent = await agentApi.generate(desc)
+      message.success(`已生成智能体「${agent.name}」`)
+      setGenOpen(false)
+      setGenDesc('')
+      fetchAgents()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '生成失败')
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  /* AG-11: 角色模板广场展示侧栏开关。展开时懒拉取模板（首开才请求，
+   * 后续开关用已有 state 不重复请求——catalog 静态不变）。 */
+  const [tplPanelOpen, setTplPanelOpen] = useState(false)
+  const toggleTemplates = (open: boolean) => {
+    setTplPanelOpen(open)
+    if (open && templates.length === 0) {
+      fetchTemplates()
+    }
+  }
+
+  /* AG-12: 雇佣预设角色模板创建员工。
+   * 调 agentApi.hireTemplate(tpl.template_id) → 后端 get_template 解析 catalog 全配置
+   * → AgentCreatePayload → crud.create_agent 落库 → 返回 AgentDefinition（原样落库，
+   * name 用模板名）。成功后 fetchAgents 刷新员工列表，新员工卡片立即出现在网格。
+   *
+   * 不弹改名 Modal——直接用模板名落库是最常见路径（用户在广场看中一个角色想立即加入
+   * 团队，改名是可选需求非主流程）；雇佣后如需改名可点员工卡编辑（AG-06），编辑入口已
+   * 在卡片底部常驻。省去 Modal 让雇佣一键完成（与 AG-01 生成成功的体验一致：生成后
+   * 直接刷新列表，要改用编辑）。
+   *
+   * hiringTplIds 跟踪每卡 loading（Set 支持多卡独立态），loading 中按钮 disabled 防重复
+   * 点击。catch 兜底 message.error（后端未知 template_id→404 / DB 异常都会经 http 抛 Error）。 */
+  const handleHireTemplate = async (tpl: AgentTemplate) => {
+    setHiringTplIds((prev) => new Set(prev).add(tpl.template_id))
+    try {
+      const agent = await agentApi.hireTemplate(tpl.template_id)
+      message.success(`已雇佣「${agent.name}」加入团队`)
+      fetchAgents()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '雇佣失败')
+    } finally {
+      setHiringTplIds((prev) => {
+        const next = new Set(prev)
+        next.delete(tpl.template_id)
+        return next
+      })
+    }
+  }
+
   const roleValue = Form.useWatch('role', form)
 
   return (
@@ -235,8 +350,98 @@ export default function AgentPage() {
           >
             新建智能体
           </Button>
+          <Button
+            size="large"
+            icon={<BulbOutlined />}
+            onClick={() => setGenOpen(true)}
+            className="agent-hero-btn"
+          >
+            自然语言生成
+          </Button>
+          <Button
+            size="large"
+            icon={<AppstoreOutlined />}
+            onClick={() => toggleTemplates(!tplPanelOpen)}
+            className="agent-hero-btn"
+            type={tplPanelOpen ? 'primary' : 'default'}
+          >
+            角色模板广场
+          </Button>
         </div>
       </div>
+
+      {/* ── AG-11 角色模板广场（可折叠面板，展开懒拉取） ── */}
+      {tplPanelOpen && (
+        <div className="agent-templates-panel">
+          <div className="agent-templates-header">
+            <div className="agent-templates-title">
+              <AppstoreOutlined />
+              <h3>角色模板广场</h3>
+              <span className="agent-templates-subtitle">
+                选择预设角色，一键雇佣加入团队
+              </span>
+            </div>
+            <Segmented
+              value={tplCategory}
+              onChange={(val) => setTplCategory(val as string)}
+              options={['全部', ...tplCategories].map((c) => ({ label: c, value: c }))}
+              size="small"
+            />
+          </div>
+
+          <div className="agent-templates-grid">
+            {tplLoading ? (
+              <div className="agent-templates-empty">加载中…</div>
+            ) : filteredTemplates.length === 0 ? (
+              <div className="agent-templates-empty">暂无模板</div>
+            ) : (
+              filteredTemplates.map((tpl) => {
+                const tplSkills = Array.from(
+                  new Set([...(tpl.skills ?? []), ...(tpl.extra_skills ?? [])]),
+                )
+                return (
+                  <div key={tpl.template_id} className="agent-template-card">
+                    <div className="agent-template-card-top">
+                      <span className="agent-template-emoji">{tpl.icon_emoji}</span>
+                      <div className="agent-template-meta">
+                        <h4 className="agent-template-name">{tpl.name}</h4>
+                        <span className="agent-template-role">{tpl.role}</span>
+                      </div>
+                      <Tag className="agent-template-cat-tag">{tpl.category}</Tag>
+                    </div>
+                    <p className="agent-template-desc" title={tpl.description}>
+                      {tpl.description}
+                    </p>
+                    <div className="agent-template-skills">
+                      {tplSkills.length > 0 ? (
+                        tplSkills.map((s) => (
+                          <Tag key={s} className="agent-template-skill-tag">
+                            {s}
+                          </Tag>
+                        ))
+                      ) : (
+                        <span className="agent-no-skills">暂无技能</span>
+                      )}
+                    </div>
+                    {/* AG-12 雇佣按钮：调 hireTemplate 落库为本地员工，成功后 fetchAgents 刷新。
+                     * loading 中 disabled 防重复点击（hiringTplIds Set 跟踪每卡独立 loading）。 */}
+                    <Button
+                      block
+                      size="small"
+                      icon={<UserAddOutlined />}
+                      className="agent-template-hire-btn"
+                      loading={hiringTplIds.has(tpl.template_id)}
+                      onClick={() => handleHireTemplate(tpl)}
+                    >
+                      雇佣
+                    </Button>
+                  </div>
+                )
+              })
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ── 空状态 ── */}
       {agents.length === 0 && !loading ? (
@@ -258,6 +463,12 @@ export default function AgentPage() {
             const status = agentStatusMap[agent.id] ?? 'offline'
             const statusInfo = STATUS_MAP[status]
             const isHovered = hoveredId === agent.id
+            // AG-05: 卡片「技能」合并核心 skills + extra_skills（去重，核心在前），
+            // 让员工列表完整展示能力栈。skills 是角色核心技能，extra_skills 是附加能力，
+            // 合并展示比只显 extra_skills 更完整。两者皆空时显「暂无技能」占位。
+            const allSkills = Array.from(
+              new Set([...(agent.skills ?? []), ...(agent.extra_skills ?? [])]),
+            )
 
             return (
               <div
@@ -309,10 +520,17 @@ export default function AgentPage() {
                     <span>{agent.role}</span>
                   </div>
 
-                  {/* 技能标签 */}
+                  {/* 描述（AG-05: 一句话定位） */}
+                  {agent.description && (
+                    <p className="agent-card-desc" title={agent.description}>
+                      {agent.description}
+                    </p>
+                  )}
+
+                  {/* 技能标签（AG-05: 合并核心 skills + extra_skills） */}
                   <div className="agent-card-skills">
-                    {agent.extra_skills && agent.extra_skills.length > 0 ? (
-                      agent.extra_skills.map((s) => (
+                    {allSkills.length > 0 ? (
+                      allSkills.map((s) => (
                         <Tag key={s} color={theme.tagColor} className="agent-skill-tag">
                           {s}
                         </Tag>
@@ -321,6 +539,21 @@ export default function AgentPage() {
                       <span className="agent-no-skills">暂无技能</span>
                     )}
                   </div>
+
+                  {/* 工具权限（AG-05: allowed/denied_tools——当前种子为空，留位渲染，非空才显示） */}
+                  {(agent.allowed_tools?.length || agent.denied_tools?.length) ? (
+                    <div className="agent-card-skills" style={{ marginTop: 6 }}>
+                      {agent.allowed_tools && agent.allowed_tools.length > 0 && (
+                        <span style={{ fontSize: 12, color: '#999', marginRight: 4 }}>工具:</span>
+                      )}
+                      {agent.allowed_tools?.map((t) => (
+                        <Tag key={t} color="green" className="agent-skill-tag">{t}</Tag>
+                      ))}
+                      {agent.denied_tools?.map((t) => (
+                        <Tag key={t} color="red" className="agent-skill-tag">禁:{t}</Tag>
+                      ))}
+                    </div>
+                  ) : null}
 
                   {/* 已挂载技能（来自技能市场 mount） */}
                   {agent.mounted_skills && agent.mounted_skills.length > 0 && (
@@ -434,6 +667,48 @@ export default function AgentPage() {
             />
           </Form.Item>
         </Form>
+      </Modal>
+
+      {/* ── AG-01 自然语言生成弹窗 ── */}
+      <Modal
+        open={genOpen}
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <BulbOutlined />
+            自然语言生成智能体
+          </div>
+        }
+        onCancel={() => {
+          setGenOpen(false)
+          setGenDesc('')
+        }}
+        onOk={handleGenerate}
+        confirmLoading={generating}
+        okText="生成"
+        width={520}
+        destroyOnClose
+      >
+        <div style={{ marginTop: 16 }}>
+          <p style={{ color: '#666', marginBottom: 12 }}>
+            用自然语言描述你想要的智能体角色定位，AI 将自动生成名称、角色、提示词与技能。
+          </p>
+          <Input.TextArea
+            value={genDesc}
+            onChange={(e) => setGenDesc(e.target.value)}
+            rows={4}
+            placeholder="如：一个负责数据清洗和报表生成的数据分析师，熟悉 Python pandas 和 PostgreSQL"
+            disabled={generating}
+            onPressEnter={(e) => {
+              if (e.ctrlKey || e.metaKey) {
+                e.preventDefault()
+                handleGenerate()
+              }
+            }}
+          />
+          <p style={{ color: '#999', fontSize: 12, marginTop: 8, marginBottom: 0 }}>
+            提示：Ctrl/⌘ + Enter 快速生成。生成耗时约数秒，请稍候。
+          </p>
+        </div>
       </Modal>
     </div>
   )

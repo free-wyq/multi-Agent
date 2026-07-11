@@ -16,10 +16,15 @@ export interface AgentDefinition {
   extra_skills?: string[]
   skills?: string[]
   mounted_skills?: string[]
+  /** AG-08/AG-09: 已挂载的 MCP 连接 id 列表（mount_mcp/unmount_mcp 维护）。 */
+  mounted_mcp?: string[]
   system_prompt?: string
   model?: string
   max_turns?: number
   description?: string | null
+  /** AG-05: 工具权限白名单/黑名单（后端 AgentDefinition 字段，当前种子为空）。 */
+  allowed_tools?: string[]
+  denied_tools?: string[]
   created_at: string
   updated_at: string
 }
@@ -33,12 +38,45 @@ export interface AgentCreatePayload {
   description?: string
 }
 
+/**
+ * AG-11: 预设角色模板（「角色模板广场」浏览项，非落库 Agent）。
+ *
+ * 与 AgentDefinition 有意不同：模板是「可被发现待雇佣」的对象，尚未落本地库——
+ *  - 用 `template_id` 标识（形如 `tpl:backend-engineer`），而非 Agent 的 `id`；
+ *  - 无 mounted_skills/mounted_mcp/allowed_tools/denied_tools——挂载是独立用户动作
+ *    （AG-08/AG-09），模板只承载角色身份（是谁、能做什么），与 AG-01 生成同立场；
+ *  - 带 UI 元数据 `category`/`icon_emoji` 供广场分组与徽标渲染。
+ *
+ * 字段 snake_case 对齐后端 AgentTemplate 模型（backend/agent_templates.py）与
+ * 既有 api.ts 约定。AG-12 雇佣时用 template_id 调 POST /api/agents/templates/{id}/hire
+ * 落库为本地 AgentDefinition。
+ */
+export interface AgentTemplate {
+  template_id: string
+  name: string
+  role: string
+  description: string
+  system_prompt: string
+  skills: string[]
+  extra_skills: string[]
+  category: string
+  icon_emoji: string
+}
+
 export interface Group {
   id: string
   name: string
   coordinator_id: string
   description: string | null
   status: string
+  /**
+   * 群组级动态配置（后端 GroupEntity.config JSON 列，mirror of models.GroupConfig）。
+   * 由后端按 key 约定写入 + 内联读出：auto_confirm（PL-02/03 计划确认开关）、
+   * leader_strategy（MT-03 Leader 指挥策略，群设置 Modal 写入 → coordinator 注入 prompt）。
+   * 后端 update_group 对 config 做 key 级 merge（不整体替换），故前端 PUT 时传整个 config
+   * dict 也安全——新 key 合并、已有 key 覆盖。可为 null（群无配置）。
+   */
+  config?: Record<string, unknown> | null
   created_at: string
   updated_at: string
 }
@@ -73,6 +111,13 @@ export interface GroupCreatePayload {
   coordinator_id?: string
   description?: string
   member_ids?: string[]
+  /**
+   * MT-03: 群组级动态配置（镜像 Group.config）。PUT /api/groups/{id} 时传整个
+   * config dict——后端 update_group 对 config 做 key 级 merge（不整体替换），
+   * 故传 `{ leader_strategy: '...' }` 仅覆盖 leader_strategy，保留共存键
+   * （如 auto_confirm）。GroupCreatePayload.extra='allow' 容纳此未声明字段。
+   */
+  config?: Record<string, unknown>
 }
 
 export type TaskStatus = 'submitted' | 'working' | 'completed' | 'failed' | 'canceled' | 'input_required'
@@ -162,9 +207,62 @@ export const agentApi = {
   list: () => http<AgentDefinition[]>('GET', '/api/agents'),
   get: (id: string) => http<AgentDefinition | null>('GET', `/api/agents/${id}`),
   create: (body: AgentCreatePayload) => http<AgentDefinition>('POST', '/api/agents', body),
+  /**
+   * AG-01: 自然语言生成完整智能体配置。
+   *
+   * POST /api/agents/generate body={description}。后端调 LLM 按提示词生成
+   * name/role/system_prompt/skills/extra_skills/description 六字段，role 经
+   * snake_case 规整，落库返回 AgentDefinition（mounted_skills/mcp/allowed/denied
+   * 全空——挂载是独立用户动作 AG-08）。LLM 失败时后端 fallback 裸配置，仍返回 agent。
+   *
+   * 与 skillApi.generate 同构（description 单参数 + JSON body + 返回落库对象）。
+   * body 字段 description 同名无 snake/camel 转换问题。
+   */
+  generate: (description: string) =>
+    http<AgentDefinition>('POST', '/api/agents/generate', { description }),
   update: (id: string, body: Partial<AgentCreatePayload>) =>
     http<AgentDefinition | null>('PUT', `/api/agents/${id}`, body),
   delete: (id: string) => http<boolean>('DELETE', `/api/agents/${id}`),
+  /**
+   * AG-11: 列出预设角色模板（供「角色模板广场」浏览）。
+   *
+   * GET /api/agents/templates?category=。后端委托 agent_templates.list_templates：
+   * catalog 是模块级静态常量恒可用（无网络/DB 依赖），air-gapped 或未配 LLM 也能渲染。
+   * category 留空返回全部（当前 10 模板），给定则精确匹配分类（固定中文标签如「开发」
+   * 「测试」），未知分类返回空数组（200 + []，非 404）。
+   *
+   * 与 skillApi.searchMarket 同构（GET + 可选 query 筛选 + 返回静态 catalog 列表），
+   * 但 listTemplates 不做模糊搜索——模板分类是固定枚举，按 Tab 传精确分类即可。
+   * 返回 AgentTemplate[]（含 template_id 供 AG-12 雇佣、category/icon_emoji 供广场渲染）。
+   */
+  listTemplates: (category?: string) =>
+    http<AgentTemplate[]>('GET', '/api/agents/templates', undefined, category ? { category } : undefined),
+  /**
+   * AG-12: 雇佣预设角色模板，落库为本地员工。
+   *
+   * POST /api/agents/templates/{templateId}/hire body={name?}。后端按 template_id 解析
+   * catalog 全配置（role/system_prompt/skills/extra_skills/description 原样），构造
+   * AgentCreatePayload 落库返回 AgentDefinition（与 list/create 同类型，直接进员工列表）。
+   * name 可选覆盖（雇佣时个性化改名，如「后端开发工程师」→「小后端」）；不传或空串回退
+   * 模板名。未知 template_id → 404（catalog 无此条目）。雇佣的 agent 无 mounted_skills/
+   * mcp/tools（挂载是独立用户动作 AG-08/AG-09，与 AG-01 生成、AG-11 模板同立场）。
+   *
+   * 与 skillApi.installMarket 同构（按 id 解析 catalog/市场配置落库为本地对象，仅传 id
+   * 而非全文——配置真源在后端 agent_templates._CATALOG，前端传全文会与服务端漂移）。
+   * template_id 形如 `tpl:backend-engineer`，`:` 是 RFC3986 path-safe 字符（pchar），
+   * 直接拼路径不经 encodeURIComponent（与 get(id)/delete(id) 处理 agent id 同风格），
+   * fetch + FastAPI {template_id} 转换器均正常吃下。
+   *
+   * body 始终传对象（name 有值传 {name}，否则传 {}）：{} 是合法 JSON body，Pydantic
+   * HireTemplateBody 全字段可选，解析为 name=None → 后端回退模板名；比传 undefined
+   * 更显式（避免「无 body 是否被当缺参 422」的歧义，curl 验证 body={} 返 200）。
+   */
+  hireTemplate: (templateId: string, name?: string) =>
+    http<AgentDefinition>(
+      'POST',
+      `/api/agents/templates/${templateId}/hire`,
+      name ? { name } : {},
+    ),
 }
 
 // ── Group API ────────────────────────────────────────────────
@@ -173,6 +271,22 @@ export const groupApi = {
   list: () => http<Group[]>('GET', '/api/groups'),
   get: (id: string) => http<Group | null>('GET', `/api/groups/${id}`),
   create: (body: GroupCreatePayload) => http<Group>('POST', '/api/groups', body),
+  /**
+   * MT-04: 根据已选群主 + 成员 roster 自动生成团队名称和描述。
+   *
+   * POST /api/groups/generate-name body={coordinator_id?, member_ids?}。后端解析
+   * 成员 name/role → LLM 综合出项目向团队名 + 一句话描述 → 返回 {name, description}。
+   * LLM 失败时 fallback 用 roster 成员名拼接「XX团队」（永不抛错，创建流始终拿到可用建议）。
+   *
+   * 调用时机：用户在新建群组 Modal 选完群主+成员后点「自动生成」，回填 name/description
+   * 字段供用户审核编辑（建议性，用户可改）。与 agentApi.generate 同构（LLM 生成 + JSON 解析 +
+   * fallback），但不落库——只返回建议，落库走后续 groupApi.create。
+   */
+  generateNameDesc: (coordinatorId?: string, memberIds: string[] = []) =>
+    http<{ name: string; description: string }>('POST', '/api/groups/generate-name', {
+      coordinator_id: coordinatorId,
+      member_ids: memberIds,
+    }),
   update: (id: string, body: Partial<GroupCreatePayload>) =>
     http<Group | null>('PUT', `/api/groups/${id}`, body),
   delete: (id: string) => http<boolean>('DELETE', `/api/groups/${id}`),
@@ -182,9 +296,107 @@ export const groupApi = {
   removeMember: (id: string, memberId: string) =>
     http<boolean>('DELETE', `/api/groups/${id}/members/${memberId}`),
   listFiles: (id: string) => http<GroupFile[]>('GET', `/api/groups/${id}/files`),
+  /**
+   * PL-12: 下载群组工作区产物文件。返回可直接触发浏览器下载的 URL
+   * （后端 FileResponse 流式回传，带 Content-Disposition filename）。
+   *
+   * 不走通用 http<T> —— 下载是二进制流不是 JSON，http 会 JSON.parse 报错。
+   * 改为返回 URL，由调用方决定如何消费：
+   *  - 直接 window.open(url) 触发浏览器下载（最简，浏览器处理 Content-Disposition）；
+   *  - 或 fetch(url) 拿 Blob 再 saveAs（更可控，可加 loading 态/错误处理）。
+   *
+   * fileName 是工作区相对 POSIX 路径（来自 Task.artifact_path 或
+   * Task.artifact.files[].path），可能含子目录（如 `login-api/index.js`）。
+   * 每段单独 encodeURIComponent 后用 `/` 拼，避免裸 `/` 被 URL 当成路径段
+   * 分割（虽后端 {name:path} 转换器能吃斜杠，但显式 encode 各段最稳，对
+   * 含空格/中文/特殊字符的文件名也安全）。
+   */
+  downloadFileUrl: (groupId: string, fileName: string): string => {
+    const encoded = fileName
+      .split('/')
+      .map((seg) => encodeURIComponent(seg))
+      .join('/')
+    return `${API_BASE}/api/groups/${groupId}/files/${encoded}`
+  },
+  /**
+   * PL-12: 下载产物文件为 Blob（用于前端可控的下载，可加 loading/错误提示）。
+   * 失败时抛 Error（http 状态 + 后端文案），调用方 catch 后 message.error。
+   */
+  downloadFile: async (groupId: string, fileName: string): Promise<Blob> => {
+    const resp = await fetch(groupApi.downloadFileUrl(groupId, fileName))
+    if (!resp.ok) {
+      throw new Error(`下载失败 (${resp.status}): ${await resp.text()}`)
+    }
+    return resp.blob()
+  },
+}
+
+// ── Plan API (M12 PL-02/PL-03 计划确认闭环) ─────────────────
+
+/** 计划修改时单步的 patch（除 step 外皆可选，仅传需改字段）。 */
+export interface PlanModifyStep {
+  step: number
+  agent_id?: string
+  agent_name?: string
+  instruction?: string
+  depends_on?: number[]
+}
+
+/** /plan/confirm 与 /plan/direct 的响应。 */
+export interface PlanActionResponse {
+  ok: boolean
+  group_id: string
+  coordinator_id: string
+  mode: 'confirm' | 'direct' | 'modify'
+  /** /direct 专属：是否已把 group config.auto_confirm 置 True。 */
+  auto_confirm?: boolean
+  /** /direct 专属：是否有驻留计划被一并唤醒派发。 */
+  resumed_resident_plan?: boolean
+}
+
+/** /plan/modify 的响应（带修改后的完整计划）。 */
+export interface PlanModifyResponse extends PlanActionResponse {
+  plan: PlanStep[]
+}
+
+/** GET /api/groups/{id}/plan 的响应（当前驻留计划，PL-10 重连重拉）。 */
+export interface PlanGetResponse {
+  ok: boolean
+  group_id: string
+  coordinator_id: string
+  plan: PlanStep[]
+}
+
+export const planApi = {
+  /** 确认继续：唤醒驻留计划按原样派发。 */
+  confirm: (groupId: string) =>
+    http<PlanActionResponse>('POST', `/api/groups/${groupId}/plan/confirm`),
+  /** 直接干：把 group 切到 auto_confirm=True 并（若有）唤醒驻留计划。 */
+  directRun: (groupId: string) =>
+    http<PlanActionResponse>('POST', `/api/groups/${groupId}/plan/direct`),
+  /** 修改计划：patch 指定步骤后重广播 + 确认派发。 */
+  modify: (groupId: string, steps: PlanModifyStep[]) =>
+    http<PlanModifyResponse>('POST', `/api/groups/${groupId}/plan/modify`, { steps }),
+  /** 拉取当前驻留计划（PL-10 WS 重连后重拉，对齐后端 _dispatch_plan 真源）。 */
+  getPlan: (groupId: string) =>
+    http<PlanGetResponse>('GET', `/api/groups/${groupId}/plan`),
 }
 
 // ── Task API ─────────────────────────────────────────────────
+
+/** POST /api/tasks/{id}/stop 的响应（PL-11 停止任务）。 */
+export interface TaskStopResponse {
+  ok: boolean
+  task_id: string
+  /** true=当前 executing 的任务已被 cancel（_worker_task 中断，引擎回 idle）。 */
+  executing: boolean
+  /** true=队列/backlog 中的任务已打 cancelled 标记（_handle_task 将跳过执行）。 */
+  queued: boolean
+  group_id: string | null
+  agent_id: string | null
+  /** 人类可读结果文案，前端可直接 toast 提示。 */
+  message: string
+}
 
 export const taskApi = {
   list: (groupId: string) => http<Task[]>('GET', '/api/tasks', undefined, { groupId }),
@@ -194,6 +406,11 @@ export const taskApi = {
     http<Task | null>('PUT', `/api/tasks/${id}`, body),
   delete: (id: string) => http<boolean>('DELETE', `/api/tasks/${id}`),
   ready: (groupId: string) => http<Task[]>('GET', '/api/tasks/ready', undefined, { groupId }),
+  /** PL-11：停止任务。后端双保险——executing 的 cancel _worker_task，
+   *  queued 的打 cancelled 标记；都不是则 200 no-op（可能已完成，非错误）。
+   *  groupId 可选（tq_ 全局唯一），传了可缩小引擎扫描范围。 */
+  stop: (id: string, groupId?: string) =>
+    http<TaskStopResponse>('POST', `/api/tasks/${id}/stop`, undefined, groupId ? { groupId } : undefined),
 }
 
 // ── Message API ─────────────────────────────────────────────
@@ -231,6 +448,29 @@ export interface SkillCreatePayload {
   tags?: string[]
 }
 
+/**
+ * SK-10: 技能市场条目（来自内置市场 catalog + 可选远程 Hub，非本地入库技能）。
+ *
+ * 与 Skill 类型有意不同：市场条目是「可被发现待安装」的对象，尚未落本地库——
+ *  - 用 `entry_id` 标识（catalog 条目形如 `catalog:db-migration`），而非 Skill 的 `id`；
+ *  - `content` 可空（catalog 条目自带全文；远程条目可能仅带 source_url 待安装时拉取）；
+ *  - 带 provenance 字段 `hub`/`author`/`version`/`source_url` 让用户区分来源，本地 Skill 无这些。
+ *
+ * 字段 snake_case 对齐后端 MarketEntry 模型与既有 api.ts 约定（Skill/GroupMember 同风格）。
+ * SK-12 安装时用 entry_id 调 POST /api/skills/market/install 落库为本地 Skill（source=market）。
+ */
+export interface SkillMarketEntry {
+  entry_id: string
+  name: string
+  description: string
+  tags: string[]
+  content: string | null
+  hub: string
+  author: string
+  version: string
+  source_url: string | null
+}
+
 export const skillApi = {
   list: () => http<Skill[]>('GET', '/api/skills'),
   get: (id: string) => http<Skill>('GET', `/api/skills/${id}`),
@@ -244,6 +484,267 @@ export const skillApi = {
     http<AgentDefinition>('POST', `/api/skills/${id}/mount`, { agentId }),
   unmount: (id: string, agentId: string) =>
     http<AgentDefinition>('POST', `/api/skills/${id}/unmount`, { agentId }),
+  /**
+   * SK-05: 上传 SKILL.md 文件作为技能入库。multipart/form-data：
+   * file（文件本体）+ name/description/source/tags（元数据 form 字段）。
+   *
+   * 不走通用 http<T> —— http 设 Content-Type: application/json 并
+   * JSON.stringify body；multipart 必须用 FormData 让浏览器自动设带 boundary
+   * 的 multipart Content-Type（手动设会缺 boundary 导致后端解析失败，与
+   * downloadFile 同理：二进制/非 JSON 交互需独立 fetch）。
+   *
+   * tags 是 string[]，后端 form 字段扁平需 JSON 编码字符串（后端 json.loads 解析）；
+   * 空数组不 append（后端缺省 []）。name 缺省时后端回退文件 stem（去 .md 扩展名），
+   * 故 name/description/source/tags 皆可选，仅 file 必填。
+   */
+  upload: async (
+    file: File,
+    opts?: { name?: string; description?: string; source?: string; tags?: string[] },
+  ): Promise<Skill> => {
+    const fd = new FormData()
+    fd.append('file', file)
+    if (opts?.name) fd.append('name', opts.name)
+    if (opts?.description) fd.append('description', opts.description)
+    if (opts?.source) fd.append('source', opts.source)
+    if (opts?.tags && opts.tags.length > 0) {
+      fd.append('tags', JSON.stringify(opts.tags))
+    }
+    const resp = await fetch(`${API_BASE}/api/skills/upload`, {
+      method: 'POST',
+      body: fd,
+      // 不设 headers：浏览器自动加 multipart/form-data; boundary=...
+    })
+    if (!resp.ok) {
+      throw new Error(`API ${resp.status}: ${await resp.text()}`)
+    }
+    const text = await resp.text()
+    return (text ? JSON.parse(text) : null) as Skill
+  },
+  /**
+   * SK-10: 搜索技能市场（内置市场 catalog + 可选远程 Hub overlay）。
+   *
+   * GET /api/skills/market?q=&limit=。空 q 返回全部（受 limit 封顶）。后端
+   * search_market 始终返回列表（remote Hub 失败静默回退 catalog-only，永不抛错）。
+   *
+   * 搜索语义与本地 SK-09 一致：大小写不敏感子串匹配 name/description/tags。
+   * 返回 SkillMarketEntry[]（含 entry_id 供 SK-12 安装、content 可空）。
+   *
+   * limit 默认 50，与后端 _DEFAULT_LIMIT 对齐；上限 200（后端 le 校验，越界 422）。
+   */
+  searchMarket: (q: string = '', limit: number = 50) =>
+    http<SkillMarketEntry[]>('GET', '/api/skills/market', undefined, {
+      q,
+      limit: String(limit),
+    }),
+  /**
+   * SK-12: 一键安装市场技能到本地技能库。
+   *
+   * POST /api/skills/market/install body={entry_id}。后端按 entry_id 解析市场条目：
+   *  - catalog 条目自带 content 全文，直接落库；
+   *  - remote 条目仅 source_url 时后端 best-effort 拉取正文（失败 409）；
+   *  - 未知/已下架 entry_id → 404；空 entry_id → 400。
+   * 落库后返回本地 Skill（source="market"），与 list/create 同类型，可直接进「我的技能」。
+   *
+   * 仅传 entry_id 而非全文——content 真源在后端（skill_hub catalog / remote Hub），
+   * 前端传全文会与服务端漂移且 remote 条目前端根本拿不到 content。entry_id 路径统一
+   * 覆盖 catalog+remote 两种来源。返回 Skill 复用既有 http<Skill>（标准 JSON 往返）。
+   */
+  installMarket: (entryId: string) =>
+    http<Skill>('POST', '/api/skills/market/install', { entry_id: entryId }),
+}
+
+// ── MCP API (MC-01~06 MCP 工具集成) ──────────────────────────
+
+/**
+ * MC-01: MCP 连接（外部工具源，PL-07 执行期 agent 可调）。
+ *
+ * 两种传输（MC-02）：
+ *  - stdio：spawn 本地命令（command + args + env）——如 `npx -y @modelcontextprotocol/server-filesystem`；
+ *  - sse：连远程 SSE 端点（url + headers）。
+ *
+ * 连接按 id 挂载到 Agent（AgentDefinition.mounted_mcp），执行期引擎经
+ * langchain-mcp-adapters MultiServerMCPClient 解析为 LangChain 工具。
+ *
+ * 字段 snake_case 对齐后端 McpConnection 模型（backend/models/mcp.py）与
+ * 既有 api.ts 约定。stdio 专属字段（command/args/env）与 sse 专属字段
+ * （url/headers）在同类型上并存——transport 决定哪些字段生效，前端表单
+ * 按 transport 切换显隐（MC-02）。
+ */
+export interface McpConnection {
+  id: string
+  name: string
+  transport: 'stdio' | 'sse'
+  // stdio 传输
+  command: string
+  args: string[]
+  env: Record<string, string> | null
+  // sse 传输
+  url: string
+  headers: Record<string, unknown> | null
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * MC-02: 创建/更新 MCP 连接的 payload（transport + 该传输所需字段）。
+ *
+ * stdio 必填 command（args/env 可选）；sse 必填 url（headers 可选）。
+ * 后端 McpConnectionCreatePayload 全字段可选 + extra=allow，前端按 transport
+ * 传相关字段即可（不相关字段传 undefined 不经 http 序列化）。
+ */
+export interface McpConnectionCreatePayload {
+  name: string
+  transport: 'stdio' | 'sse'
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, unknown>
+  enabled?: boolean
+}
+
+/** GET /api/mcp/{id}/tools 返回的工具预览项（MCP 自省，前端展示用）。 */
+export interface McpToolInfo {
+  name: string
+  description?: string
+  inputSchema?: Record<string, unknown>
+  [key: string]: unknown
+}
+
+export const mcpApi = {
+  /** MC-01: 列出全部 MCP 连接（按 created_at 排序）。 */
+  list: () => http<McpConnection[]>('GET', '/api/mcp'),
+  /** MC-01: 单读 MCP 连接（404 返 null）。 */
+  get: (id: string) => http<McpConnection | null>('GET', `/api/mcp/${id}`),
+  /** MC-02: 创建 MCP 连接（transport + 该传输字段），落库返回 McpConnection。 */
+  create: (body: McpConnectionCreatePayload) =>
+    http<McpConnection>('POST', '/api/mcp', body),
+  /** 更新 MCP 连接（全量替换 payload 字段）。 */
+  update: (id: string, body: McpConnectionCreatePayload) =>
+    http<McpConnection | null>('PUT', `/api/mcp/${id}`, body),
+  /** MC-04: 删除 MCP 连接（后端级联从所有 agent.mounted_mcp 移除引用）。 */
+  delete: (id: string) => http<boolean>('DELETE', `/api/mcp/${id}`),
+  /** MC-03: 启用连接（set_mcp_enabled True）。 */
+  enable: (id: string) => http<McpConnection | null>('POST', `/api/mcp/${id}/enable`),
+  /** MC-03: 禁用连接（set_mcp_enabled False，禁用后 tools 预览返空）。 */
+  disable: (id: string) => http<McpConnection | null>('POST', `/api/mcp/${id}/disable`),
+  /**
+   * MC-06: 挂载 MCP 连接到 Agent（agent.mounted_mcp 加 mcp_id）。
+   *
+   * body={agentId}（camelCase，与 skillApi.mount 同风格，后端 MountBody 用 agentId）。
+   * 返回更新后的 AgentDefinition（mounted_mcp 含新 mcp_id），执行期引擎据此加载工具。
+   */
+  mount: (id: string, agentId: string) =>
+    http<AgentDefinition | null>('POST', `/api/mcp/${id}/mount`, { agentId }),
+  /**
+   * MC-06: 从 Agent 卸载 MCP 连接（agent.mounted_mcp 移除 mcp_id）。
+   *
+   * body={agentId}，返回更新后的 AgentDefinition（mounted_mcp 不再含 mcp_id）。
+   */
+  unmount: (id: string, agentId: string) =>
+    http<AgentDefinition | null>('POST', `/api/mcp/${id}/unmount`, { agentId }),
+  /**
+   * MC-01: 预览 MCP 连接暴露的工具列表（自省，前端展示用）。
+   *
+   * 后端 list_mcp_tools([mcp_id]) 经 langchain-mcp-adapters 加载连接自省工具；
+   * 只加载 enabled 的连接，禁用连接返回空列表。返回 McpToolInfo[]。
+   */
+  tools: (id: string) =>
+    http<McpToolInfo[]>('GET', `/api/mcp/${id}/tools`),
+}
+
+// ── Scheduled Task API (M8: PRD 3.5 定时任务 TM-01~07) ────────────
+
+/** 调度类型：cron（cron 表达式）/ interval（定间隔秒数）/ once（一次性定时）。 */
+export type ScheduleType = 'cron' | 'interval' | 'once'
+
+/**
+ * ScheduledTask：定时任务实体（后端 models/scheduled_task.py 镜像，snake_case）。
+ *
+ * fire 时 scheduler 向 agent 的 inbox push 一个任务，复用常驻引擎 agentic loop，
+ * 即定时执行与交互派发走同一条智能体回路。ScheduledTaskRun 记录每次执行历史。
+ */
+export interface ScheduledTask {
+  id: string
+  name: string
+  /** 每次调度触发时向 agent 发送的 prompt */
+  content: string
+  /** 目标 agent id */
+  agent_id: string
+  /** 调度类型：cron | interval | once */
+  schedule_type: ScheduleType
+  /** cron 表达式（schedule_type=cron 时生效，如 "0 8 * * *"） */
+  cron: string
+  /** 间隔秒数（schedule_type=interval 时生效，如 3600） */
+  interval_seconds: number
+  /** ISO8601 触发时刻（schedule_type=once 时生效） */
+  run_at: string
+  /** agent 所属群组 id（scheduler 据此 push 到正确引擎 inbox） */
+  group_id: string
+  enabled: boolean
+  created_at: string
+  updated_at: string
+}
+
+/**
+ * 创建/更新定时任务 payload（后端 ScheduledTaskCreatePayload 镜像）。
+ *
+ * name/content/agent_id/group_id 必填；schedule_type 三选一，对应字段
+ * （cron/interval_seconds/run_at）按 schedule_type 传相关值，不相关字段可不传
+ * （后端全可选，前端按类型表单收集）。enabled 默认 True。
+ */
+export interface ScheduledTaskCreatePayload {
+  name: string
+  content: string
+  agent_id: string
+  group_id: string
+  schedule_type: ScheduleType
+  cron?: string
+  interval_seconds?: number
+  run_at?: string
+  enabled?: boolean
+}
+
+/**
+ * ScheduledTaskRun：单次执行历史记录（TM-07 执行历史视图）。
+ *
+ * status 流转：pending → running → success | failed。
+ */
+export interface ScheduledTaskRun {
+  id: string
+  scheduled_task_id: string
+  status: 'pending' | 'running' | 'success' | 'failed'
+  result: string | null
+  started_at: string
+  finished_at: string
+}
+
+/** TM-01: 定时任务绑定——1:1 映射后端 /api/scheduled-tasks 路由表。 */
+export const scheduledTaskApi = {
+  /** TM-01: 列出全部定时任务。 */
+  list: () => http<ScheduledTask[]>('GET', '/api/scheduled-tasks'),
+  /** TM-01: 单读定时任务（404 返 null）。 */
+  get: (id: string) => http<ScheduledTask | null>('GET', `/api/scheduled-tasks/${id}`),
+  /**
+   * TM-02/03: 创建定时任务。后端 create 后若 enabled 自动 add_job 注册调度。
+   * 返回落库的 ScheduledTask（含 id/created_at）。
+   */
+  create: (body: ScheduledTaskCreatePayload) =>
+    http<ScheduledTask>('POST', '/api/scheduled-tasks', body),
+  /** 更新定时任务（后端 remove_job 后按新配置重建 job）。 */
+  update: (id: string, body: ScheduledTaskCreatePayload) =>
+    http<ScheduledTask | null>('PUT', `/api/scheduled-tasks/${id}`, body),
+  /** TM-06: 删除定时任务（后端先 remove_job 再删库）。 */
+  delete: (id: string) => http<boolean>('DELETE', `/api/scheduled-tasks/${id}`),
+  /** TM-04: 立即执行（强制触发，即使 paused 也跑，跳过调度直接 fire）。 */
+  runNow: (id: string) => http<{ ok: boolean }>('POST', `/api/scheduled-tasks/${id}/run`),
+  /** TM-05: 暂停（set_enabled(False) + remove_job）。返回更新后的任务。 */
+  pause: (id: string) => http<ScheduledTask | null>('POST', `/api/scheduled-tasks/${id}/pause`),
+  /** TM-05: 恢复（set_enabled(True) + add_job 重新注册调度）。返回更新后的任务。 */
+  resume: (id: string) => http<ScheduledTask | null>('POST', `/api/scheduled-tasks/${id}/resume`),
+  /** TM-07: 执行历史列表（按时间倒序的 ScheduledTaskRun[]）。 */
+  history: (id: string) => http<ScheduledTaskRun[]>('GET', `/api/scheduled-tasks/${id}/runs`),
 }
 
 // ── 实时事件：WebSocket ──────────────────────────────────
@@ -299,14 +800,26 @@ export interface PlanStep {
 }
 
 /** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容）。
- *  断线自动重连（指数退避，最多 5 次），保证长任务期间 WS 不丢。 */
+ *  断线自动重连（指数退避，最多 5 次），保证长任务期间 WS 不丢。
+ *
+ *  PL-10：重连成功后调 `onReconnect` 通知上层重拉历史。
+ *  - 首次连接只 resolve Promise（上层初始数据加载由其自己的 seeding effect 负责，
+ *    不走 onReconnect，避免首连重复触发重拉）。
+ *  - 断后重连（非首次 onopen）才调 onReconnect——此时连接曾中断，WS 期间错过的
+ *    事件（状态迁移/计划/消息）上层状态已过期，需重拉历史补齐。
+ *  - onReconnect 是可选的：现有两参调用方零回归；useBusEvent 传第三个参挂真实重拉。
+ *  - onReconnect 异常被吞掉，避免回调 throw 干扰 WS 生命周期。 */
 export function onBusEvent(
   groupId: string,
   callback: (data: BusEventData) => void,
+  onReconnect?: () => void,
 ): Promise<() => void> {
   let ws: WebSocket | null = null
   let closed = false
   let retry = 0
+  // 区分首次连接 vs 断后重连：首次 onopen resolve Promise，后续 onopen 调 onReconnect。
+  // 不用 retry 计数判断（retry 在 onopen 时已重置为 0，无法区分首连与重连）。
+  let firstOpen = true
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   const MAX_RETRIES = 5
 
@@ -315,7 +828,18 @@ export function onBusEvent(
 
     ws.onopen = () => {
       retry = 0
-      if (resolve) resolve(unlisten)
+      if (firstOpen) {
+        // 首次连接：解除 await onBusEvent(...)，保持原契约。
+        firstOpen = false
+        if (resolve) resolve(unlisten)
+      } else if (onReconnect) {
+        // 断后重连：连接曾中断，上层状态可能过期，通知重拉历史补齐缺漏事件。
+        try {
+          onReconnect()
+        } catch {
+          /* 回调异常不影响 WS 生命周期，吞掉 */
+        }
+      }
     }
     ws.onmessage = (event) => {
       try {

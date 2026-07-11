@@ -147,3 +147,34 @@ async def route_user_message(group_id: str, content: str) -> None:
             content,
             None,
         )
+
+
+async def route_plan_confirm(
+    group_id: str, data: dict | None = None
+) -> str | None:
+    """PL-02: route a user plan-confirmation to the group coordinator.
+
+    Pushes a notify with kind ``plan_confirm`` to the coordinator's inbox. The
+    coordinator's classify node detects ``incoming_kind == "plan_confirm"`` and,
+    while the resident ``dispatch_plan`` still has pending steps, routes straight
+    to ``dispatch_next`` (方案 B 引擎内存态等待 resume), skipping the LLM. This is
+    the wake-up entry point called by the plan-confirm API (``/plan/confirm`` and
+    ``/plan/direct``); ``data`` is forwarded verbatim as the notify payload so the
+    API can carry modify instructions or a direct-mode marker for later use.
+
+    Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has no
+    coordinator). Mirrors ``route_user_message``'s coordinator fallback so the
+    two inbound paths share one resolution primitive.
+    """
+    group = await crud.get_group(group_id)
+    if not group or not group.coordinator_id:
+        return None
+    await push_notify(
+        group_id,
+        "plan_confirm",
+        "user",
+        group.coordinator_id,
+        "用户确认执行计划",
+        data,
+    )
+    return group.coordinator_id

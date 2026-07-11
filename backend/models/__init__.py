@@ -4,9 +4,11 @@ from __future__ import annotations
 from .agent import AgentCreatePayload, AgentDefinition
 from .group import (
     Group,
+    GroupConfig,
     GroupCreatePayload,
     GroupFile,
     GroupMember,
+    get_leader_strategy,
 )
 from .mcp import McpConnection, McpConnectionCreatePayload
 from .message import (
@@ -19,16 +21,18 @@ from .scheduled_task import (
     ScheduledTaskCreatePayload,
     ScheduledTaskRun,
 )
-from .skill import Skill, SkillCreatePayload
+from .skill import Skill, SkillCreatePayload, SkillUploadPayload
 from .task import Task, TaskCreatePayload, TaskStatus
 
 __all__ = [
     "AgentDefinition",
     "AgentCreatePayload",
     "Group",
+    "GroupConfig",
     "GroupCreatePayload",
     "GroupMember",
     "GroupFile",
+    "get_leader_strategy",
     "Task",
     "TaskCreatePayload",
     "TaskStatus",
@@ -37,6 +41,7 @@ __all__ = [
     "BusEventData",
     "Skill",
     "SkillCreatePayload",
+    "SkillUploadPayload",
     "McpConnection",
     "McpConnectionCreatePayload",
     "ScheduledTask",

@@ -31,3 +31,10 @@ __pycache__/
 *.db
 *.db-wal
 *.db-shm
+
+# Runtime / process artifacts (unattended dev loop)
+*.log
+.status
+.pid.*
+.task.md
+.claude/memory/

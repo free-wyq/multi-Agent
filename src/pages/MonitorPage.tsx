@@ -12,6 +12,7 @@ import {
 import { useBusEvent } from '../hooks/useBusEvent'
 import LeaderPanel from '../components/LeaderPanel'
 import WorkerTrace from '../components/WorkerTrace'
+import StopTaskButton from '../components/StopTaskButton'
 
 /** 状态 → 徽标颜色 */
 const STATUS_TAG: Record<string, { color: string; label: string }> = {
@@ -89,6 +90,18 @@ export default function MonitorPage() {
                 )}
               </span>
             }
+            extra={
+              /* PL-11：协调者 executing 时展示停止按钮（停止其当前 dispatch/handle_reply 任务） */
+              coordinatorId &&
+              agentStatuses[coordinatorId]?.status === 'executing' &&
+              agentStatuses[coordinatorId]?.current_task_id ? (
+                <StopTaskButton
+                  taskId={agentStatuses[coordinatorId].current_task_id}
+                  groupId={selectedGroup}
+                  agentName={agentStatuses[coordinatorId]?.name}
+                />
+              ) : null
+            }
             size="small"
           >
             <LeaderPanel groupId={selectedGroup} />
@@ -111,6 +124,8 @@ export default function MonitorPage() {
                 items={workerMembers.map((m) => {
                   const status = agentStatuses[m.agent_id]?.status || 'idle'
                   const statusInfo = STATUS_TAG[status] ?? STATUS_TAG.idle
+                  const isExecuting = status === 'executing'
+                  const currentTaskId = agentStatuses[m.agent_id]?.current_task_id || ''
                   return {
                     key: m.agent_id,
                     label: (
@@ -120,6 +135,20 @@ export default function MonitorPage() {
                         <Tag color={statusInfo.color} style={{ marginInlineStart: 4, fontSize: 10 }}>
                           {statusInfo.label}
                         </Tag>
+                        {/* PL-11：执行中 Tab 标签内联停止按钮，点击直接停止该 worker 当前任务 */}
+                        {isExecuting && currentTaskId && (
+                          <span
+                            // 阻止点击停止按钮时冒泡到 Tabs 切换
+                            onClick={(e) => e.stopPropagation()}
+                            onMouseDown={(e) => e.stopPropagation()}
+                          >
+                            <StopTaskButton
+                              taskId={currentTaskId}
+                              groupId={selectedGroup}
+                              agentName={m.alias || m.agent_name}
+                            />
+                          </span>
+                        )}
                       </span>
                     ),
                     children: (

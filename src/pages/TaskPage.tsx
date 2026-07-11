@@ -3,10 +3,11 @@ import {
   Button,
   Card,
   Space,
+  Tooltip,
+  Tag,
   message,
   Empty,
   Select,
-  Tag,
 } from 'antd'
 import {
   DashboardOutlined,
@@ -14,6 +15,9 @@ import {
   CheckCircleOutlined,
   CloseCircleOutlined,
   PauseCircleOutlined,
+  DownloadOutlined,
+  FileOutlined,
+  PaperClipOutlined,
 } from '@ant-design/icons'
 import type { Node, Edge } from 'reactflow'
 import ReactFlow, { Background, Controls, MiniMap } from 'reactflow'
@@ -38,6 +42,60 @@ const STATUS_COLOR: Record<TaskStatus, string> = {
   failed: '#ff4d4f',
   canceled: '#d9d9d9',
   input_required: '#faad14',
+}
+
+/** PL-12: an artifact file entry extracted from Task.artifact.manifest. */
+interface ArtifactFile {
+  name: string
+  path: string
+  size: number
+  modified_at: string
+}
+
+/** PL-12: human-readable file size (B/KB/MB). */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/** PL-12: extract the artifact manifest's file list from a task, if any.
+ *
+ * The backend ``scan_workspace_artifacts`` records ``artifact`` as
+ * ``{"files": [{name, path, size, modified_at}, ...]}``. Falls back to a
+ * single synthetic entry built from ``artifact_path`` when the manifest is
+ * absent (older tasks / coordinator-only), so the primary file is always
+ * downloadable even without the full manifest. */
+function extractArtifacts(t: Task): ArtifactFile[] {
+  const manifest = t.artifact as { files?: ArtifactFile[] } | null
+  if (manifest && Array.isArray(manifest.files) && manifest.files.length > 0) {
+    return manifest.files
+  }
+  if (t.artifact_path) {
+    const segs = t.artifact_path.split('/')
+    return [
+      {
+        name: segs[segs.length - 1],
+        path: t.artifact_path,
+        size: 0,
+        modified_at: '',
+      },
+    ]
+  }
+  return []
+}
+
+/** PL-12: save a Blob as a download in the browser (fallback to URL.open). */
+function saveBlob(blob: Blob, filename: string) {
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  document.body.removeChild(a)
+  // revoke on next tick so the download has started
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
 }
 
 function buildNodesEdges(tasks: Task[]): { nodes: Node[]; edges: Edge[] } {
@@ -77,6 +135,7 @@ export default function TaskPage() {
   const [tasks, setTasks] = useState<Task[]>([])
   const [loading, setLoading] = useState(false)
   const [expandedTask, setExpandedTask] = useState<string | null>(null)
+  const [downloading, setDownloading] = useState<string | null>(null)
 
   useEffect(() => {
     groupApi
@@ -99,6 +158,37 @@ export default function TaskPage() {
   }, [selectedGroup])
 
   const { nodes, edges } = useMemo(() => buildNodesEdges(tasks), [tasks])
+
+  /** PL-12: all (task, file) pairs across selected group — flat list of
+   * downloadable artifacts. Newest task first; within a task, manifest order
+   * (already newest-file-first from scan_workspace_artifacts). */
+  const artifactEntries = useMemo(() => {
+    const out: { task: Task; file: ArtifactFile }[] = []
+    for (const t of tasks) {
+      for (const f of extractArtifacts(t)) {
+        out.push({ task: t, file: f })
+      }
+    }
+    return out
+  }, [tasks])
+
+  const handleDownload = async (groupId: string, file: ArtifactFile) => {
+    if (!groupId) {
+      message.warning('请先选择群组')
+      return
+    }
+    const key = file.path
+    setDownloading(key)
+    try {
+      const blob = await groupApi.downloadFile(groupId, file.path)
+      saveBlob(blob, file.name)
+      message.success(`已下载 ${file.name}`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDownloading(null)
+    }
+  }
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
@@ -156,6 +246,11 @@ export default function TaskPage() {
                   智能体：
                   {t.assigned_agent_id ?? '待分配'}
                 </p>
+                {t.artifact_path && (
+                  <p style={{ margin: '0 0 4px', fontSize: 12, color: '#8c8c8c' }}>
+                    <PaperClipOutlined /> {t.artifact_path}
+                  </p>
+                )}
                 <Button
                   size="small"
                   onClick={() => setExpandedTask(expandedTask === t.id ? null : t.id)}
@@ -169,19 +264,66 @@ export default function TaskPage() {
         )}
       </Card>
 
-      {/* 交付物 */}
-      <Card title="交付物">
-        {tasks.filter((t) => t.artifact_path).length === 0 ? (
-          <Empty description="暂无交付物" />
+      {/* 交付物 — PL-12 产物文件卡片 + 下载入口 */}
+      <Card
+        title={
+          <span>
+            <PaperClipOutlined /> 交付物
+            {artifactEntries.length > 0 && (
+              <Tag color="blue" style={{ marginInlineStart: 8 }}>
+                {artifactEntries.length} 个文件
+              </Tag>
+            )}
+          </span>
+        }
+      >
+        {artifactEntries.length === 0 ? (
+          <Empty description="暂无交付物（任务完成后自动扫描工作区产物）" />
         ) : (
           <Space wrap>
-            {tasks
-              .filter((t) => t.artifact_path)
-              .map((t) => (
-                <Button key={t.id} type="link">
-                  📦 {t.title} - {t.artifact_path}
-                </Button>
-              ))}
+            {artifactEntries.map(({ task, file }) => {
+              const key = `${task.id}:${file.path}`
+              const isPrimary = file.path === task.artifact_path
+              return (
+                <Card
+                  key={key}
+                  size="small"
+                  style={{
+                    width: 280,
+                    borderLeft: `4px solid ${STATUS_COLOR[task.status] || '#d9d9d9'}`,
+                  }}
+                >
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
+                    <FileOutlined style={{ color: '#1677ff', fontSize: 18 }} />
+                    <Tooltip title={file.path}>
+                      <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                        {file.name}
+                      </span>
+                    </Tooltip>
+                    {isPrimary && <Tag color="gold" style={{ marginInlineStart: 0 }}>主产物</Tag>}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 4 }}>
+                    来自任务：{task.title}
+                  </div>
+                  <div style={{ fontSize: 12, color: '#8c8c8c', marginBottom: 8 }}>
+                    {file.size > 0 && <span>{humanSize(file.size)} · </span>}
+                    <Tooltip title={file.path}>
+                      <span>{file.path}</span>
+                    </Tooltip>
+                  </div>
+                  <Button
+                    type="primary"
+                    size="small"
+                    icon={<DownloadOutlined />}
+                    loading={downloading === file.path}
+                    disabled={downloading !== null && downloading !== file.path}
+                    onClick={() => selectedGroup && handleDownload(selectedGroup, file)}
+                  >
+                    下载
+                  </Button>
+                </Card>
+              )
+            })}
           </Space>
         )}
       </Card>

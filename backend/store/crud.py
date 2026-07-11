@@ -200,10 +200,23 @@ async def create_group(payload: Any) -> Group:
     from store.database import SessionLocal
 
     ts = _now_iso()
+    coord_id = payload.coordinator_id or ""
+    # MT-02 自动指定 Leader：未指定 coordinator_id 时，自动选一个群主——
+    # 优先 role=coordinator 的 agent（协调者角色最贴合），否则退化为 agent 列表
+    # 首个（保证群组至少有一个可路由的 Leader，避免空 coordinator_id 的坏群）。
+    # 仅在创建时填充落库；用户仍可在群设置里改 coordinator_id（update_group）。
+    # 指定路径（payload.coordinator_id 非空）原样透传，行为不变。
+    if not coord_id:
+        agents = await list_agents()
+        coord = next((a for a in agents if a.role == "coordinator"), None)
+        if coord is None and agents:
+            coord = agents[0]
+        if coord is not None:
+            coord_id = coord.id
     entity = GroupEntity(
         id=_next_id("group"),
         name=payload.name,
-        coordinator_id=payload.coordinator_id or "",
+        coordinator_id=coord_id,
         description=payload.description,
         status="active",
         created_at=ts,
@@ -229,8 +242,25 @@ async def update_group(group_id: str, payload: Any) -> Group | None:
         row = await db.get(GroupEntity, group_id)
         if not row:
             return None
+        # MT-06: changing the Leader (coordinator_id) does NOT auto-add/drop members —
+        # the new Leader must already be a member (enforced in the route layer) and the
+        # old Leader stays as an ordinary member. This keeps membership and leadership as
+        # two orthogonal concerns: editing leader_strategy / coordinator_id / name only
+        # flips metadata, while add/remove member governs the roster.
         for k, v in data.items():
             if k == "member_ids":
+                continue
+            if k == "config":
+                # MT-03: config is a partial update — merge the new keys into the
+                # existing config dict rather than wholesale-replacing it. The
+                # group settings Modal writes leader_strategy this way, and the
+                # plan-direct API writes auto_confirm; a wholesale replace would
+                # let one writer clobber the other's key (e.g. saving a Leader
+                # strategy would drop a previously-set auto_confirm). Merge keeps
+                # config as a single additive container for both keys.
+                merged = dict(row.config or {})
+                merged.update(v or {})
+                setattr(row, k, merged)
                 continue
             setattr(row, k, v)
         row.updated_at = _now_iso()
@@ -439,6 +469,37 @@ async def delete_task(task_id: str) -> bool:
         await db.delete(row)
         await db.commit()
         return True
+
+
+async def set_task_artifact(
+    task_id: str,
+    artifact_path: str | None,
+    artifact: dict | None,
+) -> Task | None:
+    """PL-12: record a completed task's workspace artifacts.
+
+    Updates only ``artifact_path`` (the primary file's workspace-relative path)
+    and ``artifact`` (the structured manifest) — a targeted update that does not
+    touch status/exit_code/result_summary, which were already finalized by the
+    engine before scanning. Used by ``AgentEngine._run_worker_task`` after a
+    worker task completes, so the task card / download entry can surface what
+    the worker produced.
+
+    Returns the updated Task, or ``None`` if the task_id is unknown (the task
+    may not be persisted — e.g. coordinator-only synthetic tasks — in which
+    case there is simply no row to update and the scan result is discarded).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(TaskEntity, task_id)
+        if not row:
+            return None
+        row.artifact_path = artifact_path
+        row.artifact = artifact
+        await db.commit()
+        await db.refresh(row)
+        return _task_to_model(row)
 
 
 # ── Message helpers ─────────────────────────────────────────────

@@ -157,3 +157,34 @@ async def complete_task(
                     t["completed_at"] = _now_iso()
                     return t
     return None
+
+
+async def cancel_task(task_id: str) -> dict | None:
+    """PL-11: mark a queued/pending task ``cancelled`` so the engine loop skips it.
+
+    Mutates status to ``cancelled`` (records ``completed_at``). Returns the
+    updated item, or ``None`` if the task_id was not found or was already
+    terminal (``completed``/``failed``/``cancelled``).
+
+    Complements ``AgentEngine.request_cancel``: that cancels the *currently
+    executing* task by cancelling its child ``asyncio.Task``; this marks tasks
+    that are still *queued* — sitting in the asyncio.Queue channel or the
+    engine's ``_pending_tasks`` backlog — which ``request_cancel`` cannot reach
+    because no ``_worker_task`` exists for them yet. When the engine loop later
+    dequeues or drains such a marked task, it detects the ``cancelled`` status
+    and skips execution (see ``AgentEngine._handle_inbox_item`` and
+    ``_drain_pending``). The task item is the same dict object referenced by
+    both ``_task_queues`` and the asyncio.Queue channel (``push_task`` appends
+    then ``put``s the same ``item``), so the marker is visible at dequeue
+    without a re-query.
+    """
+    async with _lock:
+        for tasks in _task_queues.values():
+            for t in tasks:
+                if t["id"] == task_id:
+                    if t["status"] in ("completed", "failed", "cancelled"):
+                        return None
+                    t["status"] = "cancelled"
+                    t["completed_at"] = _now_iso()
+                    return t
+    return None

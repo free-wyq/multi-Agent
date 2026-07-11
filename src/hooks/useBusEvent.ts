@@ -1,8 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useCallback, useEffect, useState } from 'react'
 import {
+  messageApi,
   onBusEvent,
+  planApi,
   systemApi,
   type BusEventData,
+  type Message,
   type TraceEvent,
   type AgentStatusInfo,
   type PlanStep,
@@ -56,6 +59,12 @@ function parseTs(ts: string): number {
  * - events: 结构化 TraceEvent[]（cap 500），供监控页渲染
  * - agentStatuses: 从 systemApi.listStatus 播种 + agent_status 事件实时更新
  * - plan: coordinator_plan 事件 → PlanStep[]
+ * - streaming: task_token 增量按 task_id 拼接的「正在生成」缓冲区（PL-08 逐字流式）
+ *
+ * PL-10 重连重拉：onBusEvent 第三参 onReconnect 回调，连接曾中断重连后触发，
+ * 按消息/计划/状态真源重新拉取——断线期间漏掉的事件（agent_status、coordinator_plan、
+ * task_complete 等）上层状态已过期，必须重拉补齐。events（TraceEvent cap 500）不重拉
+ * （无历史接口，属前端短时缓存，断线期间丢失的中间 trace 不影响任务推进，刷新即可）。
  */
 export function useBusEvent(groupId: string | null) {
   const [logs, setLogs] = useState<LogEntry[]>([])
@@ -63,6 +72,7 @@ export function useBusEvent(groupId: string | null) {
   const [events, setEvents] = useState<TraceEvent[]>([])
   const [agentStatuses, setAgentStatuses] = useState<Record<string, AgentStatusInfo>>({})
   const [plan, setPlan] = useState<PlanStep[] | null>(null)
+  const [streaming, setStreaming] = useState<Record<string, string>>({})
 
   // 播种 agent status
   useEffect(() => {
@@ -83,6 +93,52 @@ export function useBusEvent(groupId: string | null) {
         /* 后端未启动时静默，WS 会逐步补齐 */
       })
     return () => { cancelled = true }
+  }, [groupId])
+
+  // PL-10 重连后重拉历史：连接曾中断 → 上层消息/计划/状态可能过期，从真源补齐。
+  // - messages: 重拉后重建 logs（供 GroupPage 聊天列表复原，按 id 去重保留）
+  // - plan: 重读 coordinator 引擎 _dispatch_plan（无变更则保持，有 pending 则卡片复现）
+  // - agentStatuses: 重读 /api/status 重新播种（断线期间状态可能已 idle→executing→idle）
+  // useCallback 使引用稳定，仅在 groupId 变化时换实例，避免 WS effect 重订阅。
+  const handleReconnect = useCallback(() => {
+    if (!groupId) return
+
+    // 重拉 agent 状态（断线期间 agent_status 事件可能已多次迁移）
+    systemApi
+      .listStatus(groupId)
+      .then((list) => {
+        const m: Record<string, AgentStatusInfo> = {}
+        list.forEach((s) => { m[s.id] = s })
+        setAgentStatuses(m)
+      })
+      .catch(() => { /* 静默 */ })
+
+    // 重拉驻留计划（coordinator_plan 事件可能漏收）
+    planApi
+      .getPlan(groupId)
+      .then((resp) => {
+        setPlan(resp.plan && resp.plan.length > 0 ? resp.plan : null)
+      })
+      .catch(() => { /* 静默 */ })
+
+    // 重拉消息历史：把全量历史重新灌入 logs（供 GroupPage 聊天列表复原）。
+    // 按 created_at 升序返回的最近 limit 条，重建 LogEntry（id 去重保留）。
+    messageApi
+      .listByGroup(groupId)
+      .then((msgs: Message[]) => {
+        const rebuilt: LogEntry[] = msgs
+          .filter((m) => m.content)
+          .map((m) => ({
+            id: m.id,
+            agentId: m.sender_id,
+            agentName: m.sender_id,
+            taskId: m.task_id || '',
+            message: m.content || '',
+            timestamp: parseTs(m.created_at),
+          }))
+        setLogs(rebuilt.slice(-200))
+      })
+      .catch(() => { /* 静默 */ })
   }, [groupId])
 
   useEffect(() => {
@@ -167,7 +223,34 @@ export function useBusEvent(groupId: string | null) {
           setPlan(planData as unknown as PlanStep[])
         }
       }
-    }).then((fn) => {
+
+      // → streaming token 增量拼接（PL-08 逐字流式）
+      // 每个 task_token 事件按 task_id 累加 content delta；
+      // task_complete / task_failed / task_dispatch 收尾时清空对应 task 的缓冲，
+      // 避免「上一轮生成内容」残留到新一轮。未带 task_id 的 token 丢弃（无法归并）。
+      if (d.type === 'task_token') {
+        if (d.content && d.task_id) {
+          setStreaming((prev) => ({
+            ...prev,
+            [d.task_id as string]: (prev[d.task_id as string] || '') + d.content,
+          }))
+        }
+      } else if (
+        d.type === 'task_complete' ||
+        d.type === 'task_failed' ||
+        d.type === 'task_dispatch'
+      ) {
+        if (d.task_id) {
+          const tid = d.task_id as string
+          setStreaming((prev) => {
+            if (!(tid in prev)) return prev
+            const next = { ...prev }
+            delete next[tid]
+            return next
+          })
+        }
+      }
+    }, handleReconnect).then((fn) => {
       if (cancelled) {
         fn()
       } else {
@@ -179,7 +262,7 @@ export function useBusEvent(groupId: string | null) {
       cancelled = true
       if (unlisten) unlisten()
     }
-  }, [groupId])
+  }, [groupId, handleReconnect])
 
-  return { logs, statusEvents, events, agentStatuses, plan }
+  return { logs, statusEvents, events, agentStatuses, plan, streaming }
 }

@@ -54,6 +54,194 @@ def build_brain_prompt(role: str, name: str, context: str, message: str) -> str:
 }}"""
 
 
+def build_agent_generate_prompt(description: str) -> str:
+    """Agent config generation prompt (AG-01: natural language → agent definition).
+
+    Asks the LLM to turn a natural-language description into a structured agent
+    config (name / role / system_prompt / skills / extra_skills / description),
+    returned as strict JSON. The endpoint (``POST /api/agents/generate``) parses
+    this and creates the agent via ``crud.create_agent``.
+
+    Generated fields intentionally exclude ``mounted_skills`` / ``mounted_mcp`` /
+    ``allowed_tools`` / ``denied_tools``: those reference skill/mcp ids or tool
+    names that do not exist at generation time, and mounting is a separate user
+    action (AG-08). The generator only fills in the agent's *identity* (who it is
+    and what it can do); wiring specific skills/tools is left to the user.
+
+    ``role`` is constrained to snake_case English (matching the seed convention
+    ``frontend_engineer`` / ``backend_engineer`` / ``coordinator``) so it is a
+    stable identifier rather than free-form prose; ``name`` is concise Chinese
+    for display; ``system_prompt`` uses second-person「你是…」describing duties.
+    """
+    return f"""你是一个智能体配置生成器。用户会用自然语言描述一个智能体的角色定位，你需要生成一份完整的智能体配置。
+
+用户描述：{description}
+
+字段说明：
+- name：智能体名称（简洁，中文，如「前端工程师」「数据分析师」）
+- role：角色标识（snake_case 英文，如 frontend_engineer / backend_engineer / data_analyst / coordinator；自定义角色也可自由命名，但必须用小写字母+下划线）
+- system_prompt：该智能体的基础系统提示词（以「你是…」开头，说明职责、工作边界与协作方式，50-150 字）
+- skills：该角色的核心技术栈/能力（3-5 个，每个一个词或短语）
+- extra_skills：可选的附加能力（可空数组，如领域框架/工具）
+- description：一句话描述该智能体的定位与用途
+
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
+{{
+  "name": "智能体名称（中文）",
+  "role": "snake_case_english_role",
+  "system_prompt": "你是……，负责……，工作方式……",
+  "skills": ["能力1", "能力2", "能力3"],
+  "extra_skills": ["附加能力1"],
+  "description": "一句话定位"
+}}"""
+
+
+def build_group_name_desc_prompt(
+    coordinator: tuple[str, str, str] | None,
+    members: list[tuple[str, str, str]],
+) -> str:
+    """Group name + description generation prompt (MT-04).
+
+    Asks the LLM to synthesize a concise team name + one-line description from
+    the member roster (coordinator + members). Each member is a
+    ``(agent_id, name, role)`` tuple. Returned as strict JSON so the caller
+    (``POST /api/groups/generate-name``) can parse ``name``/``description``
+    directly.
+
+    The prompt deliberately asks for a *project-style* team name (e.g.
+    「商城订单项目组」) rather than a member-list concatenation, so the generated
+    name reflects what the team is *for*, not just who's in it — matching the
+    placeholder text the create-form already shows (「如：商城订单项目」).
+    """
+    if coordinator:
+        coord_line = f"- 群主：{coordinator[1]}（{coordinator[2]}）"
+    else:
+        coord_line = "- 群主：（未指定）"
+    if members:
+        member_lines = "\n".join(f"- {n}（{r}）" for _, n, r in members)
+    else:
+        member_lines = "- （暂无成员）"
+
+    return f"""你是一个团队命名助手。根据团队的群主和成员构成，生成一个简洁的团队名称和一句话描述。
+
+团队成员：
+{coord_line}
+{member_lines}
+
+要求：
+1. name：团队名称（简洁，中文，4-12 字，体现团队职责/项目方向，如「商城订单项目组」「用户增长小组」；不要简单罗列成员名字）
+2. description：一句话描述团队的目标或主要工作内容（15-40 字）
+
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
+{{
+  "name": "团队名称",
+  "description": "一句话描述"
+}}"""
+
+
+def build_plan_adjust_prompt(
+    plan_state: str, worker_report: str, worker_name: str
+) -> str:
+    """Plan-adjustment decision prompt (MT-14).
+
+    Shown to the coordinator LLM inside ``node_handle_reply`` after a worker
+    reports an intermediate result. The LLM judges whether the *remaining
+    pending steps* (those not yet dispatched) need revising in light of that
+    result, and if so returns a fresh ``revised_steps`` list. The caller
+    preserves completed/failed (history) and dispatched (in-flight) steps and
+    splices the revised pending steps in their place, so the adjustment only
+    touches work that has not started yet.
+
+    Returns strict JSON. ``adjust=false`` (or any error in the caller) keeps
+    the plan as-is, so the deterministic "proceed as planned" path is the
+    fallback — a no-op adjustment never blocks fan-out.
+    """
+    return f"""你是群主。一名成员刚刚完成一个步骤并汇报了结果。请根据这个中间结果，判断是否需要调整「尚未开始（pending）」的剩余步骤。
+
+当前计划状态（含已完成步骤的结果）：
+{plan_state}
+
+成员「{worker_name}」的汇报：
+{worker_report}
+
+判断要求：
+1. 如果中间结果不影响剩余步骤（剩余 pending 步骤仍可按原计划执行）→ adjust 设为 false，revised_steps 留空 []
+2. 如果中间结果要求调整剩余步骤（例如：根据已完成的 API 形态细化前端调用步骤、补充一个新的集成步骤、取消不再需要的步骤、调整依赖顺序）→ adjust 设为 true，并在 revised_steps 中给出调整后的「剩余 pending 步骤」完整列表
+
+注意：revised_steps 只包含「尚未开始」的步骤，不要包含已完成（completed）、已失败（failed）或正在执行中（dispatched）的步骤——系统会自动保留它们。
+
+revised_steps 中每个步骤字段：step（编号）, agent_id, agent_name, instruction, depends_on（数组，依赖的前置步骤编号，无依赖则 []）
+
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
+{{
+  "adjust": true,
+  "reason": "调整或不调整的理由",
+  "announce": "向用户说明调整的公告（可空字符串）",
+  "revised_steps": [
+    {{"step": 2, "agent_id": "xxx", "agent_name": "成员名", "instruction": "调整后的指令", "depends_on": []}}
+  ]
+}}"""
+
+
+def build_step_recovery_prompt(
+    plan_state: str, failed_step: str, failure_reason: str, roster: str,
+    attempt: int,
+) -> str:
+    """Step-failure recovery decision prompt (MT-15).
+
+    Shown to the coordinator LLM inside ``node_handle_reply`` after a worker
+    reports a *failed* step (before the DAG fail-fast cascade). The LLM picks
+    one of: retry (re-dispatch the same step to the same worker), reassign
+    (dispatch to a different member better suited), skip (tolerate this
+    failure so dependents can proceed — a graceful degradation), or keep_failed
+    (let the existing fail-fast cascade run — the deterministic default). The
+    caller resets the step to ``pending`` for retry/reassign (so
+    ``dispatch_ready_steps`` re-dispatches it), marks it ``completed`` with a
+    degraded result for skip, or leaves it ``failed`` for keep_failed.
+
+    The retry attempt counter is passed so the LLM can avoid infinite retry
+    loops (``MAX_RETRY_ATTEMPTS`` caps hard failures regardless of the LLM).
+    Returns strict JSON. On any error in the caller the step stays ``failed``
+    (the default cascade), so recovery is purely additive — a no-op decision
+    never blocks the deterministic fail-fast path.
+    """
+    return f"""你是群主。一名成员执行一个步骤失败了。请判断该如何处理这个失败，避免整个计划因单步失败而崩溃。
+
+当前计划状态：
+{plan_state}
+
+失败的步骤：
+{failed_step}
+
+失败原因（成员汇报）：
+{failure_reason}
+
+团队成员（可重新派工的候选）：
+{roster}
+
+当前该步骤已重试次数：{attempt}
+
+请从以下策略中选择一个：
+- retry：再次把该步骤派给原来的成员重试（适用于偶发失败、模型/网络抖动，重试可能成功）
+- reassign：把该步骤改派给团队中更合适的其他成员（适用于原成员能力不匹配）
+- skip：跳过该步骤（标记为容忍的失败），让后续依赖它的步骤继续执行（降级处理，适用于非关键步骤）
+- keep_failed：保持失败，让系统按原有依赖级联处理（适用于关键步骤且无替代方案）
+
+选择建议：
+- 偶发/网络/模型类失败，且重试次数 < 2 → retry
+- 成员能力明显不匹配（如让前端写 SQL 失败）→ reassign
+- 步骤非关键、失败可容忍、有后续步骤可继续 → skip
+- 步骤关键且重试已用尽 / 无合适替代人选 → keep_failed
+
+请严格按照以下 JSON 格式回复（只输出纯 JSON）：
+{{
+  "strategy": "retry | reassign | skip | keep_failed",
+  "reason": "选择该策略的理由",
+  "announce": "向用户说明处理方式的公告（可空字符串）",
+  "reassign_to": "若选 reassign，填目标成员的 agent_id；否则空字符串"
+}}"""
+
+
 def build_coordinator_prompt(
     name: str,
     members: list[tuple[str, str, str]],
@@ -61,12 +249,19 @@ def build_coordinator_prompt(
     dispatch_state: str,
     sender: str,
     message: str,
+    leader_strategy: str = "",
 ) -> str:
     """Coordinator decision prompt (Rust build_coordinator_prompt).
 
     ``members`` is a list of ``(agent_id, name, role)`` tuples. The prompt
     embeds the system prompt, member roster, conversation, dispatch state,
     and the incoming message, then asks for strict JSON.
+
+    ``leader_strategy`` (MT-03) is free-text guidance the user wrote for the
+    group's Leader. When non-empty it is injected as a dedicated「群主指挥策略」
+    section between the roster and the conversation so the Leader's
+    拆解/派工 decisions honour it. Empty string (default) → section omitted,
+    preserving the pre-MT-03 prompt for groups with no strategy set.
     """
     if not members:
         member_lines = "（无成员）"
@@ -76,12 +271,18 @@ def build_coordinator_prompt(
     conv = conversation if conversation else "（无）"
     state = dispatch_state if dispatch_state else "（空闲，无进行中的调度）"
 
+    strategy_block = (
+        f"\n群主指挥策略（务必遵守）：\n{leader_strategy}\n"
+        if leader_strategy
+        else ""
+    )
+
     return f"""{COORDINATOR_SYSTEM}
 
 你的群名：{name}
 群成员：
 {member_lines}
-
+{strategy_block}
 对话上下文：
 {conv}
 
