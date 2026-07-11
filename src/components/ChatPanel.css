@@ -1,0 +1,142 @@
+/* SH-04 ChatPanel 聊天列样式（从 GroupPage.css 抽出，组件自包含）。
+ * GroupPage.css 仍保留同名 class（群组页降级前 GroupPage 仍渲染聊天）；
+ * SH-05 群组页降级为 SettingsDrawer tab 后 GroupPage 不再渲染聊天，届时其副本可清理。
+ * 本文件让 ChatPanel 独立携带样式——ChatPage 作为默认主页时即使 GroupPage 未挂载，
+ * .chat-* class 仍生效（全局 CSS，import 即注册）。 */
+
+/* ── 聊天消息行 ── */
+.chat-msg {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+
+/* ── 聊天头像 ── */
+.chat-avatar {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  flex-shrink: 0;
+  position: relative;
+  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+.chat-avatar:hover {
+  transform: scale(1.15) rotate(5deg);
+}
+
+.chat-avatar--user {
+  background: linear-gradient(135deg, #e6f4ff 0%, #bae0ff 100%);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.2);
+}
+
+.chat-avatar-img {
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  object-fit: cover;
+  position: relative;
+  z-index: 1;
+  animation: chat-avatar-bob 4s ease-in-out infinite;
+}
+
+/* 角色色环 — 持续呼吸代表在线 */
+.chat-avatar-ring {
+  position: absolute;
+  inset: -1px;
+  border-radius: 50%;
+  border: 2px solid currentColor;
+  pointer-events: none;
+  z-index: 2;
+  animation: chat-ring-breathe 2.5s ease-in-out infinite;
+}
+
+@keyframes chat-avatar-bob {
+  0%, 100% { transform: translateY(0) scale(1); }
+  50% { transform: translateY(-1.5px) scale(1.03); }
+}
+
+/* 色环呼吸：缩放 + 发光扩散，像在"活着" */
+@keyframes chat-ring-breathe {
+  0%, 100% {
+    transform: scale(1);
+    opacity: 1;
+    box-shadow: 0 0 0 0 currentColor;
+  }
+  50% {
+    transform: scale(1.06);
+    opacity: 0.55;
+    box-shadow: 0 0 6px 2px currentColor;
+  }
+}
+
+/* ── 气泡容器 ── */
+.chat-bubble-wrap {
+  max-width: 70%;
+}
+
+/* 发送者名称 */
+.chat-sender-name {
+  font-size: 12px;
+  color: #999;
+  margin-bottom: 2px;
+}
+
+.chat-sender-name--right {
+  text-align: right;
+}
+
+/* ── 消息气泡 ── */
+.chat-bubble {
+  padding: 8px 12px;
+  font-size: 14px;
+  line-height: 1.5;
+  word-break: break-word;
+  animation: chat-bubble-in 0.25s ease-out;
+  transition: transform 0.15s ease, box-shadow 0.15s ease;
+}
+
+.chat-bubble:hover {
+  transform: translateY(-1px);
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+}
+
+.chat-bubble--self {
+  background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
+  color: #fff;
+  border-radius: 14px 14px 4px 14px;
+  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.25);
+}
+
+.chat-bubble--other {
+  background: #f5f5f5;
+  color: #333;
+  border-radius: 14px 14px 14px 4px;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.04);
+}
+
+@keyframes chat-bubble-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+/* ── 时间戳 ── */
+.chat-timestamp {
+  font-size: 11px;
+  color: #bbb;
+  margin-top: 2px;
+}
+
+/* SH-04 修正：GroupPage 原缺失此变体（用户消息时间戳未右对齐），ChatPanel 补齐。 */
+.chat-timestamp--right {
+  text-align: right;
+}

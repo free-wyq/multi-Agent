@@ -1,0 +1,466 @@
+import { useCallback, useEffect, useRef, useState } from 'react'
+import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
+import type { InputRef } from 'antd'
+import { RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
+import {
+  messageApi,
+  type AgentDefinition,
+  type Group,
+  type GroupMember,
+  type Message,
+} from '../services/api'
+import { useBusEventContext } from '../contexts/BusEventContext'
+import PlanConfirmCard from './PlanConfirmCard'
+import StopTaskButton from './StopTaskButton'
+import './ChatPanel.css'
+
+const { Text } = Typography
+
+/** 获取智能体角色主题色 */
+function getAgentColor(id: string, agents: AgentDefinition[]): string {
+  const ROLE_COLORS: Record<string, string> = {
+    '后端开发工程师': '#6366f1',
+    '前端开发工程师': '#06b6d4',
+    '测试工程师': '#f59e0b',
+    'DevOps 工程师': '#10b981',
+    '产品经理': '#f43f5e',
+    '自定义': '#8b5cf6',
+  }
+  const agent = agents.find((a) => a.id === id)
+  return agent ? (ROLE_COLORS[agent.role] ?? '#8b5cf6') : '#722ed1'
+}
+
+/** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
+function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
+  const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
+  const ringDelay = (hash % 3000)
+  const ringDuration = 2500 + (hash % 7) * 200
+  const bobDelay = (hash >> 4) % 4000
+  const bobDuration = 3000 + (hash >> 3) % 5 * 300
+
+  if (id === 'user') {
+    return (
+      <div className="chat-avatar chat-avatar--user">
+        <UserOutlined style={{ fontSize: 16, color: '#1677ff' }} />
+      </div>
+    )
+  }
+  const color = id === 'coordinator' || id === 'broadcast' ? '#722ed1' : getAgentColor(id, agents)
+  return (
+    <div className="chat-avatar" style={{ borderColor: color }}>
+      <img
+        src="/robot-avatar.png"
+        alt=""
+        className="chat-avatar-img"
+        style={{ animationDelay: `${bobDelay}ms`, animationDuration: `${bobDuration}ms` }}
+      />
+      <span
+        className="chat-avatar-ring"
+        style={{ borderColor: color, animationDelay: `${ringDelay}ms`, animationDuration: `${ringDuration}ms` }}
+      />
+    </div>
+  )
+}
+
+/** 获取发送者显示名 */
+function SenderName({ id, agents }: { id: string; agents: AgentDefinition[] }) {
+  if (id === 'user') return '用户'
+  if (id === 'coordinator') return '群主(协调者)'
+  if (id === 'broadcast') return '系统广播'
+  const agent = agents.find((a) => a.id === id)
+  return agent?.name ?? id.slice(0, 8) + '...'
+}
+
+/** 高亮 @mention 的消息内容 */
+function HighlightMessage({ content, members }: { content: string | null; members: GroupMember[] }) {
+  if (!content) return <Text type="secondary" italic>（空消息）</Text>
+  const parts = content.split(/(@[^\s,，.。!！?？:：;；\n]+)/g)
+  return (
+    <span>
+      {parts.map((part, i) => {
+        if (part.startsWith('@')) {
+          const name = part.slice(1)
+          const isMember = members.some((m) => m.agent_name === name || m.alias === name)
+          if (isMember) {
+            return <Tag key={i} color="blue" style={{ margin: 0, padding: '0 4px', lineHeight: '18px' }}>{part}</Tag>
+          }
+        }
+        return <span key={i}>{part}</span>
+      })}
+    </span>
+  )
+}
+
+/** 获取成员显示名 */
+function getMemberDisplayName(member: GroupMember) {
+  return member.alias || member.agent_name
+}
+
+interface ChatPanelProps {
+  /** 当前会话的群组（null/未选群时展示占位）。 */
+  group: Group | null
+  /** 全部智能体（用于头像角色色 + 发送者名解析 + @mention 候选）。 */
+  agents: AgentDefinition[]
+  /** 当前群成员（用于 @mention 候选 + 高亮 mention）。 */
+  members: GroupMember[]
+  /** 消息加载中态。 */
+  loading?: boolean
+  /** 群信息抽屉开关 setter（ChatPanel 头部「群信息」按钮触发，抽屉本体留 ChatPage 管）。 */
+  onOpenInfo?: () => void
+  /** 清空聊天记录回调（重置时由父统一协调 messageApi.clearByGroup + reset-session，SH-04 仅触发回调）。 */
+  onClearMessages?: () => void
+}
+
+/**
+ * SH-04 ChatPanel 聊天列：消息流 + 输入框 + 计划卡 + 停止按钮。
+ *
+ * 从 GroupPage 抽出聊天主区（原「中间对话区」），状态自治：
+ *  - 消息流：本地 `chatMessages` state，loadMessages 拉历史 + WS logs 追加（与 GroupPage 逻辑一致）。
+ *  - 输入框：chatInput + @mention 自动补全（成员候选/光标插入/键盘导航），Enter 发送/Shift+Enter 换行（SC-11 升级前先用单行 Input + Enter 发送，保留原行为零回归）。
+ *  - 计划卡：PlanConfirmCard（plan 含 pending 步骤时展示于消息列表顶部）。
+ *  - 停止按钮：从 BusEventContext.agentStatuses 找 executing agent，头部展示 StopTaskButton。
+ *
+ * plan / agentStatuses / logs 从 BusEventContext 消费（全应用共享一条 WS，不自起订阅）。
+ * groupId 同样从 context（chatGroupId）——与 SessionList/ChatShell 共享全局聚焦会话。
+ * 群信息抽屉、新建群组 Modal、群设置 Modal 等管理类 UI 留 ChatPage（SH-03）统一持有，
+ * ChatPanel 通过 onOpenInfo/onClearMessages 回调触发，避免组件臃肿。
+ */
+export default function ChatPanel({
+  group,
+  agents,
+  members,
+  loading,
+  onOpenInfo,
+}: ChatPanelProps) {
+  const { groupId: chatGroupId, logs, plan, agentStatuses } = useBusEventContext()
+  const [chatMessages, setChatMessages] = useState<Message[]>([])
+  const [chatLoading, setChatLoading] = useState(false)
+  const [sending, setSending] = useState(false)
+  const [chatInput, setChatInput] = useState('')
+  const chatEndRef = useRef<HTMLDivElement>(null)
+
+  // ── @mention 自动补全 ──
+  const [mentionOpen, setMentionOpen] = useState(false)
+  const [mentionQuery, setMentionQuery] = useState('')
+  const [mentionIndex, setMentionIndex] = useState(0)
+  const inputRef = useRef<InputRef | null>(null)
+  const [inputCursor, setInputCursor] = useState(0)
+
+  const mentionCandidates = members.filter((m) =>
+    getMemberDisplayName(m).toLowerCase().includes(mentionQuery.toLowerCase()),
+  )
+
+  // PL-11：当前群组中正在 executing 的智能体（群聊头部停止按钮入口）。
+  const executingAgent = chatGroupId
+    ? Object.values(agentStatuses).find(
+        (a) => a.status === 'executing' && a.current_task_id,
+      )
+    : undefined
+
+  // 计划含 pending 步骤 → 展示计划确认卡片（M12-PL02）。
+  const showPlanCard =
+    !!chatGroupId &&
+    !!plan &&
+    plan.length > 0 &&
+    plan.some((s) => s.status === 'pending')
+
+  // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
+  useEffect(() => {
+    if (logs.length === 0) return
+    const lastLog = logs[logs.length - 1]
+    if (lastLog.agentId === 'user') return
+    setChatMessages((prev) => {
+      const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
+      if (prev.some((m) => m.id === wsMsgId)) return prev
+      return [...prev, {
+        id: wsMsgId,
+        group_id: chatGroupId || '',
+        task_id: lastLog.taskId || null,
+        sender_id: lastLog.agentId,
+        receiver_id: 'broadcast',
+        type: 'log',
+        content: lastLog.message,
+        data: null,
+        created_at: new Date(lastLog.timestamp).toISOString(),
+      }]
+    })
+  }, [logs, chatGroupId])
+
+  // 滚动到底部
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  }, [chatMessages])
+
+  // 切换群组时加载历史消息（chatGroupId 来自全局 active group）。
+  useEffect(() => {
+    if (chatGroupId) {
+      setChatLoading(true)
+      messageApi
+        .listByGroup(chatGroupId)
+        .then((data) => setChatMessages(data.reverse()))
+        .catch(() => setChatMessages([]))
+        .finally(() => setChatLoading(false))
+    } else {
+      setChatMessages([])
+    }
+  }, [chatGroupId])
+
+  const handleSendMessage = async () => {
+    if (!chatInput.trim() || !chatGroupId || sending) return
+    setSending(true)
+    const content = chatInput.trim()
+    setChatInput('')
+    setMentionOpen(false)
+
+    const tempId = `temp-${Date.now()}`
+    const optimisticMsg: Message = {
+      id: tempId,
+      group_id: chatGroupId,
+      task_id: null,
+      sender_id: 'user',
+      receiver_id: 'broadcast',
+      type: 'user_input',
+      content,
+      data: null,
+      created_at: new Date().toISOString(),
+    }
+    setChatMessages((prev) => [...prev, optimisticMsg])
+
+    try {
+      const sent = await messageApi.send({
+        group_id: chatGroupId,
+        sender_id: 'user',
+        receiver_id: 'broadcast',
+        type: 'user_input',
+        content,
+      })
+      setChatMessages((prev) => {
+        const alreadyExists = prev.some((m) => m.id === sent.id)
+        if (alreadyExists) return prev.filter((m) => m.id !== tempId)
+        return prev.map((m) => (m.id === tempId ? sent : m))
+      })
+    } catch {
+      setChatMessages((prev) => prev.filter((m) => m.id !== tempId))
+      setChatInput(content)
+      message.error('发送失败')
+    } finally {
+      setSending(false)
+    }
+  }
+
+  const handleInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const value = e.target.value
+    const cursor = e.target.selectionStart ?? value.length
+    setChatInput(value)
+    setInputCursor(cursor)
+
+    const beforeCursor = value.slice(0, cursor)
+    const atMatch = beforeCursor.match(/@([^\s]*)$/)
+    if (atMatch) {
+      setMentionQuery(atMatch[1])
+      setMentionOpen(true)
+      setMentionIndex(0)
+    } else {
+      setMentionOpen(false)
+    }
+  }
+
+  const insertMention = useCallback((member: GroupMember) => {
+    const name = getMemberDisplayName(member)
+    const beforeCursor = chatInput.slice(0, inputCursor)
+    const afterCursor = chatInput.slice(inputCursor)
+    const atIndex = beforeCursor.lastIndexOf('@')
+    if (atIndex === -1) return
+
+    const newValue = beforeCursor.slice(0, atIndex) + `@${name} ` + afterCursor
+    setChatInput(newValue)
+    setMentionOpen(false)
+
+    setTimeout(() => {
+      const newCursor = atIndex + name.length + 2
+      inputRef.current?.input?.setSelectionRange?.(newCursor, newCursor)
+      inputRef.current?.focus()
+    }, 0)
+  }, [chatInput, inputCursor])
+
+  const handleInputKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
+    if (e.key === 'Enter') {
+      if (mentionOpen && mentionCandidates.length > 0) {
+        e.preventDefault()
+        const candidate = mentionCandidates[mentionIndex]
+        if (candidate) insertMention(candidate)
+        return
+      }
+      e.preventDefault()
+      handleSendMessage()
+      return
+    }
+    if (!mentionOpen) return
+    if (e.key === 'ArrowDown') {
+      e.preventDefault()
+      setMentionIndex((idx) => (idx + 1) % mentionCandidates.length)
+    } else if (e.key === 'ArrowUp') {
+      e.preventDefault()
+      setMentionIndex((idx) => (idx - 1 + mentionCandidates.length) % mentionCandidates.length)
+    } else if (e.key === 'Escape') {
+      setMentionOpen(false)
+    }
+  }
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+      {/* 聊天头部 — 钉钉风格：标题 + 人数，右侧停止按钮 + 群信息按钮 */}
+      {group && (
+        <div
+          style={{
+            padding: '12px 20px',
+            borderBottom: '1px solid #f0f0f0',
+            background: '#fff',
+            flexShrink: 0,
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
+            <Text strong style={{ fontSize: 15, flexShrink: 0 }}>
+              {group.name}
+            </Text>
+            <Text type="secondary" style={{ fontSize: 13, flexShrink: 0 }}>
+              ( {members.length + 1} )
+            </Text>
+          </div>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            {executingAgent && chatGroupId && (
+              <StopTaskButton
+                taskId={executingAgent.current_task_id!}
+                groupId={chatGroupId}
+                agentName={executingAgent.name}
+              />
+            )}
+            <Tooltip title="群信息">
+              <Button
+                type="text"
+                icon={<SettingOutlined />}
+                size="small"
+                onClick={onOpenInfo}
+              />
+            </Tooltip>
+          </div>
+        </div>
+      )}
+
+      {/* 消息列表 */}
+      <div style={{ flex: 1, overflowY: 'auto', padding: '16px 20px' }}>
+        {showPlanCard && plan && chatGroupId && (
+          <PlanConfirmCard groupId={chatGroupId} plan={plan} />
+        )}
+        {!chatGroupId ? (
+          <div style={{ textAlign: 'center', padding: 60 }}>
+            <Empty description="请在左侧选择一个群组开始对话" />
+          </div>
+        ) : chatLoading || loading ? (
+          <div style={{ textAlign: 'center', padding: 40 }}>
+            <Spin />
+          </div>
+        ) : chatMessages.length === 0 ? (
+          <Empty description="暂无消息，开始对话吧" />
+        ) : (
+          chatMessages.map((msg) => {
+            const isUser = msg.sender_id === 'user'
+            return (
+              <div
+                key={msg.id}
+                className="chat-msg"
+                style={{ flexDirection: isUser ? 'row-reverse' : 'row' }}
+              >
+                <ChatAvatar id={msg.sender_id} agents={agents} />
+                <div className="chat-bubble-wrap">
+                  <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
+                    <SenderName id={msg.sender_id} agents={agents} />
+                  </div>
+                  <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
+                    {isUser ? (
+                      msg.content
+                    ) : (
+                      <HighlightMessage content={msg.content} members={members} />
+                    )}
+                  </div>
+                  <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
+                    {new Date(msg.created_at).toLocaleTimeString()}
+                  </div>
+                </div>
+              </div>
+            )
+          })
+        )}
+        <div ref={chatEndRef} />
+      </div>
+
+      {/* 输入框 */}
+      {chatGroupId && (
+        <div style={{ padding: '12px 16px', borderTop: '1px solid #f0f0f0', background: '#fff', flexShrink: 0, position: 'relative' }}>
+          {mentionOpen && mentionCandidates.length > 0 && (
+            <div
+              style={{
+                position: 'absolute',
+                bottom: '100%',
+                left: 16,
+                marginBottom: 4,
+                background: '#fff',
+                border: '1px solid #f0f0f0',
+                borderRadius: 6,
+                boxShadow: '0 4px 12px rgba(0,0,0,0.1)',
+                zIndex: 100,
+                maxHeight: 200,
+                overflowY: 'auto',
+                width: 220,
+              }}
+            >
+              {mentionCandidates.map((m, idx) => (
+                <div
+                  key={m.id}
+                  onClick={() => insertMention(m)}
+                  style={{
+                    padding: '8px 12px',
+                    cursor: 'pointer',
+                    background: idx === mentionIndex ? '#e6f4ff' : '#fff',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 8,
+                  }}
+                >
+                  <RobotOutlined style={{ color: '#1677ff' }} />
+                  <div>
+                    <div style={{ fontSize: 13 }}>{getMemberDisplayName(m)}</div>
+                    <div style={{ fontSize: 11, color: '#999' }}>{m.agent_role}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Input
+              ref={inputRef}
+              value={chatInput}
+              onChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              placeholder="输入消息... 使用 @ 点名成员"
+              disabled={sending}
+              size="large"
+            />
+            <Button
+              type="primary"
+              icon={<SendOutlined />}
+              onClick={handleSendMessage}
+              loading={sending}
+              size="large"
+            >
+              发送
+            </Button>
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
