@@ -677,6 +677,44 @@ class AgentEngine:
         next_task = self._pending_tasks.pop(0)
         await self._handle_task(next_task)
 
+    async def reset_session(self) -> None:
+        """BE-02: clear cross-invoke engine instance state (memory + dispatch plan).
+
+        Wipes the coordinator/worker conversation memory (``_memory``), the
+        resident dispatch plan (``_dispatch_plan``), the mention route-rate gate
+        (``_recent_routes``), and the pending-task backlog (``_pending_tasks``) —
+        the per-engine instance state accumulated across invocations. This is the
+        in-process analogue of ``/new``: a fresh conversation without tearing
+        down and rebuilding the engine (the compiled LangGraph graph, the inbox
+        channel, and the run loop all stay live — only the cross-invoke state is
+        reset, so the next ``ainvoke`` starts from an empty slate).
+
+        Does NOT touch the LangGraph graph object, the MemorySaver checkpointer
+        thread_id, or the inbox queue wiring — engine identity and graph topology
+        are preserved (方案 B 引擎内存态清理，不改 LangGraph 图). If the engine
+        is mid-execution (``status == "executing"``), the running worker task is
+        cancelled first via ``request_cancel`` so the reset cannot race an
+        in-flight ``_run_worker_task`` that would otherwise re-populate
+        ``_memory`` / ``_dispatch_plan`` as it unwinds — the caller is expected to
+        poll status back to ``idle`` (mirrors PL-11 stop semantics).
+
+        No raise: safe on a not-yet-started or already-offline engine (the
+        ``executing`` cancel is best-effort; an offline engine simply has nothing
+        to cancel and clears the (already empty) state lists).
+        """
+        if self.status == "executing":
+            # cancel the in-flight worker task so it can't repopulate state as
+            # it unwinds; reset takes effect once the engine returns to idle.
+            self.request_cancel()
+        self._memory.clear()
+        self._dispatch_plan.clear()
+        self._recent_routes.clear()
+        self._pending_tasks.clear()
+        logger.info(
+            "[engine] %s session reset (memory + dispatch_plan cleared)",
+            self.name,
+        )
+
 
 class AgentRegistry:
     """group_id -> agent_id -> AgentEngine."""
@@ -839,6 +877,58 @@ class AgentRegistry:
                 }
             )
         return out
+
+    def list_all_status(self) -> dict[str, list[dict[str, Any]]]:
+        """Return every group's agent statuses in one call (SA-01).
+
+        Maps ``group_id -> [agent status, ...]`` — the same per-agent dict shape
+        :meth:`list_group_status` produces (id / name / role / status /
+        current_task_id). Delegates to :meth:`list_group_status` per group so the
+        status row has a single construction site (no duplicate field list to
+        drift).
+
+        This is the backend foundation for eliminating frontend N+1 status
+        polling: instead of one ``GET /api/status/{groupId}`` per group on every
+        tick (SA-04 AgentPage, the /status slash command), the UI can issue a
+        single ``GET /api/status`` (SA-02) and get all groups at once. Groups
+        with no live engines are simply absent from the dict (the frontend treats
+        a missing key as "no agents / all offline").
+        """
+        return {
+            gid: self.list_group_status(gid)
+            for gid in self._engines
+        }
+
+    async def reset_group_session(self, group_id: str) -> dict[str, int]:
+        """BE-02: clear cross-invoke state on every engine in a group.
+
+        Iterates every resident engine (coordinator + workers) in ``group_id``
+        and calls :meth:`AgentEngine.reset_session` on each — wiping
+        ``_memory`` / ``_dispatch_plan`` / ``_recent_routes`` / ``_pending_tasks``
+        without stopping the engines or touching the LangGraph graphs. Returns
+        ``{"reset": <count>}`` so the API layer can confirm how many engines were
+        affected (0 = group has no live engines, e.g. never started — the route
+        still clears persisted messages, so a reset on a cold group is a no-op on
+        the engine side but not an error).
+
+        This is the registry-side counterpart of ``POST
+        /api/groups/{id}/reset-session``: the route clears persisted messages
+        (``crud.clear_messages_by_group``) + emits a cleared-plan bus event, then
+        calls this to clear the in-memory engine state. Safe on an unknown /
+        stopped group (returns ``{"reset": 0}``).
+        """
+        group = self._engines.get(group_id)
+        if not group:
+            return {"reset": 0}
+        count = 0
+        for eng in list(group.values()):
+            await eng.reset_session()
+            count += 1
+        logger.info(
+            "[registry] reset session on %d engine(s) in group %s",
+            count, group_id,
+        )
+        return {"reset": count}
 
 
 registry = AgentRegistry()

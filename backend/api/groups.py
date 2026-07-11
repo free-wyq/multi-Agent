@@ -26,6 +26,7 @@ from pydantic import BaseModel
 
 from engine.registry import registry
 from engine.workspace import safe_path
+from events import emit_coordinator_plan, emit_message_added
 from llm import build_group_name_desc_prompt, chat_completion, extract_json, get_llm_config
 from models import Group, GroupCreatePayload, GroupFile, GroupMember
 from store import crud
@@ -238,6 +239,53 @@ async def add_member(group_id: str, body: AddMemberBody) -> GroupMember | None:
 @router.delete("/{group_id}/members/{member_id}")
 async def remove_member(group_id: str, member_id: str) -> bool:
     return await crud.remove_member(group_id, member_id)
+
+
+@router.post("/{group_id}/reset-session")
+async def reset_session(group_id: str) -> dict[str, Any]:
+    """BE-02: clear a group's conversation + resident engine instance state.
+
+    ``POST /api/groups/{id}/reset-session`` is the backend of the ``/new`` slash
+    command — a fresh-conversation reset without disbanding the team. It does
+    three things, in order:
+
+    1. **Persisted messages** — ``crud.clear_messages_by_group`` wipes the
+       ``messages`` rows for the group (same store used by ``DELETE
+       /api/messages``). The frontend also calls ``messageApi.clearByGroup``
+       for its optimistic local clear; the server clear is the authoritative
+       one and makes the reset survive a reload.
+    2. **Resident engine state** — ``registry.reset_group_session`` clears
+       ``_memory`` / ``_dispatch_plan`` / ``_recent_routes`` / ``_pending_tasks``
+       on every engine in the group (coordinator + workers). This is the
+       方案 B in-memory plan/memory wipe: the engines stay live (compiled
+       LangGraph graph + inbox channel + run loop untouched) but their
+       cross-invoke state is empty, so the next user message starts a clean
+       conversation. If any engine is mid-execution it is cancelled first
+       (see ``AgentEngine.reset_session``).
+    3. **Bus event** — emits an empty ``coordinator_plan`` (``plan: []``) so
+       any connected client (GroupPage / MonitorPage / the new ChatPanel)
+       drops its resident plan card immediately — without this, a stale
+       ``pending`` plan would linger on the UI until a reload.
+
+    Returns ``{"ok": true, "group_id": ..., "messages_cleared": <bool>,
+    "engines_reset": <count>}``. Never raises on a cold/unknown group: a group
+    that was never started has no engines (``engines_reset=0``) but its
+    messages are still cleared if any existed.
+    """
+    # 1. persisted messages (authoritative — survives reload)
+    cleared = await crud.clear_messages_by_group(group_id)
+    # 2. resident engine instance state (memory + dispatch plan)
+    result = await registry.reset_group_session(group_id)
+    # 3. push an empty plan so connected clients drop the plan card
+    group = await crud.get_group(group_id)
+    coord_id = group.coordinator_id if group else ""
+    await emit_coordinator_plan(group_id, coord_id, [])
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "messages_cleared": cleared,
+        "engines_reset": result.get("reset", 0),
+    }
 
 
 @router.get("/{group_id}/files")
