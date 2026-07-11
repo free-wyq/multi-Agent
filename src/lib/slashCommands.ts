@@ -35,6 +35,7 @@ import type { ReactNode } from 'react'
 import { createElement } from 'react'
 
 import ModelCard from '../components/ModelCard'
+import SessionsCard from '../components/SessionsCard'
 import SkillsCard from '../components/SkillsCard'
 import StatusCard from '../components/StatusCard'
 import ToolsCard from '../components/ToolsCard'
@@ -253,6 +254,44 @@ function handleStatus(ctx: SlashCommandContext): void {
 }
 
 /**
+ * SC-08 `/sessions` handler：按 group 聚合列历史会话，SessionsCard 渲染。
+ *
+ * 并发拉两个源：groupApi.list（全部群组 = 会话骨架）+ messageApi.listAll（全部群组最近消息，
+ * 跨群聚合做消息数统计 + 最后消息预览）。两源独立无依赖 → Promise.all 并发拉取最短耗时。
+ * 前端按 group_id 把消息聚合到各会话：count（消息数）+ last（最后一条做预览）。会话按最后活跃
+ * 时间倒序（有消息取 last.created_at，无消息取 group.updated_at）。
+ *
+ * 当前会话高亮：ctx.groupId 非空时该会话蓝边加粗（与 SessionList 视觉呼应），让用户在历史会话
+ * 概览中一眼定位当前所在会话。args 忽略（/sessions 当前不接受参数，无参 = 列全部会话）。
+ *
+ * 与 SessionList 区别：SessionList 是左侧栏常驻导航（切群用，不拉消息预览避免 N+1，时间用
+ * group.updated_at 近似）；/sessions 是命令触发的「历史会话概览」快照——补上消息数 + 最后预览
+ * （messageApi.listAll 一次拉全跨群聚合，非 N+1）。用户 /sessions 想快速回看「最近跟哪些群聊过、
+ * 各聊了多少、最后说了啥」，不必逐群点开。
+ *
+ * 错误处理：任一源拉取失败推 ⚠️ 字符串卡片告知（网络错 / 后端 500），不中断聊天流。
+ */
+async function handleSessions(ctx: SlashCommandContext): Promise<void> {
+  try {
+    const [groups, messages] = await Promise.all([
+      groupApi.list(),
+      messageApi.listAll(),
+    ])
+    ctx.renderCard(
+      createElement(SessionsCard, {
+        groups,
+        messages,
+        currentGroupId: ctx.groupId,
+      }),
+    )
+  } catch (e) {
+    ctx.renderCard(
+      `⚠️ 获取历史会话失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -307,7 +346,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'sessions',
     description: '查看按群组聚合的历史会话',
     usage: '/sessions',
-    handler: stub('sessions'),
+    handler: handleSessions,
   },
   {
     name: 'agent',

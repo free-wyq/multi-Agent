@@ -442,6 +442,17 @@ export const taskApi = {
 export const messageApi = {
   listByGroup: (groupId: string, limit = 100) =>
     http<Message[]>('GET', '/api/messages', undefined, { groupId, limit: String(limit) }),
+  /**
+   * SC-08 /sessions：不带 groupId 一次拉所有群组的消息（后端 list_messages(groupId=None)
+   * 不加 group 过滤，按 created_at 排序后取最近 limit 条）。前端按 group_id 聚合统计会话。
+   *
+   * 与 listByGroup 并存（不破坏后者）——listByGroup 是「拉某群消息流」单群语义，
+   * listAll 是「跨群聚合统计」全量语义。传较大 limit（默认 1000）尽量覆盖所有会话的
+   * 最后一条消息做预览；会话数极多时仍可能漏早期会话的最后消息（预览降级为无预览，
+   * 但会话本身仍由 groupApi.list 列出，不会丢会话）。
+   */
+  listAll: (limit = 1000) =>
+    http<Message[]>('GET', '/api/messages', undefined, { limit: String(limit) }),
   listByTask: (taskId: string, limit = 100) =>
     http<Message[]>('GET', `/api/messages/by-task/${taskId}`, undefined, { limit: String(limit) }),
   send: (body: MessageCreatePayload) => http<Message>('POST', '/api/messages', body),
