@@ -47,7 +47,7 @@ import { agentApi, groupApi,
   type Message,
   type Skill,
 } from '../services/api'
-import { useBusEvent } from '../hooks/useBusEvent'
+import { useBusEventContext } from '../contexts/BusEventContext'
 import PlanConfirmCard from '../components/PlanConfirmCard'
 import StopTaskButton from '../components/StopTaskButton'
 import './GroupPage.css'
@@ -255,7 +255,10 @@ export default function GroupPage() {
   const [createForm] = Form.useForm()
 
   // ── 聊天状态 ──
-  const [chatGroupId, setChatGroupId] = useState<string | null>(null)
+  // WS-04：群组 id 改由 BusEventContext（App 顶层 provider）持有，本页消费共享 WS 状态。
+  // chatGroupId 来自全局 active group，setChatGroupId 切全局聚焦群组（provider 重订阅 WS）。
+  const { groupId: chatGroupId, setGroupId: setChatGroupId, logs, plan, agentStatuses } =
+    useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -287,8 +290,8 @@ export default function GroupPage() {
 
   const chatGroup = groups.find((g) => g.id === chatGroupId)
 
-  // IPC 实时消息
-  const { logs, plan, agentStatuses } = useBusEvent(chatGroupId)
+  // WS-04：logs/plan/agentStatuses 来自 BusEventContext（全应用共享一条 WS），不再本地订阅。
+  // （原 `const { logs, plan, agentStatuses } = useBusEvent(chatGroupId)` 已上移到 context 解构。）
 
   // PL-11：当前群组中正在 executing 的智能体（用于群聊头部展示停止按钮）。
   // 只取第一个 executing 且有 current_task_id 的——群聊页聚焦对话流，停止入口给最显眼的一个
