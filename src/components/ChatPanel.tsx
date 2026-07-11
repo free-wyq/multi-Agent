@@ -5,6 +5,7 @@ import type { ComponentRef } from 'react'
 import { RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
 import {
   messageApi,
+  taskApi,
   type AgentDefinition,
   type Group,
   type GroupMember,
@@ -322,6 +323,22 @@ export default function ChatPanel({
     setChatInput('')
     setMentionOpen(false)
     setSlashOpen(false)
+
+    // SH-08 busy_input_mode：若有 agent 正在 executing，回车发送前先 interrupt 当前任务
+    // （taskApi.stop）。语义：用户在智能体忙碌时回车输入 = 想打断它说新话，而非排队。
+    // stop 是 best-effort——失败不阻断发送（可能任务恰好刚结束 / 后端 no-op 200），
+    // 仅 toast 告知打断结果。stop 成功后引擎回 idle 会推 agent_status(idle) WS 事件，
+    // useBusEvent 自动刷新 agentStatuses。
+    const interrupting = executingAgent?.current_task_id
+    if (interrupting) {
+      try {
+        const resp = await taskApi.stop(interrupting, chatGroupId)
+        message.info(resp.message || `已打断 ${executingAgent!.name} 的任务`)
+      } catch (e) {
+        // 打断失败不阻断发送——用户消息优先级高于打断结果
+        message.warning(`打断失败（仍发送消息）：${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
 
     const tempId = `temp-${Date.now()}`
     const optimisticMsg: Message = {
@@ -741,7 +758,7 @@ export default function ChatPanel({
               value={chatInput}
               onChange={handleInputChange}
               onKeyDown={handleInputKeyDown}
-              placeholder="输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行"
+              placeholder="输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行（智能体忙碌时回车会先打断当前任务）"
               disabled={sending}
               autoSize={{ minRows: 1, maxRows: 6 }}
               style={{ flex: 1, resize: 'none' }}
