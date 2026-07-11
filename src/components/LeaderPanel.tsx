@@ -1,10 +1,6 @@
 import { Collapse, Empty, Tag, Timeline } from 'antd'
-import { useBusEvent } from '../hooks/useBusEvent'
+import { useBusEventContext } from '../contexts/BusEventContext'
 import type { PlanStep } from '../services/api'
-
-interface LeaderPanelProps {
-  groupId: string
-}
 
 /** 计划步骤状态 → 徽标 */
 function stepBadge(status: string): { color: string; label: string } {
@@ -23,9 +19,13 @@ function stepBadge(status: string): { color: string; label: string } {
  * - 思考链：filter events kind==='coord_think'，Collapse 展开看 action/content
  * - 协作计划：plan 各步（agent_name → instruction + 状态徽标）
  * - 派工时间线：filter events kind in ('dispatch','complete','failed')，按 task_id 串
+ *
+ * WS-05：events/plan 改从 BusEventContext 消费（全应用共享一条 WS），不再接收 groupId
+ * prop——上下文已是当前聚焦群组的全局状态。useBusEventContext 是 throw 版，本组件在
+ * provider 内（App 顶层包裹），必命中。
  */
-export default function LeaderPanel({ groupId }: LeaderPanelProps) {
-  const { events, plan } = useBusEvent(groupId)
+export default function LeaderPanel() {
+  const { events, plan } = useBusEventContext()
 
   const thinkEvents = events.filter((e) => e.kind === 'coord_think')
   const timelineEvents = events.filter(

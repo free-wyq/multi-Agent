@@ -9,7 +9,7 @@ import {
   type Group,
   type GroupMember,
 } from '../services/api'
-import { useBusEvent } from '../hooks/useBusEvent'
+import { useBusEventContext } from '../contexts/BusEventContext'
 import LeaderPanel from '../components/LeaderPanel'
 import WorkerTrace from '../components/WorkerTrace'
 import StopTaskButton from '../components/StopTaskButton'
@@ -23,10 +23,16 @@ const STATUS_TAG: Record<string, { color: string; label: string }> = {
 
 export default function MonitorPage() {
   const [groups, setGroups] = useState<Group[]>([])
-  const [selectedGroup, setSelectedGroup] = useState<string | null>(null)
+  // WS-05：selectedGroup 改由 BusEventContext（App 顶层 provider）持有——本页消费全局共享
+  // WS 的 agentStatuses，并经 setSelectedGroup（= ctx.setGroupId）切全局聚焦群组。这样
+  // LeaderPanel/WorkerTrace 的 useBusEvent(groupId) 命中 WS-02 共享分支，零冗余 WS。
+  const {
+    groupId: selectedGroup,
+    setGroupId: setSelectedGroup,
+    agentStatuses,
+  } = useBusEventContext()
   const [members, setMembers] = useState<GroupMember[]>([])
   const [loading, setLoading] = useState(false)
-  const { agentStatuses } = useBusEvent(selectedGroup)
 
   useEffect(() => {
     groupApi
@@ -104,7 +110,7 @@ export default function MonitorPage() {
             }
             size="small"
           >
-            <LeaderPanel groupId={selectedGroup} />
+            <LeaderPanel />
           </Card>
 
           {/* Worker 标签页 */}
@@ -155,7 +161,6 @@ export default function MonitorPage() {
                       <WorkerTrace
                         agentId={m.agent_id}
                         agentName={m.alias || m.agent_name}
-                        groupId={selectedGroup}
                       />
                     ),
                   }

@@ -1,11 +1,10 @@
 import { useEffect, useRef } from 'react'
 import { Badge, Collapse, Empty, Tag } from 'antd'
-import { useBusEvent } from '../hooks/useBusEvent'
+import { useBusEventContext } from '../contexts/BusEventContext'
 
 interface WorkerTraceProps {
   agentId: string
   agentName: string
-  groupId: string
 }
 
 /** 状态 → 徽标颜色 */
@@ -31,11 +30,14 @@ interface ToolCard {
  * 工具卡片：filter events kind==='tool'，按时间序，每张卡含工具名、phase（start/end）、
  * 可折叠 args（output）。
  * 思考文本：filter kind in ('think','answer')，浅色块。
- * 流式 token（PL-08）：取 useBusEvent.streaming[current_task_id] 渲染「正在生成…」浅色块，
+ * 流式 token（PL-08）：取 BusEventContext.streaming[current_task_id] 渲染「正在生成…」浅色块，
  * 逐字增长；task_complete/failed/dispatch 后该缓冲被清空，块随之消失。
+ *
+ * WS-05：events/agentStatuses/streaming 改从 BusEventContext 消费（全应用共享一条 WS），
+ * 不再接收 groupId prop——上下文已是当前聚焦群组的全局状态。
  */
-export default function WorkerTrace({ agentId, agentName, groupId }: WorkerTraceProps) {
-  const { events, agentStatuses, streaming } = useBusEvent(groupId)
+export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
+  const { events, agentStatuses, streaming } = useBusEventContext()
   const containerRef = useRef<HTMLDivElement>(null)
 
   const status = agentStatuses[agentId]?.status || 'idle'

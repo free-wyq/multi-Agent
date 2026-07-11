@@ -1,15 +1,17 @@
 import { useEffect, useRef } from 'react'
 import { Tag } from 'antd'
-import { useBusEvent } from '../hooks/useBusEvent'
+import { useBusEventContext } from '../contexts/BusEventContext'
 
 interface LogPanelProps {
   taskId?: string
   agentId?: string
+  /** 保留为调用方契约（TaskPage 传入 groupId），WS-05 后日志改从全局共享 WS 取，
+   *  本参数不再驱动订阅——上下文已是当前聚焦群组的事件流。 */
   groupId?: string
 }
 
-export default function LogPanel({ taskId, agentId, groupId }: LogPanelProps) {
-  const { logs } = useBusEvent(groupId || null)
+export default function LogPanel({ taskId, agentId }: LogPanelProps) {
+  const { logs } = useBusEventContext()
   const containerRef = useRef<HTMLDivElement>(null)
 
   const filtered = logs.filter((l) => {
