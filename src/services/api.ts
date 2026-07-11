@@ -765,6 +765,9 @@ export interface BusEventData {
 
 export const systemApi = {
   listStatus: (groupId: string) => http<AgentStatusInfo[]>('GET', `/api/status/${groupId}`),
+  // SA-03: 一次拉全所有群组所有 agent 状态，避免前端 N+1 轮询
+  // 对应后端 GET /api/status（无 group_id 段），返回 {group_id: AgentStatusInfo[]}
+  listAllStatus: () => http<Record<string, AgentStatusInfo[]>>('GET', `/api/status`),
 }
 
 // ── M11 黑盒透明化类型 ────────────────────────────────────
