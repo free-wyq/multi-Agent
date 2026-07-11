@@ -2,15 +2,15 @@
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 
-多智能体协作桌面平台，面向通用工作场景——创建智能体、配置角色与技能，拉入群组协同完成各类任务。软件交付是其首个垂直场景，亦可扩展到运营、研究、文档、流程自动化等通用工作流。本项目基于 Apache License 2.0 开源。
+多智能体协作桌面平台，面向通用工作场景——创建智能体、配置角色与技能，拉入群组协同完成各类任务。可承载自主规划、对话协同、团队分工、定时自动化等多种工作流，适用于运营、研究、文档、流程自动化、软件交付等领域。本项目基于 Apache License 2.0 开源。
 
 ## 项目简介
 
-一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协同完成各类工作。平台本身面向通用工作场景——自主规划、对话协同、团队分工、定时自动化均可，软件交付只是其中首个垂直场景（开发、编译、测试等），同样可承载运营、研究、文档、流程自动化等场景。群主智能体负责意图分析与任务调度，子智能体在框架内自主执行具体工作。
+一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协同完成各类工作。平台面向通用工作场景——自主规划、对话协同、团队分工、定时自动化均可，适用于运营、研究、文档、流程自动化、软件交付等领域，不限定单一行业。群主智能体负责意图分析与任务调度，子智能体在框架内自主执行具体工作。
 
 **核心定位**：桌面端工具，双击即用，零基础设施。
 
-**技术栈**：Electron（桌面壳）+ Python 后端（FastAPI + LangGraph + SQLAlchemy）+ React 前端（Vite + Ant Design + ReactFlow）。引擎全部基于开源框架（LangGraph `StateGraph`、`create_agent`、`astream_events`、APScheduler、langchain-mcp-adapters），不调外部 Claude Code CLI，不自研调度引擎——招投标技术背书。
+**技术栈**：Electron（桌面壳）+ Python 后端（FastAPI + LangGraph + SQLAlchemy）+ React 前端（Vite + Ant Design + ReactFlow）。引擎全部基于开源框架（LangGraph `StateGraph`、`create_react_agent`、`astream_events`、APScheduler、langchain-mcp-adapters），不调外部 Claude Code CLI，不自研调度引擎——招投标技术背书。
 
 ## 整体架构图
 
@@ -128,7 +128,7 @@ graph TB
 graph LR
     USER(("用户<br/>技术管理者"))
 
-    subgraph APP["WorkMate 企伴 v1.0 桌面应用"]
+    subgraph APP["Multi-Agent 桌面应用"]
         direction TB
 
         subgraph M_AGENT["智能体中心"]
@@ -233,7 +233,7 @@ sequenceDiagram
     participant API as FastAPI routes
     participant REG as AgentRegistry
     participant CO as Coordinator StateGraph
-    participant WK as Worker create_agent
+    participant WK as Worker create_react_agent
     participant LLM as OpenAI 兼容端点
     participant BUS as BusManager → WS
 
@@ -252,7 +252,7 @@ sequenceDiagram
     F-->>U: 看到协作计划
 
     REG-->>WK: asyncio.Queue 唤醒 worker
-    WK->>LLM: create_agent + astream_events
+    WK->>LLM: create_react_agent + astream_events
     loop ReAct 循环
         LLM-->>WK: AIMessage(tool_calls)
         WK->>TOOLS: 执行框架内工具
@@ -278,17 +278,17 @@ sequenceDiagram
 
 | | 群主 Coordinator | 子智能体 Worker |
 |--|------|---------|
-| 实现 | `coordinator.py` 的 `StateGraph`（7 节点 + conditional edge） | `worker.py` 的 `StateGraph`（brain 决策）+ `agent_loop.py` 的 `create_agent` |
-| 职责 | 意图分析、任务拆解、DAG 调度、汇总 | 开发、编译、测试 |
-| 运行形态 | 主进程内常驻 `asyncio.Task` | `create_agent` 框架内 ReAct 循环 |
-| 框架背书 | LangGraph `StateGraph` + `MemorySaver` checkpointer + `thread_id` | `langchain.agents.create_agent` + `astream_events(version="v2")` |
+| 实现 | `coordinator.py` 的 `StateGraph`（7 节点 + conditional edge） | `worker.py` 的 `StateGraph`（brain 决策）+ `agent_loop.py` 的 `create_react_agent` |
+| 职责 | 意图分析、任务拆解、DAG 调度、汇总 | 执行具体工作（随场景而异：开发/编译/测试、文档撰写、数据处理等） |
+| 运行形态 | 主进程内常驻 `asyncio.Task` | `create_react_agent` 框架内 ReAct 循环 |
+| 框架背书 | LangGraph `StateGraph` + `MemorySaver` checkpointer + `thread_id` | `langgraph.prebuilt.create_react_agent` + `astream_events(version="v2")` |
 
 ### 2. 编排用 LangGraph 原生术语
 
 协调与执行**不使用自创比喻**，全部用 LangGraph 原生概念：
 - **StateGraph**：coordinator / worker 各一张图，节点（node）间用 conditional edge 路由（`route_after_classify`）。
 - **checkpointer + thread_id**：`MemorySaver` 保存图内状态，`thread_id = "{group_id}:{agent_id}"` 跨轮次保持上下文。
-- **create_agent + astream_events**：worker 的 ReAct 循环由框架 `create_agent` 构建，我们只订阅 `astream_events` 事件流（`on_tool_start`/`on_tool_end`/`on_chain_end`），投影成 typed `BusEventData`。
+- **create_react_agent + astream_events**：worker 的 ReAct 循环由 `langgraph.prebuilt.create_react_agent` 构建（选它而非 `create_agent`，是因为后者非流式，无法满足 PL-08 逐字流式），我们只订阅 `astream_events` 事件流（`on_tool_start`/`on_tool_end`/`on_chain_end`/`on_chat_model_stream`），投影成 typed `BusEventData`。
 - **asyncio.Queue channel**：agent 间不点对点直连，通过 `inbox.py` 的 `asyncio.Queue` 解耦——`push_task`/`push_notify` 投递，引擎 `await get()` 阻塞唤醒（零空转、真消息驱动）。
 
 ### 3. 引擎不自研，全部用开源框架
@@ -296,7 +296,7 @@ sequenceDiagram
 | 能力 | 开源框架 | 代码 |
 |---|---|---|
 | Agent 编排 | LangGraph `StateGraph` | `engine/coordinator.py` `engine/worker.py` |
-| ReAct 循环 | `langchain.agents.create_agent` | `engine/agent_loop.py` |
+| ReAct 循环 | `langgraph.prebuilt.create_react_agent` | `engine/agent_loop.py` |
 | 事件流 | `astream_events(version="v2")` | `engine/agent_loop.py` |
 | 外部工具协议 | `langchain-mcp-adapters` → `BaseTool` | `engine/mcp_manager.py` |
 | 定时调度 | APScheduler（`AsyncIOScheduler`） | `engine/scheduler.py` |
@@ -304,7 +304,7 @@ sequenceDiagram
 
 ### 4. 工作区隔离
 
-每个群组一个独立工作目录 `DATA_DIR/workspaces/{group_id}/`，`safe_path()` 做路径穿越防护。worker 的框架内工具（read_file/write_file/edit_file/list_dir/run_command）通过闭包绑定到该目录，不同群组互不干扰。`Workspace` trait 预留 Docker/E2B 接缝。
+每个群组一个独立工作目录 `DATA_DIR/workspaces/{group_id}/`，`safe_path()` 做路径穿越防护。worker 的框架内工具（read_file/write_file/edit_file/list_dir/run_command）通过闭包绑定到该目录，不同群组互不干扰。
 
 ### 5. SQLite + WAL 持久化
 
@@ -326,7 +326,7 @@ sequenceDiagram
 | 前端 | React 19 + Vite 8 + Ant Design 6 + ReactFlow |
 | 后端框架 | Python 3 + FastAPI + uvicorn |
 | Agent 编排 | LangGraph 1.2（StateGraph + MemorySaver + checkpointer） |
-| ReAct 循环 | langchain `create_agent` + `astream_events` |
+| ReAct 循环 | LangGraph `create_react_agent` + `astream_events` |
 | LLM 客户端 | OpenAI 兼容 HTTP（httpx，DeepSeek/OpenAI 等端点） |
 | 外部工具协议 | langchain-mcp-adapters |
 | 定时任务 | APScheduler（AsyncIOScheduler + Cron/Interval/Date Trigger） |
@@ -337,13 +337,19 @@ sequenceDiagram
 
 ## 默认角色模板
 
+内置可「一键招聘」的角色模板（`backend/agent_templates.py`），随版本持续扩充：
+
 | 角色 | 职责 |
 |------|------|
-| 前端工程师 | 页面开发、组件实现（React/Vue, CSS, Jest） |
-| 后端工程师 | API 开发、数据库操作（Python/FastAPI, SQL） |
-| 测试工程师 | 测试用例、执行测试（pytest, 缺陷跟踪） |
-| 代码审查员 | 代码质量、安全审查 |
-| DevOps 工程师 | 部署、CI/CD（Docker, 部署脚本） |
+| 后端开发工程师 | API、数据层与服务端业务逻辑（Python/FastAPI、SQL） |
+| 前端开发工程师 | 页面与组件开发（React、TypeScript、CSS） |
+| 全栈工程师 | 贯通前后端，端到端交付功能 |
+| 测试工程师 | 测试用例设计、边界覆盖、回归守护 |
+| DevOps 工程师 | 部署、CI/CD、基础设施 |
+| 产品经理 | 需求分析、产品规划 |
+| 设计师 | 视觉设计、交互设计、设计系统 |
+
+> 模板只是预设起点，用户可自定义任意角色与 system prompt，适配软件交付之外的场景（运营、研究、文档、流程自动化等）。
 
 ## 快速开始
 
@@ -395,7 +401,7 @@ multi-Agent/
       registry.py              # AgentEngine + AgentRegistry（常驻 asyncio.Task）
       coordinator.py           # 协调者 StateGraph（7 节点 + conditional edge）
       worker.py                # Worker StateGraph（brain 决策）
-      agent_loop.py            # create_agent + astream_events（ReAct 循环）
+      agent_loop.py            # create_react_agent + astream_events（ReAct 循环）
       agent_executor.py        # 桥接：技能注入 + MCP 注入 → run_agent_loop
       tools.py                 # @tool 框架内工具（read_file/write_file/...）
       mcp_manager.py           # langchain-mcp-adapters → BaseTool
@@ -420,7 +426,7 @@ multi-Agent/
 ## 路线图
 
 - [x] Electron + Python(FastAPI+LangGraph) 后端推倒重来（M1/M2/M3）
-- [x] LangGraph coordinator + worker 双 StateGraph + create_agent ReAct 循环（M3/M5/M10）
+- [x] LangGraph coordinator + worker 双 StateGraph + create_react_agent ReAct 循环（M3/M5/M10）
 - [x] DAG 并行派发 + 任务管理（M4）
 - [x] 技能系统（内置 + LLM 生成 + 挂载注入，M7）
 - [x] MCP 外部工具集成（langchain-mcp-adapters，M9）
