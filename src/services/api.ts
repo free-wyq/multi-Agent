@@ -267,6 +267,16 @@ export const agentApi = {
 
 // ── Group API ────────────────────────────────────────────────
 
+/** POST /api/groups/{id}/reset-session 响应（/new slash 命令后端，BE-02）。 */
+export interface ResetSessionResponse {
+  ok: boolean
+  group_id: string
+  /** 是否真的清掉了消息（幂等：已无消息时返 false）。 */
+  messages_cleared: boolean
+  /** 被重置内存态的引擎实例数（coordinator + workers；冷启动群为 0）。 */
+  engines_reset: number
+}
+
 export const groupApi = {
   list: () => http<Group[]>('GET', '/api/groups'),
   get: (id: string) => http<Group | null>('GET', `/api/groups/${id}`),
@@ -290,6 +300,20 @@ export const groupApi = {
   update: (id: string, body: Partial<GroupCreatePayload>) =>
     http<Group | null>('PUT', `/api/groups/${id}`, body),
   delete: (id: string) => http<boolean>('DELETE', `/api/groups/${id}`),
+  /**
+   * SC-03 /new 的服务端清理：POST /api/groups/{id}/reset-session（BE-02）。
+   *
+   * 不解散团队、只重置会话——三件事：① 清该群持久化消息（与 DELETE /api/messages
+   * 同源，reload 后不复发）；② 清驻留引擎实例的内存态（_memory/_dispatch_plan/
+   * _recent_routes/_pending_tasks，方案 B 不重启引擎只清跨调用状态；在跑的任务先 cancel）；
+   * ③ 广播空 coordinator_plan（plan=[]）让所有连接客户端（GroupPage/MonitorPage/ChatPanel）
+   * 立即丢弃驻留计划卡。
+   *
+   * 幂等：冷启动群无引擎（engines_reset=0）但消息仍清；已无消息返 messages_cleared=false。
+   * 永不抛错（未知/冷群也 200）——/new 是「重新开始」语义，失败也不应阻断用户开新对话。
+   */
+  resetSession: (id: string) =>
+    http<ResetSessionResponse>('POST', `/api/groups/${id}/reset-session`),
   listMembers: (id: string) => http<GroupMember[]>('GET', `/api/groups/${id}/members`),
   addMember: (id: string, agent_id: string, alias?: string) =>
     http<GroupMember>('POST', `/api/groups/${id}/members`, { agentId: agent_id, alias }),

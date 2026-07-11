@@ -33,6 +33,7 @@
  */
 import type { ReactNode } from 'react'
 
+import { groupApi, messageApi } from '../services/api'
 import type { AgentStatusInfo, PlanStep } from '../services/api'
 
 /**
@@ -81,6 +82,56 @@ export interface SlashCommand {
 }
 
 /**
+ * SC-03 `/new` handler：开始新对话——清空本地视图 + 服务端清理，不散伙。
+ *
+ * 执行顺序（前端先清、后端兜底）：
+ *  1. `ctx.clearChat()` —— 立即清空本地消息流 + 关补全下拉（乐观清，用户零等待）。
+ *  2. `messageApi.clearByGroup(groupId)` —— DELETE /api/messages 清服务端持久化消息
+ *     （与 reset-session 第①步同源；重复清是为双保险：reset-session 万一失败，消息也
+ *     已被 DELETE 清掉，UI 不会留旧消息。两者写同一张 messages 表，幂等）。
+ *  3. `groupApi.resetSession(groupId)` —— POST /reset-session 清引擎内存态 + 广播空 plan
+ *     （方案 B 不重启引擎只清 _memory/_dispatch_plan/_pending_tasks；推 coordinator_plan=[]
+ *     让 GroupPage/MonitorPage/ChatPanel 丢弃驻留计划卡）。
+ *
+ * 群组判空：未选群（null）时仅清空本地视图 + 友情提示——此时无服务端会话可重置
+ * （用户可能正看「未选会话」占位态，/new 仍应清掉本地残留而非报错）。
+ *
+ * 错误处理：服务端清理失败不抛中断用户——经 ctx.renderCard 推一张 ⚠️ 卡片告知，
+ * 但仍认为本地已清（用户体感是「新对话已开始」）。/new 是「重新开始」语义，失败也不应阻断
+ * （handler 本身无 antd message 访问，错误信息只走 renderCard；ChatPanel 顶层 try/catch
+ * 兜底未捕获异常会 message.error，但本 handler 自行 try/catch 不让异常外溢）。
+ *
+ * 反馈卡片：成功后推一张轻量系统卡片（字符串 ReactNode）说明清掉了多少引擎 +
+ * 是否清了消息——给用户「确实重置了」的确认感（非静默清空）。失败时卡片也展示后端错误。
+ */
+async function handleNew(ctx: SlashCommandContext): Promise<void> {
+  // 1. 本地视图立即清空（乐观）
+  ctx.clearChat()
+
+  // 未选群：无服务端会话可清，仅清本地即可
+  if (!ctx.groupId) {
+    ctx.renderCard('已清空本地视图（未选会话，无服务端会话可重置）')
+    return
+  }
+
+  try {
+    // 2. 服务端消息清理（DELETE /api/messages，与 reset-session 同源双保险）
+    await messageApi.clearByGroup(ctx.groupId)
+    // 3. 引擎内存态重置 + 广播空 plan（POST /reset-session）
+    const resp = await groupApi.resetSession(ctx.groupId)
+    ctx.renderCard(
+      `✅ 已开始新对话（引擎重置 ${resp.engines_reset} 个` +
+        `${resp.messages_cleared ? '，消息已清空' : ''}）`,
+    )
+  } catch (e) {
+    // 服务端清理失败：本地已清，告知但不中断
+    ctx.renderCard(
+      `⚠️ 本地视图已清空，但服务端重置失败：${e instanceof Error ? e.message : String(e)}`,
+    )
+  }
+}
+
+/**
  * stub handler 工厂：SC-03~SC-10 未实现前，命令被调用时推一张占位卡片。
  *
  * 用字符串（合法 ReactNode）而非 JSX——本文件是 .ts 不可写 JSX；真实 handler 实现时
@@ -105,7 +156,7 @@ export const SLASH_COMMANDS: SlashCommand[] = [
     name: 'new',
     description: '清空当前会话并重置引擎内存态，开始新对话',
     usage: '/new',
-    handler: stub('new'),
+    handler: handleNew,
   },
   {
     name: 'model',
