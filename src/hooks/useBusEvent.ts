@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useContext, useEffect, useState } from 'react'
 import {
   messageApi,
   onBusEvent,
@@ -10,6 +10,7 @@ import {
   type AgentStatusInfo,
   type PlanStep,
 } from '../services/api'
+import { BusEventContext } from '../contexts/BusEventContext'
 
 export interface LogEntry {
   id: string
@@ -65,8 +66,29 @@ function parseTs(ts: string): number {
  * 按消息/计划/状态真源重新拉取——断线期间漏掉的事件（agent_status、coordinator_plan、
  * task_complete 等）上层状态已过期，必须重拉补齐。events（TraceEvent cap 500）不重拉
  * （无历史接口，属前端短时缓存，断线期间丢失的中间 trace 不影响任务推进，刷新即可）。
+ *
+ * WS-02 优先消费 BusEventContext：若上方有同 groupId 的 provider，直接复用其共享状态
+ * （全应用一条 WS），不重复订阅。命中规则——groupId 相同且非 null。未命中（无 provider /
+ * groupId 不同 / groupId 为 null）则走原自起 WS 分支，**原签名与返回结构零回归**：
+ * 独立调用（无 provider 包裹的组件、或自起 WS 的 provider 自身）行为完全不变。provider
+ * 自身调本 hook 时上方 context 为 null（provider 是树根），天然走自起分支，无递归。
  */
 export function useBusEvent(groupId: string | null) {
+  const ctx = useContext(BusEventContext)
+
+  // WS-02 命中复用：上方 provider 绑定同一非空 groupId → 全应用共享一条 WS，零重复订阅。
+  // 只在 groupId 完全相同且非 null 时复用 —— 不同群组各有自己的事件流，不能错用。
+  if (ctx && ctx.groupId !== null && ctx.groupId === groupId) {
+    return {
+      logs: ctx.logs,
+      statusEvents: ctx.statusEvents,
+      events: ctx.events,
+      agentStatuses: ctx.agentStatuses,
+      plan: ctx.plan,
+      streaming: ctx.streaming,
+    }
+  }
+
   const [logs, setLogs] = useState<LogEntry[]>([])
   const [statusEvents, setStatusEvents] = useState<TaskStatusEvent[]>([])
   const [events, setEvents] = useState<TraceEvent[]>([])
