@@ -157,23 +157,22 @@ export default function AgentPage() {
       const m: Record<string, string> = {}
       skillList.forEach((s: Skill) => { m[s.id] = s.name })
       setSkillNameMap(m)
-      // 拉取每个群组的 agent 状态，合并成 {agentId: status}
-      // （状态接口按群组维度返回，遍历所有群组收集）
-      const { groupApi } = await import('../services/api')
-      const groups = await groupApi.list()
+      // SA-04：单次拉全所有群组所有 agent 状态（GET /api/status 一次返回
+      // {group_id: AgentStatusInfo[]}），合并成 {agentId: status}。替代此前
+      // 「groupApi.list() + 逐群组 systemApi.listStatus(g.id)」的 N+1 轮询——
+      // 群组越多请求数越多，单次拉全消除 N 倍往返。无引擎群组不在返回 dict 中，
+      // 缺失即视为该群组无 agent / 全 offline，不影响合并。
       const statusMap: Record<string, AgentStatus> = {}
-      await Promise.all(
-        groups.map(async (g) => {
-          try {
-            const list = await systemApi.listStatus(g.id)
-            list.forEach((s) => {
-              statusMap[s.id] = (s.status as AgentStatus) || 'offline'
-            })
-          } catch {
-            /* 群组状态拉取失败静默 */
-          }
-        }),
-      )
+      try {
+        const allStatus = await systemApi.listAllStatus()
+        Object.values(allStatus).forEach((list) => {
+          list.forEach((s) => {
+            statusMap[s.id] = (s.status as AgentStatus) || 'offline'
+          })
+        })
+      } catch {
+        /* 状态聚合拉取失败静默（后端未启动 / 无引擎时不影响 agent 列表展示） */
+      }
       setAgentStatusMap(statusMap)
     } catch {
       message.error('获取智能体列表失败')
