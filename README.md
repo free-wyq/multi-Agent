@@ -2,11 +2,11 @@
 
 ![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)
 
-多智能体协作框架，解决软件工程虚拟交付问题。本项目基于 Apache License 2.0 开源。
+多智能体协作桌面平台，面向通用工作场景——创建智能体、配置角色与技能，拉入群组协同完成各类任务。软件交付是其首个垂直场景，亦可扩展到运营、研究、文档、流程自动化等通用工作流。本项目基于 Apache License 2.0 开源。
 
 ## 项目简介
 
-一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协作完成软件交付任务。群主智能体负责意图分析与任务调度，子智能体在框架内自主执行开发、编译、测试等具体工作。
+一个多智能体协作桌面应用：创建智能体、配置角色与技能，拉入群组协同完成各类工作。平台本身面向通用工作场景——自主规划、对话协同、团队分工、定时自动化均可，软件交付只是其中首个垂直场景（开发、编译、测试等），同样可承载运营、研究、文档、流程自动化等场景。群主智能体负责意图分析与任务调度，子智能体在框架内自主执行具体工作。
 
 **核心定位**：桌面端工具，双击即用，零基础设施。
 
@@ -233,7 +233,7 @@ sequenceDiagram
     participant API as FastAPI routes
     participant REG as AgentRegistry
     participant CO as Coordinator StateGraph
-    participant LOOP as Worker create_agent
+    participant WK as Worker create_agent
     participant LLM as OpenAI 兼容端点
     participant BUS as BusManager → WS
 
@@ -251,18 +251,18 @@ sequenceDiagram
     BUS-->>F: WS 推送计划+派工
     F-->>U: 看到协作计划
 
-    REG-->>LOOP: asyncio.Queue 唤醒 worker
-    LOOP->>LLM: create_agent + astream_events
+    REG-->>WK: asyncio.Queue 唤醒 worker
+    WK->>LLM: create_agent + astream_events
     loop ReAct 循环
-        LLM-->>LOOP: AIMessage(tool_calls)
-        LOOP->>TOOLS: 执行框架内工具
-        TOOLS-->>LOOP: 工具结果
-        LOOP->>BUS: emit_task_tool(start/end) + emit_task_think
+        LLM-->>WK: AIMessage(tool_calls)
+        WK->>TOOLS: 执行框架内工具
+        TOOLS-->>WK: 工具结果
+        WK->>BUS: emit_task_tool(start/end) + emit_task_think
         BUS-->>F: WS 推送工具卡片+思考
     end
-    LLM-->>LOOP: 最终文本答案
-    LOOP->>BUS: emit_task_complete + emit_agent_status(idle)
-    LOOP->>CO: push_notify 汇报
+    LLM-->>WK: 最终文本答案
+    WK->>BUS: emit_task_complete + emit_agent_status(idle)
+    WK->>CO: push_notify 汇报
     BUS-->>F: WS 推送完成
     F-->>U: 监控页状态徽标变完成
 
