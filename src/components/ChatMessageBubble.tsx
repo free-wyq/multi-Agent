@@ -182,10 +182,28 @@ export default function ChatMessageBubble({
   const hasReasoning = !!(reasoning && reasoning.length > 0)
   // ST-05（task 18 归并 / task 19 渲染）：worker ReAct 中间思考事件（task_think，data.phase
   // 'thinking'|'final'）。thinkEvents 由父组件（ChatPanel.thinkEventsByTask）按 task_id 过滤后
-  // 传入。task 18 完成归并管道（prop + 守卫）；渲染为气泡内折叠区的实现见 task 19。
+  // 传入。task 18 完成归并管道（prop + 守卫）；本任务（task 19）渲染为气泡内折叠区。
   // hasThinks 让「既无工具也无内容也无思考」的防御兜底放行，使纯思考气泡（content 为空但有
   // think 事件）仍能渲染——流式 worker 可能在 task_token 到达前先流 task_think（thinking phase）。
   const hasThinks = thinkEvents.length > 0
+  // task_think → 折叠块项：每条思考事件一个 Collapse item（按时间序），phase 区分中间推理
+  // （thinking，工具调用前的模型思考片段）与最终答案（final，task_answer）。复用 reasoning 折叠区
+  // 视觉（同色系/Collapse ghost size=small/同 pre 样式）——与协调者思考过程折叠区观感一致，
+  // 用户一眼认出「这是模型的思考」。标题带 phase 标签 + 字符数（worker think 无后端 token 统计，
+  // 用字符数近似，区别于协调者 reasoning 的 token 数——协调者有 stats 推真值，worker 无）。
+  const thinkRows = useMemo(() => {
+    const sorted = [...thinkEvents].sort((a, b) => a.timestamp - b.timestamp)
+    return sorted.map((e) => {
+      const data = (e.data || {}) as Record<string, unknown>
+      const phase = data['phase'] === 'final' ? 'final' : 'thinking'
+      const text = e.content || ''
+      return {
+        key: e.id || `think-${e.timestamp}`,
+        phase,
+        text,
+      }
+    })
+  }, [thinkEvents])
   // 折叠区标题「思考过程（N tokens）」的 token 数：优先用后端 stats 推的真实 reasoning_tokens；
   // 流式前 ~200ms 首个 stats 未到时用 reasoning.length//3 临时估算（与后端 live_reasoning_tokens
   // 同启发式）。用 token 不用字符数——与状态行「↓ N tokens」同单位。
@@ -257,6 +275,59 @@ export default function ChatMessageBubble({
                     </pre>
                   ),
                 }]}
+              />
+            </div>
+          )}
+
+          {/* ST-05（task 19）：worker ReAct 思考折叠区——task_think 事件按 task_id 归并（task 18）
+              后渲染为气泡内折叠块。复用 reasoning 折叠区视觉（同色系 #faad14 + Collapse ghost small +
+              同 pre 样式），让用户一眼认出「这是模型的思考」。每条思考事件一个 item：
+                · phase=thinking（中间推理，工具调用前的模型思考片段）→ 标签「思考」；
+                · phase=final（task_answer 最终答案）→ 标签「结论」。
+              多条独立折叠（Collapse items 多 key，各自展开/收起互不影响）。标题带 phase 标签 +
+              字符数近似（worker think 无后端 token 统计，用字符数；区别于协调者 reasoning 用
+              stats 推的真 token 数）。默认收起，不干扰阅读回复正文——想看模型怎么想的再展开。
+              位置在 reasoning 折叠区之下、工具摘要之上：reasoning 是协调者流式推理（coordReasoning），
+              think 是 worker ReAct 思考（task_think），两者来源不同但视觉同区，按气泡类型择一渲染
+              （worker 气泡无 reasoning、有 think；协调者气泡有 reasoning、无 think）。 */}
+          {hasThinks && (
+            <div style={{ marginBottom: 6 }}>
+              <Collapse
+                size="small"
+                ghost
+                items={thinkRows.map((row) => ({
+                  key: row.key,
+                  label: (
+                    <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <BulbOutlined style={{ fontSize: 12 }} />
+                      {row.phase === 'final' ? '结论' : '思考'}
+                      {row.text ? `（${row.text.length} 字）` : ''}
+                    </span>
+                  ),
+                  children: row.text ? (
+                    <pre
+                      style={{
+                        margin: '6px 0 2px',
+                        padding: '8px 10px',
+                        background: 'rgba(250, 173, 20, 0.06)',
+                        borderLeft: '2px solid #faad14',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        lineHeight: 1.6,
+                        color: '#595959',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        maxHeight: 320,
+                        overflowY: 'auto',
+                        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                      }}
+                    >
+                      {row.text}
+                    </pre>
+                  ) : (
+                    <span style={{ color: '#bfbfbf', fontSize: 12 }}>（空）</span>
+                  ),
+                }))}
               />
             </div>
           )}
