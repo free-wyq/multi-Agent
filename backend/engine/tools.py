@@ -149,6 +149,12 @@ def tools_for_group(group_id: str) -> list:
             try:
                 proc.kill()
             except ProcessLookupError:
+                # race: process already exited between timeout and kill —
+                # nothing to kill, fall through to the timeout message below.
+                # `pass` is correct (not a swallow): ProcessLookupError is the
+                # expected benign outcome of a kill-after-exit race, and there
+                # is nothing to log or recover (B31 错误处理重巡航——已注释说明
+                # 这是有意吞没的良性竞态，非静默吞没).
                 pass
             return f"[timeout after {timeout}s] command: {command}"
 

@@ -9,6 +9,7 @@ directly).
 """
 from __future__ import annotations
 
+import logging
 import pathlib
 import sqlite3
 
@@ -19,6 +20,8 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from config import DATA_DIR
+
+logger = logging.getLogger("multi-agent.database")
 
 # SQLite file lives under the platform data directory (<DATA_DIR>/data.db).
 DB_PATH = pathlib.Path(DATA_DIR) / "data.db"
@@ -41,7 +44,12 @@ def _enable_wal_once() -> None:
         conn.commit()
         conn.close()
     except Exception:
-        pass
+        # best-effort: WAL/foreign_keys are performance/integrity hints, not
+        # gating — create_all will still build a working DB in the default
+        # rollback journal mode. Logged at debug (not exception): import-time
+        # PRAGMA failures are environment/setup issues, surfaced so a missing
+        # WAL isn't a silent degradation (B31 错误处理重巡航——原 `pass` 静默吞没).
+        logger.debug("[database] WAL/foreign_keys PRAGMA failed", exc_info=True)
 
 
 def _ensure_column(conn, table: str, column: str, ddl_type: str) -> None:
@@ -83,8 +91,13 @@ def _migrate_schema() -> None:
         _ensure_column(conn, "llm_providers", "proxy", "VARCHAR NOT NULL DEFAULT ''")
         conn.close()
     except Exception:
-        # database may not exist yet on first import; create_all handles it
-        pass
+        # best-effort additive migration: pre-existing DBs that don't have a
+        # column yet get ALTER'd; a failure here is logged (not swallowed) so
+        # a silently-stuck schema doesn't hide behind `pass`. create_all still
+        # builds the tables for a fresh DB, so this is a graceful degradation
+        # for the upgrade-in-place path, not a fatal error (B31 错误处理重巡航——
+        # 原 `pass` 静默吞没，schema 升级失败不可观测).
+        logger.debug("[database] additive column migration failed", exc_info=True)
 
 
 _enable_wal_once()

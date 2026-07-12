@@ -132,8 +132,16 @@ def remove_job(task_id: str) -> None:
     try:
         _scheduler.remove_job(_job_id(task_id))
     except Exception:
-        # job not present (e.g. disabled at creation) — ignore
-        pass
+        # APScheduler raises JobLookupError when the job was never added
+        # (e.g. task was disabled at creation, so add_job early-returned). This
+        # is the expected benign outcome of remove-on-never-scheduled, so `pass`
+        # is correct — but log at debug so a *real* scheduler failure isn't
+        # silently hidden behind the benign path (B31 错误处理重巡航——原裸
+        # `pass` 不分良性 JobLookupError 与真 scheduler 错误，全静默).
+        logger.debug(
+            "[scheduler] remove_job skipped (job %s not present)", _job_id(task_id),
+            exc_info=True,
+        )
 
 
 async def load_from_store() -> None:

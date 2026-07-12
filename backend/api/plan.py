@@ -29,6 +29,7 @@ sole plan-confirm inbound path, all via the native resume channel
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from fastapi import APIRouter, HTTPException
@@ -38,6 +39,8 @@ from engine.mention import route_plan_resume
 from engine.registry import registry
 from events import emit_coordinator_plan
 from store import crud
+
+logger = logging.getLogger("multi-agent.plan")
 
 router = APIRouter(prefix="/api/groups", tags=["plan"])
 
@@ -131,7 +134,17 @@ async def _read_resident_plan(engine) -> list[dict[str, Any]]:
             return [dict(s) for s in cp_plan]
         return []
     except Exception:
-        # best-effort: degrade to the mirror rather than 500-ing the read
+        # best-effort: degrade to the mirror rather than 500-ing the read.
+        # Logged at debug (not exception): a checkpointer read miss on a
+        # cold/idle/auto_confirm-only coordinator is the documented normal path
+        # (no dispatch_plan checkpointed), so exception-level logging would flag
+        # normal traffic as errors (B31 错误处理重巡航——原裸 `return` 吞掉异常
+        # 不可观测；降级语义保留，补 debug + exc_info 让真 checkpointer 故障可查).
+        logger.debug(
+            "[plan] checkpointer state read failed for group %s — "
+            "degrading to in-memory mirror", getattr(engine, "group_id", "?"),
+            exc_info=True,
+        )
         return [dict(s) for s in engine._dispatch_plan]
 
 

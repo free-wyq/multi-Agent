@@ -133,6 +133,13 @@ def scan_workspace_artifacts(group_id: str) -> dict[str, list[dict]]:
         try:
             rel_parts = entry.resolve().relative_to(root).parts
         except ValueError:
+            # resolve() may follow a symlink that points outside the workspace
+            # root (e.g. a broken/external symlink) → ValueError from
+            # relative_to. Skip such entries rather than abort the whole manifest
+            # scan. NOT a swallow: the entry is filtered out (continue), and the
+            # manifest explicitly skips non-artifact trees — a symlinked-out
+            # entry is not an artifact we can safely report (B31 错误处理重巡航——
+            # 已注释说明 benign 跳过，非静默吞没).
             continue
         if len(rel_parts) > _MAX_DEPTH:
             continue
@@ -147,6 +154,11 @@ def scan_workspace_artifacts(group_id: str) -> dict[str, list[dict]]:
         try:
             st = entry.stat()
         except OSError:
+            # File vanished between rglob() and stat() (TOCTOU race), or is on
+            # an unreadable mount. Skip — the manifest is best-effort and a
+            # vanished file has nothing to report. NOT a swallow: continue
+            # filters the entry, and the race is benign (B31 错误处理重巡航——
+            # 已注释说明 TOCTOU 良性跳过，非静默吞没).
             continue
         rel_posix = "/".join(rel_parts)
         files.append(

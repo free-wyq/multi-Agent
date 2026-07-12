@@ -411,7 +411,17 @@ async def run_agent_loop(
                         )
                         break
             except Exception:
-                pass
+                # state-read recovery best-effort: we already fell through to
+                # the last-tool-output fallback below; a checkpoint read failure
+                # here is not fatal. Logged at debug (not exception): this is a
+                # secondary recovery path inside an already-handled
+                # GraphRecursionError, and exception-level logging would duplicate
+                # the recursion warning above (B31 错误处理重巡航——原 `pass`
+                # 静默吞没，checkpoint 读取失败不可观测).
+                logger.debug(
+                    "[agent_loop %s] checkpoint state read failed during "
+                    "recursion-limit recovery", agent_name, exc_info=True,
+                )
         if not output:
             output = last_tool_output or "(达到最大轮次，无最终输出)"
         return {"success": True, "exit_code": 0, "output": output[:2000]}

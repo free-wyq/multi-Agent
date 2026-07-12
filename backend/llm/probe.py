@@ -117,6 +117,14 @@ async def test_provider(entity: Any) -> dict[str, Any]:
     try:
         data = resp.json()
     except Exception:
+        # Non-JSON body is a legitimate probe result (base_url points at a
+        # non-OpenAI-compatible endpoint) — the return below surfaces it to the
+        # caller as a structured {"ok": False, "error": ...}. NOT a swallow: the
+        # degradation has a user-visible outlet. Catch broad Exception (not
+        # json.JSONDecodeError alone) because some proxies return gzipped/HTML
+        # bodies that raise on parse for other reasons; the outlet is the same.
+        # No log needed: the structured return IS the error report (B31 错误处理
+        # 重巡航——已注释说明降级有出口，非静默吞没).
         return {
             "ok": False,
             "latency_ms": latency_ms,
@@ -215,6 +223,12 @@ async def fetch_models(entity: Any) -> dict[str, Any]:
     try:
         data = resp.json()
     except Exception:
+        # Non-JSON body is a legitimate probe result (base_url points at a
+        # non-OpenAI-compatible endpoint) — the return below surfaces it to the
+        # caller as a structured {"ok": False, "error": ...}. NOT a swallow: the
+        # degradation has a user-visible outlet. Catch broad Exception for the
+        # same reason as test_provider's parse (B31 错误处理重巡航——已注释说明
+        # 降级有出口，非静默吞没).
         return {
             "ok": False,
             "models": [],
@@ -260,6 +274,11 @@ async def fetch_models(entity: Any) -> dict[str, Any]:
         try:
             context_window = int(ctx) if ctx is not None else 0
         except (TypeError, ValueError):
+            # Provider returned a non-numeric context_window (e.g. a string
+            # like "128k"). Degrade to 0 = unknown (UI shows "—"). NOT a swallow:
+            # 0 is the documented sentinel and the UI translates it. Narrow
+            # exception (TypeError+ValueError only) — no broader failure to log
+            # (B31 错误处理重巡航——已注释说明降级有 UI 出口，非静默吞没).
             context_window = 0
         models.append(
             {
