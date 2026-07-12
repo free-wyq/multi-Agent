@@ -400,40 +400,53 @@ export function useBusEvent(groupId: string | null) {
           const phase = String(dd['phase'] || 'streaming')
           const elapsedMs = Number(dd['elapsed_ms'] || 0)
           const tokens = Number(dd['tokens'] || 0)
-          if (phase === 'done') {
-            // 流式完成：清空流式缓冲 + 推理缓冲 + 统计，让持久化 agent_reply 接管气泡。
-            // （agent_reply 由 _unified_reply → emit_message_added 落地，毫秒级。）
-            const rid = replyId
-            setCoordStreaming((prev) => {
-              if (!(rid in prev)) return prev
-              const next = { ...prev }
-              delete next[rid]
-              return next
-            })
-            setCoordReasoning((prev) => {
-              if (!(rid in prev)) return prev
-              const next = { ...prev }
-              delete next[rid]
-              return next
-            })
-            setCoordStats((prev) => {
-              if (!(rid in prev)) return prev
-              const next = { ...prev }
-              delete next[rid]
-              return next
-            })
-          } else {
-            const model =
-              typeof dd['model'] === 'string' ? (dd['model'] as string) : undefined
-            const reasoningTokensNum = Number(dd['reasoning_tokens'] || 0)
-            const reasoning_tokens = Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0
-              ? reasoningTokensNum
-              : undefined
-            setCoordStats((prev) => ({
-              ...prev,
-              [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model, reasoning_tokens },
-            }))
-          }
+          const model =
+            typeof dd['model'] === 'string' ? (dd['model'] as string) : undefined
+          const reasoningTokensNum = Number(dd['reasoning_tokens'] || 0)
+          const reasoning_tokens = Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0
+            ? reasoningTokensNum
+            : undefined
+          // 只更新统计；phase=done 不再清 coordStreaming/coordReasoning/coordStats——
+          // 改由持久化 agent_reply 落地时清（见下方 d.type==='agent_reply' 分支）。
+          // 原 stats(done) 一到就清，但 agent_reply 几十毫秒后才到 → 中间空泡间隙，
+          // 且多轮连发时下一轮的 stats(streaming,0 tokens) 趁虚混进空泡 → 「0 tokens 思考中」
+          // 幽灵气泡 + 回复乱序。改以 agent_reply 落地为退场锚点：定稿气泡此刻同时入
+          // chatMessages，流式气泡无缝交接，无空泡无乱序。
+          // phase=done 仍写入 coordStats（isStreaming=phase!=='done' → false，气泡停流式光标
+          // 显示「完成」，但内容/思考仍可见，等 agent_reply 落地才退场）。
+          setCoordStats((prev) => ({
+            ...prev,
+            [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model, reasoning_tokens },
+          }))
+        }
+      }
+
+      // → 持久化 agent_reply 落地：清该 reply_id 的流式缓冲（协调者 + worker 单聊统一）。
+      // 流式气泡退场，让此刻落地的定稿气泡接管。agent_reply.data.reply_id 由后端 _stream_stats
+      // 落盘（协调者 node_chat + worker node_chat 同形），作退场锚点比 stats(done) 更准——
+      // 定稿气泡此刻同时入 chatMessages（logs effect），无缝交接。worker 单聊原靠
+      // finalizedBubbles replied 判定 + coordStreaming 残留无害兜底，现统一显式清，更干净。
+      if (d.type === 'agent_reply' && d.data && typeof d.data === 'object') {
+        const rid = (d.data as Record<string, unknown>).reply_id
+        if (typeof rid === 'string' && rid) {
+          setCoordStreaming((prev) => {
+            if (!(rid in prev)) return prev
+            const next = { ...prev }
+            delete next[rid]
+            return next
+          })
+          setCoordReasoning((prev) => {
+            if (!(rid in prev)) return prev
+            const next = { ...prev }
+            delete next[rid]
+            return next
+          })
+          setCoordStats((prev) => {
+            if (!(rid in prev)) return prev
+            const next = { ...prev }
+            delete next[rid]
+            return next
+          })
         }
       }
     }, handleReconnect).then((fn) => {

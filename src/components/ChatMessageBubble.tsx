@@ -238,12 +238,12 @@ export default function ChatMessageBubble({
 
   // 思考折叠区主动展开/收起态：用户要求「思考开始时持续流式，思考结束时主动关闭，然后
   // 流式输出正文」——有呼吸有交互才真实。
-  //  · 思考活跃期（isStreaming 且有 reasoning 且正文尚未开始流出）→ 自动展开，让用户看见
+  //  · 流式思考活跃期（isStreaming 且有 reasoning 且正文尚未开始流出）→ 自动展开，让用户看见
   //    思考逐字流出（coordinator_reasoning / worker reasoning_delta 实时累加进 reasoning prop）。
   //  · 思考结束（正文 content 开始流出 / 流式结束 isStreaming=false）→ 主动收起，让位给正文。
   //
-  // 「思考结束」的精确信号 = 正文开始流（hasContent）。推理模型（DeepSeek/o1 类）先流
-  // reasoning_content、再流可见 content——reasoning 阶段 content 为空（思考中），content 一旦
+  // 「思考结束」的精确信号（仅流式期判定）= 正文开始流（hasContent）。推理模型（DeepSeek/o1 类）
+  // 先流 reasoning_content、再流可见 content——reasoning 阶段 content 为空（思考中），content 一旦
   // 非空即标志思考结束、正文开始 → 收起。reasoning 本身不清空（落盘用），故不能靠「reasoning
   // 是否存在」判定，要靠「正文是否已开始」。非推理模型无 reasoning → reasoningActive 恒 false →
   // 从不展开思考区（无思考可展，正确）。
@@ -255,13 +255,15 @@ export default function ChatMessageBubble({
   useEffect(() => {
     // reasoningActive 变化或新 reasoning delta 到达时重算展开态。
     if (!reasoningActive) {
-      setReasoningExpanded(false)
+      // 非流式期（定稿气泡 isStreaming=false）不清空用户手动展开——让定稿气泡手动展开的
+      // 历史思考保持展开。流式期思考刚结束（reasoningActive=false）才自动收起。
+      if (isStreaming) setReasoningExpanded(false)
       return
     }
     // 用户在最近 5s 内手动 toggle 过 → 尊重用户意图，不自动覆盖
     if (Date.now() - userToggledAt < 5000) return
     setReasoningExpanded(true)
-  }, [reasoning, reasoningActive, userToggledAt])
+  }, [reasoning, reasoningActive, userToggledAt, isStreaming])
   const toggleReasoning = () => {
     setUserToggledAt(Date.now())
     setReasoningExpanded((v) => !v)

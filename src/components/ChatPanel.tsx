@@ -970,15 +970,14 @@ export default function ChatPanel({
                     <SenderName id={msg.sender_id} agents={agents} />
                   </div>
                   <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
-                    {/* 定稿协调者回复的推理折叠区：读持久化 agent_reply.data.reasoning（推理模型
-                        reasoning_content 全文，_stream_stats 落盘）。antd Collapse 默认收起，
-                        用户点「思考过程」展开看模型怎么想的。非推理模型无 reasoning key → 不渲染。
-                        标题「思考过程（N tokens）」用落盘的 reasoning_tokens（与状态行同单位，不用字符数）。 */}
+                    {/* 定稿协调者回复的推理折叠区：读持久化 agent_reply.data.reasoning。
+                        复用 ChatMessageBubble（与流式期同一组件，受控展开逻辑统一）——
+                        不再内联一份非受控 Collapse（原导致定稿气泡思考区默认收起且不接 reasoningExpanded，
+                        与流式期行为不一致）。reasoningTokens 传落盘的真值；用户可手动展开看历史思考。 */}
                     {(() => {
                       const reasoning = extractCoordReasoning(msg.data)
                       if (!reasoning) return null
                       const rt = extractCoordStats(msg.data)?.reasoning_tokens
-                      const reasoningTokenLabel = rt && rt > 0 ? rt : Math.max(1, Math.ceil(reasoning.length / 3))
                       return (
                         <div style={{ marginBottom: 6 }}>
                           <Collapse
@@ -989,7 +988,7 @@ export default function ChatPanel({
                               label: (
                                 <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                   <BulbOutlined style={{ fontSize: 12 }} />
-                                  思考过程（{reasoningTokenLabel} tokens）
+                                  思考过程（{(rt && rt > 0 ? rt : Math.max(1, Math.ceil(reasoning.length / 3)))} tokens）
                                 </span>
                               ),
                               children: (
