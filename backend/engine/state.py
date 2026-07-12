@@ -72,7 +72,7 @@ class CoordinatorState(TypedDict, total=False):
 
     # decision output
     reply_content: str
-    action_taken: str  # chat | dispatch | ask | continue | handle_reply | summarize | dispatch_next | wait_confirm | confirm_dispatch
+    action_taken: str  # chat | dispatch | ask | continue | handle_reply | summarize | dispatch_next | confirm_dispatch
     # per-turn streaming run-stats carried from node_llm_decide to node_chat:
     # {reply_id, elapsed_ms, tokens}. node_chat stamps it onto the persisted
     # agent_reply's `data` so the finalized bubble keeps rendering the
