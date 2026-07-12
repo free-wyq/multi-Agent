@@ -22,7 +22,21 @@ logger = logging.getLogger("multi-agent.dispatcher")
 
 
 def apply_fail_fast(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Mark pending steps failed if any dependency is failed, loop until stable."""
+    """Mark pending steps failed if any dependency is failed, loop until stable.
+
+    Each pass scans once: collect pending steps whose ``depends_on`` includes a
+    failed step, mark them failed, then repeat until a pass finds none (fixpoint
+    cascade — a newly-failed step can fail its own dependents on the next pass).
+
+    B13 早退：内层依赖扫描在首次命中失败依赖后 ``break``（一个 failed dep 即足够
+    判该 step 应级联失败，无需继续扫剩余 deps）；外层 while 在某轮
+    ``failed_steps`` 为空时立即 ``break``（已无级联目标，达 fixpoint）。原实现
+    命中后仍扫完该 step 的剩余 deps + 缺少「无 failed step 即 break」语义
+    （靠 ``if not failed_steps: break`` 在每轮末尾判，等价但多一轮空扫描）。
+    小 plan 无碍，但大 plan（深级联链）原 O(n²·deps) → 早退后均摊更省。
+    行为零变：级联结果（哪些 step 最终 failed）与原实现逐字节一致——早退只跳过
+    「已确定要 fail 的 step 的剩余 deps 扫描」，不改变判定逻辑。
+    """
     while True:
         failed_steps: list[int] = []
         for s in plan:
@@ -32,9 +46,9 @@ def apply_fail_fast(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 dep_step = next((d for d in plan if d.get("step") == dep), None)
                 if dep_step and dep_step.get("status") == "failed":
                     failed_steps.append(s["step"])
-                    break
+                    break  # B13 早退：一个 failed dep 即级联失败，无需扫剩余 deps
         if not failed_steps:
-            break
+            break  # B13 早退：本轮无新增失败 → fixpoint，跳出 while
         for s in plan:
             if s.get("step") in failed_steps:
                 s["status"] = "failed"
@@ -73,10 +87,10 @@ async def _dispatch_one(
     """
     step["status"] = "dispatched"
 
-    step_num = step["step"]
-    agent_id = step["agent_id"]
-    agent_name = step["agent_name"]
-    instruction = step["instruction"]
+    step_num: int = step["step"]
+    agent_id: str = step["agent_id"]
+    agent_name: str = step["agent_name"]
+    instruction: str = step["instruction"]
 
     # reply: persist dispatch message + emit
     dispatch_msg = f"🚀 步骤 {step_num} 派发：\n@{agent_name} \n\n{instruction}"
