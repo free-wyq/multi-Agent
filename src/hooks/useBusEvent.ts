@@ -149,6 +149,25 @@ export function useBusEvent(groupId: string | null) {
     })
   }, [])
 
+  // events 批量 flush（B16）：task_token 流式高频（kimi 200 字实测 820 token），原
+  // setEvents((prev) => [...prev.slice(-499), ev]) 每 token O(n) 切片 + 触发
+  // WorkerTrace/LeaderPanel/ChatPanel 重渲染风暴。镜像 reasoningBufRef 模式：ev 攒进
+  // ref，~50ms flush 一次到 state，把 ~800 次 setEvents 压到 ~20 次。cap 500 在 flush
+  // 时统一 enforce（prev.concat(buf) 超 500 取末尾 500），ref 不触发渲染，flush 才触发。
+  const eventsBufRef = useRef<TraceEvent[]>([])
+  const eventsFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushEvents = useCallback(() => {
+    eventsFlushTimer.current = null
+    const buf = eventsBufRef.current
+    if (buf.length === 0) return
+    eventsBufRef.current = []
+    setEvents((prev) => {
+      const merged = prev.concat(buf)
+      if (merged.length <= 500) return merged
+      return merged.slice(merged.length - 500)
+    })
+  }, [])
+
   // 播种 agent status
   useEffect(() => {
     if (!groupId) {
@@ -261,7 +280,15 @@ export function useBusEvent(groupId: string | null) {
         data: d.data,
         timestamp: ts,
       }
-      setEvents((prev) => [...prev.slice(-499), ev])
+      // B16 批量 flush：ev 攒进 ref，~50ms flush 一次到 state（避免高频流式时每 token
+      // O(n) slice + setState 风暴，镜像 reasoningBufRef 模式）。最后一条 ev 后定时器
+      // 兜底 flush，effect 清理时也 flush，不丢事件。
+      eventsBufRef.current.push(ev)
+      if (!eventsFlushTimer.current) {
+        eventsFlushTimer.current = window.setTimeout(() => {
+          flushEvents()
+        }, 50)
+      }
 
       // → logs (GroupPage / LogPanel 依赖 content truthy)
       // 复制原始 type 到 LogEntry.type，供 ChatPanel 按类型过滤——只 agent_reply/
@@ -517,8 +544,16 @@ export function useBusEvent(groupId: string | null) {
       if (reasoningBufRef.current.length > 0) {
         flushReasoning()
       }
+      // B16 events 批量 flush 兜底：切群/卸载前把缓冲残留 flush，防丢事件（最后几条 ev 可能还在 ref 没到 state）
+      if (eventsFlushTimer.current) {
+        clearTimeout(eventsFlushTimer.current)
+        eventsFlushTimer.current = null
+      }
+      if (eventsBufRef.current.length > 0) {
+        flushEvents()
+      }
     }
-  }, [groupId, handleReconnect, refreshPlan, flushReasoning])
+  }, [groupId, handleReconnect, refreshPlan, flushReasoning, flushEvents])
 
   return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, refreshPlan }
 }
