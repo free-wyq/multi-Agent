@@ -1,5 +1,5 @@
 import { useMemo, useState } from 'react'
-import { Tag } from 'antd'
+import { Collapse, Tag } from 'antd'
 import { CaretRightOutlined, ToolOutlined, BulbOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import './ChatMessageBubble.css'
@@ -118,8 +118,6 @@ export default function ChatMessageBubble({
 }: ChatMessageBubbleProps) {
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
-  // 推理过程折叠：默认收起（用户自行选择展开看模型思维链）。
-  const [reasoningOpen, setReasoningOpen] = useState(false)
 
   // toolEvents → 按时间序的摘要行（每条 task_tool 一行）。
   // 先按时间序排，再按工具名 LIFO 配对 start/end 算耗时：end 弹出最近同名未配对 start，
@@ -190,32 +188,45 @@ export default function ChatMessageBubble({
             .join(' ')}
         >
           {/* 推理过程折叠区（气泡顶部，工具摘要之上）—— 推理模型在可见 content 前流出的内部思维链。
-              默认收起：用户点「思考过程」展开看模型怎么想的，不看就一行不占空间。
-              流式中也能展开（reasoning 实时累加），收起时仅显示标题行 + 当前推理字数。 */}
+              用 antd Collapse（项目约定：有现成开源组件就不手写），默认收起；展开后显示完整推理
+              文本（流式期来自 coordReasoning 实时累加，定稿后来自持久化 data.reasoning）。
+              Collapse 自管展开态，无需本地 state。 */}
           {hasReasoning && (
-            <div className="chat-reasoning-block">
-              <div
-                className="chat-reasoning-toggle"
-                onClick={() => setReasoningOpen((o) => !o)}
-                title={reasoningOpen ? '点击收起思考过程' : '点击展开思考过程'}
-              >
-                <BulbOutlined style={{ fontSize: 12, color: '#faad14' }} />
-                <span className="chat-reasoning-label">
-                  思考过程
-                  <span className="chat-reasoning-count">（{reasoning!.length} 字）</span>
-                </span>
-                <CaretRightOutlined
-                  style={{
-                    fontSize: 10,
-                    transition: 'transform 0.2s',
-                    transform: reasoningOpen ? 'rotate(90deg)' : 'rotate(0deg)',
-                    marginLeft: 'auto',
-                  }}
-                />
-              </div>
-              {reasoningOpen && (
-                <pre className="chat-reasoning-content">{reasoning}</pre>
-              )}
+            <div style={{ marginBottom: 6 }}>
+              <Collapse
+                size="small"
+                ghost
+                items={[{
+                  key: 'reasoning',
+                  label: (
+                    <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      <BulbOutlined style={{ fontSize: 12 }} />
+                      思考过程（{reasoning!.length} 字）
+                    </span>
+                  ),
+                  children: (
+                    <pre
+                      style={{
+                        margin: '6px 0 2px',
+                        padding: '8px 10px',
+                        background: 'rgba(250, 173, 20, 0.06)',
+                        borderLeft: '2px solid #faad14',
+                        borderRadius: 4,
+                        fontSize: 12,
+                        lineHeight: 1.6,
+                        color: '#595959',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        maxHeight: 320,
+                        overflowY: 'auto',
+                        fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                      }}
+                    >
+                      {reasoning}
+                    </pre>
+                  ),
+                }]}
+              />
             </div>
           )}
 

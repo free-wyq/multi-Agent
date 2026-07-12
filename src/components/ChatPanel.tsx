@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
-import { RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
+import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
 import {
   messageApi,
   taskApi,
@@ -91,6 +91,14 @@ function extractCoordStats(
   const reasoning_tokens =
     Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0 ? reasoningTokensNum : undefined
   return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0, model, reasoning_tokens }
+}
+
+/** 取持久化协调者回复的推理文本（agent_reply.data.reasoning，推理模型落盘的 reasoning_content 全文）。
+ *  定稿气泡的折叠区据此展开——流式期靠 coordReasoning 实时累加，phase=done 清空后只能靠落盘文本。 */
+function extractCoordReasoning(data: Record<string, unknown> | null): string | undefined {
+  if (!data) return undefined
+  const r = data.reasoning
+  return typeof r === 'string' && r ? r : undefined
 }
 
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
@@ -768,6 +776,49 @@ export default function ChatPanel({
                     <SenderName id={msg.sender_id} agents={agents} />
                   </div>
                   <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
+                    {/* 定稿协调者回复的推理折叠区：读持久化 agent_reply.data.reasoning（推理模型
+                        reasoning_content 全文，_stream_stats 落盘）。antd Collapse 默认收起，
+                        用户点「思考过程」展开看模型怎么想的。非推理模型无 reasoning key → 不渲染。 */}
+                    {(() => {
+                      const reasoning = extractCoordReasoning(msg.data)
+                      if (!reasoning) return null
+                      return (
+                        <div style={{ marginBottom: 6 }}>
+                          <Collapse
+                            size="small"
+                            ghost
+                            items={[{
+                              key: 'reasoning',
+                              label: (
+                                <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                                  <BulbOutlined style={{ fontSize: 12 }} />
+                                  思考过程（{reasoning.length} 字）
+                                </span>
+                              ),
+                              children: (
+                                <pre style={{
+                                  margin: '6px 0 2px',
+                                  padding: '8px 10px',
+                                  background: 'rgba(250, 173, 20, 0.06)',
+                                  borderLeft: '2px solid #faad14',
+                                  borderRadius: 4,
+                                  fontSize: 12,
+                                  lineHeight: 1.6,
+                                  color: '#595959',
+                                  whiteSpace: 'pre-wrap',
+                                  wordBreak: 'break-word',
+                                  maxHeight: 320,
+                                  overflowY: 'auto',
+                                  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+                                }}>
+                                  {reasoning}
+                                </pre>
+                              ),
+                            }]}
+                          />
+                        </div>
+                      )
+                    })()}
                     {isUser ? (
                       msg.content
                     ) : (

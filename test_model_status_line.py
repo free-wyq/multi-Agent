@@ -225,6 +225,12 @@ async def main() -> int:
             errs.append(f"agent_reply.data.model={rd['model']!r} ≠ 活跃 config {expected_model!r}")
         if "reasoning_tokens" not in rd:
             errs.append("agent_reply 事件 data 缺 reasoning_tokens（定稿气泡无法显示推理 token）")
+        # 校验 reasoning 文本落盘（推理模型：reasoning 非空字符串；非推理模型：无此 key 或空）
+        if reasoning_tokens_values and reasoning_tokens_values[-1] > 0:
+            if "reasoning" not in rd or not isinstance(rd.get("reasoning"), str) or not rd["reasoning"]:
+                errs.append(
+                    f"推理模型 reasoning_tokens>0 但 agent_reply.data 缺/空 reasoning 文本（val={rd.get('reasoning')!r}）"
+                )
     else:
         errs.append("未收到协调者 agent_reply 事件（chat 回复未落地）")
 
@@ -240,6 +246,13 @@ async def main() -> int:
                 errs.append(f"落盘 data.model={pd['model']!r} ≠ 活跃 config {expected_model!r}")
             if "reasoning_tokens" not in pd:
                 errs.append("落盘 agent_reply.data 缺 reasoning_tokens（定稿气泡无法显示推理 token）")
+            # 校验落盘 reasoning 文本（推理模型非空字符串——定稿气泡折叠区据此展开）
+            if reasoning_tokens_values and reasoning_tokens_values[-1] > 0:
+                rt = pd.get("reasoning")
+                if not isinstance(rt, str) or not rt:
+                    errs.append(f"推理模型落盘 data.reasoning 缺/空（val={rt!r}，定稿气泡无法展开推理）")
+                else:
+                    print(f"[persist] 落盘 reasoning 文本长度={len(rt)} 字（定稿折叠区可展开）")
         else:
             errs.append(f"未在 /api/messages 找到 reply_id={reply_id} 的持久化回复")
 

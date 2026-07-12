@@ -605,7 +605,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
 
     config = get_llm_config()
     try:
-        reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens = await _stream_coordinator_decision(
+        reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = await _stream_coordinator_decision(
             config,
             [
                 {"role": "system", "content": COORDINATOR_SYSTEM},
@@ -622,7 +622,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "content": "抱歉，我这边理解有点困难，能再说一次吗？",
             "plan": [],
         }
-        reply_id, tokens, elapsed_ms, model, reasoning_tokens = "", 0, 0, "", 0
+        reply_id, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = "", 0, 0, "", 0, ""
 
     # Stamp the streaming run-stats onto the chat/ask/continue action so node_chat
     # persists them onto the agent_reply's data — the finalized bubble then keeps
@@ -638,10 +638,11 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
     # text, so the stream's tokens/elapsed wouldn't match the persisted content.
     #
     # reasoning_tokens is persisted so the finalized bubble can keep showing
-    # "含 N 推理" + offer the reasoning panel even after the streaming bubble
-    # retires (the reasoning text itself is NOT persisted here — it was streamed
-    # live via coordinator_reasoning events; the finalized bubble shows stats
-    # only, the reasoning panel is a streaming-only affordance).
+    # "含 N 推理" after the streaming bubble retires. reasoning_text (the full
+    # reasoning_content) is also persisted onto data["reasoning"] so the
+    # finalized bubble's collapsible panel can expand the reasoning — otherwise
+    # phase="done" clears the live coordReasoning buffer and the user could
+    # never expand reasoning on a historical/just-finalized bubble.
     #
     # Pre-fix this only stamped "chat", so ask/continue replies (clarifying
     # questions, continuations) lost their status line on finalization — the
@@ -655,6 +656,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "tokens": tokens,
             "model": model,
             "reasoning_tokens": reasoning_tokens,
+            "reasoning": reasoning_text,
         }
 
     await emit_coordinator_think(
@@ -1086,7 +1088,7 @@ async def _stream_coordinator_decision(
     emitted ~every 200ms during the stream and once more at the end with
     ``phase="done"`` and the real ``completion_tokens`` / ``reasoning_tokens``.
 
-    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens)``:
+    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text)``:
 
     - ``reply_id`` — the UUID per-turn streaming key (so the caller can stamp
       it onto the persisted agent_reply's ``data`` and the frontend can keep the
@@ -1105,11 +1107,19 @@ async def _stream_coordinator_decision(
       persisted data so the status line can show "含 N 推理" and the bubble
       can render a reasoning panel — otherwise a 5-word reply showing 148
       tokens looks fake when 133 were invisible reasoning.
+    - ``reasoning_text`` — the full assembled ``reasoning_content`` (empty for
+      non-reasoning models). Persisted onto ``agent_reply.data["reasoning"]``
+      so the finalized bubble's collapsible panel can expand the reasoning even
+      after the live ``coordReasoning`` buffer is cleared on ``phase="done"``.
     """
     reply_id = uuid.uuid4().hex
     model = str(config.get("model") or "")
     extractor = _ContentExtractor()
     raw_parts: list[str] = []
+    # reasoning_content 全文累积——落盘到 agent_reply.data.reasoning，定稿气泡的
+    # 折叠区据此展开（流式期靠 coordinator_reasoning 事件，定稿后靠持久化文本，
+    # 否则 phase=done 清空 coordReasoning 后用户无法再展开历史气泡的推理）。
+    reasoning_parts: list[str] = []
     final_tokens = 0
     final_reasoning_tokens = 0
     # throttle stats emits to ~200ms; Date.now()/time is fine here (engine side)
@@ -1125,6 +1135,7 @@ async def _stream_coordinator_decision(
     async for content_delta, reasoning_delta, usage, reasoning_usage in chat_completion_stream(config, messages):
         if reasoning_delta:
             live_reasoning_tokens += max(1, len(reasoning_delta) // 3)
+            reasoning_parts.append(reasoning_delta)
             try:
                 await emit_coordinator_reasoning(
                     group_id, coordinator_id, reply_id, reasoning_delta
@@ -1162,6 +1173,7 @@ async def _stream_coordinator_decision(
             last_stats_ts = now
 
     raw_full = "".join(raw_parts)
+    reasoning_text = "".join(reasoning_parts)
     elapsed_ms = int((time.monotonic() - start) * 1000)
     real_tokens = final_tokens if final_tokens else live_tokens
     real_reasoning_tokens = (
@@ -1180,7 +1192,7 @@ async def _stream_coordinator_decision(
         )
     except Exception:
         logger.exception("[coordinator] failed to emit final stats")
-    return reply_id, raw_full, real_tokens, elapsed_ms, model, real_reasoning_tokens
+    return reply_id, raw_full, real_tokens, elapsed_ms, model, real_reasoning_tokens, reasoning_text
 
 
 def _parse_coordinator_decision(raw: str) -> dict:
