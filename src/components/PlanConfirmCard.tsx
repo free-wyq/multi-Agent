@@ -7,6 +7,9 @@ interface PlanConfirmCardProps {
   groupId: string
   /** 来自 useBusEvent 的 coordinator_plan 事件（由父组件传入，避免重复订阅 WS）。 */
   plan: PlanStep[]
+  /** 主动从真源拉取驻留计划（PlanConfirmCard 在 409 时静默刷新，对齐后端 _dispatch_plan）。
+   *  可选：父组件从 BusEventContext.refreshPlan 透传；未传则 409 仍走原 message.error。 */
+  refreshPlan?: () => Promise<void>
 }
 
 /** 计划步骤状态 → 徽标（与 LeaderPanel 对齐，保持视觉一致） */
@@ -40,7 +43,7 @@ interface EditStep {
  * 卡片本身不重复订阅 WS，仅负责展示与触发动作；动作完成后 WS 会推送新的
  * coordinator_plan / task_dispatch 事件，父组件 plan 状态自动刷新，卡片随之重渲染。
  */
-export default function PlanConfirmCard({ groupId, plan }: PlanConfirmCardProps) {
+export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConfirmCardProps) {
   const [confirming, setConfirming] = useState(false)
   const [directing, setDirecting] = useState(false)
   const [modifyOpen, setModifyOpen] = useState(false)
@@ -59,7 +62,17 @@ export default function PlanConfirmCard({ groupId, plan }: PlanConfirmCardProps)
       await planApi.confirm(groupId)
       message.success('已确认，计划开始派发')
     } catch (err) {
-      message.error(`确认失败：${err instanceof Error ? err.message : String(err)}`)
+      // 409 静默刷新：后端返回 409 "no pending plan to confirm" 通常意味着
+      // 计划已派发但前端 plan state 停在首次 announce 的旧状态（dispatch_next
+      // 的 coordinator_plan 事件漏收 / WS 未断连不触发 onReconnect）。此时不弹
+      // 错误，改为主动从真源拉取驻留计划——卡片会因无 pending 自动消失或同步
+      // 真实 step status；非 409 错误仍走原 message.error。
+      const msg = err instanceof Error ? err.message : String(err)
+      if (msg.includes('409')) {
+        await refreshPlan?.()
+      } else {
+        message.error(`确认失败：${msg}`)
+      }
     } finally {
       setConfirming(false)
     }

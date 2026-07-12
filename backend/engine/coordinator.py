@@ -736,6 +736,17 @@ async def node_dispatch_next(state: CoordinatorState) -> dict:
             return {"action_taken": "summarize", "dispatch_plan": plan}
         return {"dispatch_plan": plan}
 
+    # Fan-out mutated step status to "dispatched" — re-emit the plan so the
+    # frontend's resident PlanStep[] (driven only by coordinator_plan WS
+    # events) reflects the new statuses. Without this emit the plan card
+    # stays on the first announce (all steps "pending"), so the user still
+    # sees a confirmable plan and a second /plan/confirm hits 409
+    # "no pending plan to confirm". This is purely an emit inside an existing
+    # LangGraph node — no topology/routing change.
+    try:
+        await emit_coordinator_plan(group_id, coordinator_id, plan)
+    except Exception:
+        logger.exception("[coordinator] failed to emit plan after dispatch_next")
     return {"dispatch_plan": plan}
 
 
@@ -752,6 +763,15 @@ async def node_summarize(state: CoordinatorState) -> dict:
         state["agent_id"],
         f"🎉 全部完成！协作结果汇总：\n{summary}",
     )
+    # Emit an empty plan so the frontend drops the resident plan card before
+    # the engine clears its in-memory _dispatch_plan. Mirrors reset_session
+    # (backend/api/groups.py) which emits emit_coordinator_plan(g, c, []) on
+    # wipe — without this emit the card lingers with stale pending steps and
+    # a stray confirm could 409.
+    try:
+        await emit_coordinator_plan(state["group_id"], state["agent_id"], [])
+    except Exception:
+        logger.exception("[coordinator] failed to emit empty plan on summarize")
     # clear the plan
     return {"dispatch_plan": []}
 

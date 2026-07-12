@@ -211,7 +211,7 @@ export default function ChatPanel({
   onOpenInfo,
   hideHeader,
 }: ChatPanelProps) {
-  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordStats } = useBusEventContext()
+  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordStats, refreshPlan } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -683,7 +683,7 @@ export default function ChatPanel({
           父容器剩余高度，overflowY:auto 才真正在列表内部滚动，输入框（flexShrink:0）钉底。 */}
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' }}>
         {showPlanCard && plan && chatGroupId && (
-          <PlanConfirmCard groupId={chatGroupId} plan={plan} />
+          <PlanConfirmCard groupId={chatGroupId} plan={plan} refreshPlan={refreshPlan} />
         )}
         {!chatGroupId ? (
           <div style={{ textAlign: 'center', padding: 60 }}>

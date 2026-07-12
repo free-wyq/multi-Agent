@@ -98,6 +98,7 @@ export function useBusEvent(groupId: string | null) {
       streaming: ctx.streaming,
       coordStreaming: ctx.coordStreaming,
       coordStats: ctx.coordStats,
+      refreshPlan: ctx.refreshPlan,
     }
   }
 
@@ -142,6 +143,20 @@ export function useBusEvent(groupId: string | null) {
   // - plan: 重读 coordinator 引擎 _dispatch_plan（无变更则保持，有 pending 则卡片复现）
   // - agentStatuses: 重读 /api/status 重新播种（断线期间状态可能已 idle→executing→idle）
   // useCallback 使引用稳定，仅在 groupId 变化时换实例，避免 WS effect 重订阅。
+
+  // refreshPlan: 主动从真源拉取驻留计划，对齐后端 _dispatch_plan。
+  // 抽出于 handleReconnect + 切群首拉 + PlanConfirmCard 409 静默刷新三处复用。
+  // plan 为空（已派发完/summarize/reset）时设 null，让 PlanConfirmCard 自动隐藏。
+  const refreshPlan = useCallback(async () => {
+    if (!groupId) return
+    try {
+      const resp = await planApi.getPlan(groupId)
+      setPlan(resp.plan && resp.plan.length > 0 ? resp.plan : null)
+    } catch {
+      /* 静默 */
+    }
+  }, [groupId])
+
   const handleReconnect = useCallback(() => {
     if (!groupId) return
 
@@ -156,12 +171,7 @@ export function useBusEvent(groupId: string | null) {
       .catch(() => { /* 静默 */ })
 
     // 重拉驻留计划（coordinator_plan 事件可能漏收）
-    planApi
-      .getPlan(groupId)
-      .then((resp) => {
-        setPlan(resp.plan && resp.plan.length > 0 ? resp.plan : null)
-      })
-      .catch(() => { /* 静默 */ })
+    void refreshPlan()
 
     // 重拉消息历史：把全量历史重新灌入 logs（供 GroupPage 聊天列表复原）。
     // 按 created_at 升序返回的最近 limit 条，重建 LogEntry（id 去重保留）。
@@ -189,6 +199,13 @@ export function useBusEvent(groupId: string | null) {
 
   useEffect(() => {
     if (!groupId) return
+
+    // 切群首拉：清旧群残留 plan，再主动从真源拉新群当前驻留计划。
+    // 覆盖两个缺口：①引擎重启但 WS 未断连（onReconnect 不触发，真源已变但
+    // plan state 停在旧群）；②切群首连不走 onReconnect（首次连接不算「重连」）。
+    // 不影响后续 onBusEvent 订阅逻辑。
+    setPlan(null)
+    void refreshPlan()
 
     let unlisten: (() => void) | null = null
     let cancelled = false
@@ -370,7 +387,7 @@ export function useBusEvent(groupId: string | null) {
       cancelled = true
       if (unlisten) unlisten()
     }
-  }, [groupId, handleReconnect])
+  }, [groupId, handleReconnect, refreshPlan])
 
-  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordStats }
+  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordStats, refreshPlan }
 }

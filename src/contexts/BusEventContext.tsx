@@ -41,6 +41,8 @@ export interface BusEventContextValue {
   coordStreaming: Record<string, string>
   /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase }（coordinator_stats 节流更新）。 */
   coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string }>
+  /** 主动从真源拉取驻留计划（对齐后端 _dispatch_plan）。PlanConfirmCard 409 静默刷新、切群首拉复用。 */
+  refreshPlan: () => Promise<void>
 }
 
 /**
@@ -81,6 +83,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       streaming: bus.streaming,
       coordStreaming: bus.coordStreaming,
       coordStats: bus.coordStats,
+      refreshPlan: bus.refreshPlan,
     }),
     [
       groupId,
@@ -93,6 +96,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       bus.streaming,
       bus.coordStreaming,
       bus.coordStats,
+      bus.refreshPlan,
     ],
   )
 
