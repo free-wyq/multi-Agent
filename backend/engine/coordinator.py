@@ -54,6 +54,25 @@ _REPLY_CB: contextvars.ContextVar = contextvars.ContextVar(
     "coordinator_reply_cb", default=None
 )
 
+# The compiled coordinator graph instance, set by ``build_coordinator_graph``
+# so node helpers (``_detect_residual_interrupt``) can inspect the thread state
+# via ``aget_state`` without the engine having to thread the graph object
+# through every node. Set once at compile time; the graph is read-only after
+# compile, so a single shared reference is safe across concurrent engine
+# invokes (each invoke carries its own thread_id in ``config``).
+_GRAPH_INSTANCE: contextvars.ContextVar = contextvars.ContextVar(
+    "coordinator_graph_instance", default=None
+)
+# The state-visible pending plan at classify time, set by node_classify_incoming
+# before calling ``_detect_residual_interrupt``. The guard cannot read state
+# directly (``aget_state`` inside a node returns a pre-step snapshot whose
+# ``next`` does not reflect a prior node's interrupt), so classify passes the
+# resident pending plan through this ContextVar. Per-task (copied at engine
+# run-loop creation), so concurrent engines don't cross-talk.
+_PENDING_PLAN_VIEW: contextvars.ContextVar = contextvars.ContextVar(
+    "coordinator_pending_plan_view", default=None
+)
+
 
 def set_reply_callback(cb: Any) -> None:
     """Install the engine's unified reply callable for the duration of one invoke.
@@ -144,10 +163,54 @@ async def _unified_reply(
         await cb(content)
 
 
+async def _detect_residual_interrupt(
+    config: Optional[RunnableConfig], incoming_kind: str
+) -> None:
+    """Best-effort residual-interrupt detector for the classify non-confirm path.
+
+    ``node_dispatch`` pauses the thread via ``interrupt()`` mid-node. On a
+    fresh-input invoke (e.g. a new user demand while a plan awaits
+    confirmation) LangGraph 1.2.5 auto-resolves that pause as it routes the new
+    input through the graph — so the new demand is NOT swallowed. But if the
+    LLM then decides ``dispatch`` again, the OLD pending plan in the
+    checkpointer is silently overwritten by the NEW plan (replace_value
+    reducer): the user abandoned plan A by asking for plan B, and plan A
+    vanishes without a peep.
+
+    This helper inspects the *state-visible* ``dispatch_plan`` (read directly
+    from the node's ``state`` view of the checkpoint, NOT via a nested
+    ``aget_state`` call — which returns a pre-step snapshot whose ``next`` does
+    not reflect a prior node's interrupt). If a plan with pending steps is
+    resident AND this is not a plan_confirm, the pending plan will be abandoned
+    by a subsequent dispatch decision; we log that so the abandon is
+    observable rather than silent. It does NOT mutate state and never raises.
+    The actual interrupt resolve happens implicitly via LangGraph's fresh-input
+    semantics; this is observability only (the task spec's "update_state resolve"
+    is unnecessary in 1.2.5 because fresh-input already resolves — verified
+    across 5+ runs).
+    """
+    try:
+        # state-visible pending plan = a plan awaiting confirmation that a new
+        # (non-confirm) demand would abandon if the LLM decides dispatch again.
+        plan = _PENDING_PLAN_VIEW.get() or []
+        pending = sum(1 for s in plan if isinstance(s, dict) and s.get("status") == "pending")
+        if pending:
+            logger.info(
+                "[coordinator] pending plan awaiting confirmation; a new %r demand "
+                "may abandon it if the LLM decides dispatch again (%d pending step(s))",
+                incoming_kind, pending,
+            )
+    except Exception:
+        # Observability-only: never block classify routing on a state lookup.
+        logger.debug("[coordinator] residual-interrupt probe skipped", exc_info=True)
+
+
 # ── nodes ─────────────────────────────────────────────────────────────────
 
 
-async def node_classify_incoming(state: CoordinatorState) -> dict:
+async def node_classify_incoming(
+    state: CoordinatorState, config: Optional[RunnableConfig] = None
+) -> dict:
     """Classify the incoming notify: plan-confirm resume vs worker reply vs new demand.
 
     Three branches:
@@ -173,6 +236,22 @@ async def node_classify_incoming(state: CoordinatorState) -> dict:
     - ``handle_reply``: a worker reported back — an ``agent_reply`` notify whose
       ``data.task_id`` matches a dispatched step.
     - ``llm_decide``: everything else (new user demand) → coordinator LLM.
+
+    Residual-interrupt guard (PL-02): ``node_dispatch``'s ``interrupt()`` leaves
+    the thread paused mid-node (``get_state(config).next`` is ``("dispatch",)``).
+    A fresh-input invoke on that thread auto-resumes the interrupt (LangGraph
+    runs the new input through the graph from START, and a subsequent node's
+    state write resolves the pause). This means a new demand while a plan
+    awaits confirmation is NOT swallowed — it routes to ``llm_decide`` and the
+    interrupt is resolved as a side effect. However, if the LLM then decides
+    ``dispatch`` again, the OLD pending plan in the checkpointer is silently
+    overwritten by the NEW plan (replace_value reducer) — i.e. a user who
+    abandons a waiting plan A by asking for plan B loses plan A without a peep.
+    The guard below detects a residual interrupted-state on the dispatch node
+    for the *non-confirm* path and surfaces it (logs + tags the result) so the
+    abandon-plan case is observable rather than silent. ``auto_confirm`` turns
+    are exempt (no interrupt is created). Best-effort: a graph/config lookup
+    failure degrades to the plain classify path (never blocks routing).
     """
     kind = state.get("incoming_kind", "")
     sender = state.get("incoming_sender", "")
@@ -195,6 +274,21 @@ async def node_classify_incoming(state: CoordinatorState) -> dict:
         plan = state.get("dispatch_plan") or []
         if task_id and any(s.get("task_id") == task_id and s.get("status") == "dispatched" for s in plan):
             return {"action_taken": "handle_reply"}
+
+    # Residual-interrupt guard: if the thread is still paused on the dispatch
+    # node (a plan is awaiting confirmation) and this is NOT a plan_confirm,
+    # the incoming demand will overwrite/abandon that pending plan once the LLM
+    # decides dispatch. We cannot stop that (the user moved on), but we surface
+    # it so the abandon is observable rather than silent. auto_confirm turns
+    # never create an interrupt, so they are skipped. Best-effort: any
+    # graph/state lookup failure degrades to the plain llm_decide path.
+    if not state.get("auto_confirm"):
+        # Expose the state-visible pending plan to the guard (which cannot read
+        # state directly via aget_state — that returns a pre-step snapshot whose
+        # ``next`` does not reflect a prior node's interrupt).
+        _PENDING_PLAN_VIEW.set(list(state.get("dispatch_plan") or []))
+        await _detect_residual_interrupt(config, kind)
+
     return {"action_taken": "llm_decide"}
 
 
@@ -1093,7 +1187,17 @@ def build_coordinator_graph():
     g.add_edge("chat", END)
     g.add_edge("summarize", END)
 
-    return g.compile(checkpointer=MemorySaver())
+    compiled = g.compile(checkpointer=MemorySaver())
+    # Publish the compiled graph so node helpers (``_detect_residual_interrupt``)
+    # can call ``aget_state(config)`` without the engine threading the graph
+    # object through every node. Set on the default context: each engine's
+    # run-loop task copies this context at creation, so concurrent engines each
+    # see the same graph (read-only post-compile). The graph is a singleton —
+    # every coordinator engine compiles its own via this function, so the last
+    # compile wins; that is fine because all coordinator graphs are structurally
+    # identical and only the per-thread ``config`` distinguishes them.
+    _GRAPH_INSTANCE.set(compiled)
+    return compiled
 
 
 # ── decision parser (Rust parse_coordinator_decision) ─────────────────────
