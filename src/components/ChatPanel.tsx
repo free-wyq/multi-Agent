@@ -948,8 +948,8 @@ export default function ChatPanel({
           计划有 pending 步骤时展示，flexShrink:0 保证它和输入框都不被消息列表挤掉；
           卡内步骤多时 maxHeight + 自滚，避免撑高把输入框顶出可视区。 */}
       {showPlanCard && plan && chatGroupId && (
-        <div style={{ flexShrink: 0, padding: '6px 16px 0', background: '#fff' }}>
-          <div style={{ maxHeight: 180, overflowY: 'auto', padding: 2 }}>
+        <div style={{ flexShrink: 0, padding: '8px 16px 0', background: '#fff' }}>
+          <div style={{ maxHeight: 280, overflowY: 'auto', padding: 2 }}>
             <PlanConfirmCard groupId={chatGroupId} plan={plan} refreshPlan={refreshPlan} />
           </div>
         </div>
