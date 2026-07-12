@@ -67,18 +67,41 @@ const CHAT_MESSAGE_TYPES = new Set([
 /** antd Input.TextArea 的 ref 类型（antd v6 未从顶层导出 TextAreaRef，用 ComponentRef 推导）。 */
 type TextAreaRef = ComponentRef<typeof Input.TextArea>
 
-/** 获取智能体角色主题色 */
+/** 获取智能体角色主题色。
+ *  B19：role 字段在全仓命名不一致——后端 agent_templates.py / store/seed.py 用 snake_case
+ *  （backend_engineer / frontend_engineer / qa_engineer / devops_engineer /
+ *  product_manager / fullstack_engineer），前端 AgentPage ROLES / Sidebar 表单用中文
+ *  （后端开发工程师 / 前端开发工程师 / 测试工程师 / DevOps 工程师 / 产品经理 / 自定义）。
+ *  原 ROLE_COLORS 按中文键硬编码 → 模板雇佣的 agent（role=snake_case）查不到色落默认，
+ *  与表单创建的 agent（role=中文）显色不一致。改按 snake_case 匹配为主键，LEGACY_ROLE_ALIASES
+ *  兼容旧中文名——中文 role 经别名归一化到 snake_case 再查色（单色源，不复制色值）。
+ *
+ *  行为零变：5 个有显式色的角色 hex 逐字保留（backend #6366f1 / frontend #06b6d4 /
+ *  qa #f59e0b / devops #10b981 / product #f43f5e）；fullstack_engineer / 自定义 / 未知
+ *  role 原未在 ROLE_COLORS 显式键（落 ?? '#8b5cf6' 默认），现仍不显式键 → 落同默认。
+ *  coordinator 由 line 207 预过滤（id==='coordinator' 直接 #722ed1），不进 getAgentColor。 */
 function getAgentColor(id: string, agents: AgentDefinition[]): string {
+  // 主键 snake_case（后端 agent_templates.py role 规范 + store/seed.py 落盘值）。
   const ROLE_COLORS: Record<string, string> = {
-    '后端开发工程师': '#6366f1',
-    '前端开发工程师': '#06b6d4',
-    '测试工程师': '#f59e0b',
-    'DevOps 工程师': '#10b981',
-    '产品经理': '#f43f5e',
-    '自定义': '#8b5cf6',
+    backend_engineer: '#6366f1',
+    frontend_engineer: '#06b6d4',
+    qa_engineer: '#f59e0b',
+    devops_engineer: '#10b981',
+    product_manager: '#f43f5e',
+  }
+  // 旧中文名兼容（前端 AgentPage ROLES / Sidebar 表单创建的 agent role 仍是中文）。
+  // 归一到对应 snake_case 主键再查色——单色源（不复制色值，中文仅作别名）。
+  const LEGACY_ROLE_ALIASES: Record<string, string> = {
+    '后端开发工程师': 'backend_engineer',
+    '前端开发工程师': 'frontend_engineer',
+    '测试工程师': 'qa_engineer',
+    'DevOps 工程师': 'devops_engineer',
+    '产品经理': 'product_manager',
   }
   const agent = agents.find((a) => a.id === id)
-  return agent ? (ROLE_COLORS[agent.role] ?? '#8b5cf6') : '#722ed1'
+  if (!agent) return '#722ed1'
+  const key = LEGACY_ROLE_ALIASES[agent.role] ?? agent.role
+  return ROLE_COLORS[key] ?? '#8b5cf6'
 }
 
 /** 毫秒 → 人类可读耗时：<1s 显示 ms，否则保留 1 位小数秒（与 ChatMessageBubble 一致）。 */
