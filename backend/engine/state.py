@@ -108,10 +108,16 @@ class WorkerState(TypedDict, total=False):
     # decision output
     decision: dict  # {action, content, reasoning}
     # per-turn streaming run-stats carried from node_brain_decide to node_chat/ask,
-    # mirror of CoordinatorState._stream_stats: {elapsed_ms, tokens, model,
-    # reasoning_tokens, reasoning?}. node_chat/ask stamp it onto the persisted
-    # agent_reply's data so the finalized bubble renders "model · Ns · ↓ N tokens
-    # （含 N 推理）" —— 之前 worker 走非流式 chat_completion 丢弃 usage，worker
-    # 回复无状态行（只有协调者有）。execute 路径回复是模板化 announce，不匹配 brain
-    # token，不带 stats（与协调者 dispatch 排除同理）。None=无统计（错误兜底/execute）。
+    # mirror of CoordinatorState._stream_stats: {reply_id, elapsed_ms, tokens,
+    # model, reasoning_tokens, reasoning?}. node_brain_decide generates one
+    # ``reply_id`` (uuid4 hex) per turn — task 23 introduces it so worker
+    # single-chat replies can stream live via ``task_token`` keyed by reply_id
+    # (task 24 pushes token deltas in the brain's streaming loop), and node_chat/
+    # ask stamp it onto the persisted agent_reply's ``data`` so the finalized
+    # bubble keeps the "Ns · ↓ N tokens" status line + lets the frontend retire
+    # the streaming bubble cleanly when the persisted reply lands. Without it the
+    # worker reply appeared in one shot (no streaming bubble) — task 24/25 lift
+    # single-chat to the same live-逐字 UX the coordinator already has.
+    # execute 路径回复是模板化 announce，不匹配 brain token，不带 stats（与协调者
+    # dispatch 排除同理）。None=无统计（错误兜底/execute）。
     _stream_stats: dict | None

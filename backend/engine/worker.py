@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextvars
 import logging
 import time
+import uuid
 from typing import Any
 
 from langgraph.checkpoint.memory import MemorySaver
@@ -158,6 +159,13 @@ async def node_brain_decide(state: WorkerState) -> dict:
         state.get("system_prompt", ""),
     )
     config = get_llm_config()
+    # reply_id（task 23）：每轮一个 uuid4 hex，作为单聊回复流式 token 的归并键。
+    # 与协调者 _stream_coordinator_decision 的 reply_id 同构——前端 coordStreaming[reply_id]
+    # 按 reply_id 拼接逐字增量（task 24 在下面 async for 循环里推 task_token，data.reply_id
+    # 即此值）。落盘到 agent_reply.data.reply_id 后，前端用「该 agent 在收尾时间戳之后的消息」
+    # 判定持久化回复已落地、退场流式气泡——与协调者 phase=done 清 coordStreaming 同模式。
+    # 此处先生成并塞进 _stream_stats（task 23），task 24 才真正在循环里 emit task_token。
+    reply_id = uuid.uuid4().hex
     try:
         # system_prompt 作为独立 system 消息注入（空串时 LLM 以 brain prompt 内
         # 的 {role} 兜底人设作答）。单聊 agent 用自己的 system_prompt 主导行为，
@@ -168,9 +176,11 @@ async def node_brain_decide(state: WorkerState) -> dict:
         # 经 node_chat/ask 落盘到 agent_reply.data —— 定稿气泡据此渲染
         # 「model · Ns · ↓ N tokens（含 N 推理）」状态行（与协调者 node_chat 同形，
         # 前端 extractCoordStats 不区分来源）。原非流式 chat_completion 丢弃 usage，
-        # worker 回复无状态行（只有协调者有）。worker 不推流式 token 事件（非协调者，
-        # 无 reply_id 跟踪，逐字推对 worker 收 peer @notify 这种短回复无收益还增噪），
-        # 只在采集完后落盘 stats——状态行在回复落地时一次性出现。
+        # worker 回复无状态行（只有协调者有）。
+        #
+        # task 23 给 worker 引入 reply_id（本函数生成 + 塞进 _stream_stats）；
+        # task 24 才在下面 async for 循环里 emit task_token 推逐字 delta（按 reply_id 归并）。
+        # 故本 task 仅把 reply_id 落进 stats——单聊回复仍一次性落地（流式气泡待 task 24/25 接通）。
         start = time.monotonic()
         raw_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -201,6 +211,7 @@ async def node_brain_decide(state: WorkerState) -> dict:
         reasoning_tokens = final_reasoning_tokens  # 0 for non-reasoning models
         reasoning_text = "".join(reasoning_parts)
         stats: dict[str, Any] = {
+            "reply_id": reply_id,
             "elapsed_ms": elapsed_ms,
             "tokens": tokens,
             "model": model,
