@@ -326,6 +326,83 @@ export default function ProviderEditor({
     }))
   }
 
+  // ── PE-05 测试连通 / 拉取模型 ──
+  // 仅编辑态可用（新增态 provider 未落库无 id，后端 test/fetchModels 路由是 /providers/{id}/...）。
+  // 两个按钮共享「探测类」语义：失败是正常结果（不 throw），返回 {ok, ...} 结构化结果。
+  const [testing, setTesting] = useState(false)
+  /** 测试连通结果：null=未测 / {ok,latency_ms,error} 最近一次结果。 */
+  const [testResult, setTestResult] = useState<{
+    ok: boolean
+    latency_ms: number
+    error: string
+  } | null>(null)
+
+  const [fetchingModels, setFetchingModels] = useState(false)
+  /** 拉取模型结果：null=未拉 / {ok,error}（models 成功时直接覆盖 formState，不单独存）。 */
+  const [fetchModelsResult, setFetchModelsResult] = useState<{
+    ok: boolean
+    error: string
+  } | null>(null)
+
+  /** 测试连通：调 providerApi.test(id)，显示 ok/latency_ms/error。仅编辑态。 */
+  const handleTestConnection = async () => {
+    if (!provider?.id || testing) return
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const r = await providerApi.test(provider.id)
+      setTestResult({ ok: r.ok, latency_ms: r.latency_ms, error: r.error })
+    } catch (e) {
+      // 网络层失败（后端不可达）——http() 已抛 Error，这里兜底成结构化结果。
+      const msg = e instanceof Error ? e.message : String(e)
+      setTestResult({ ok: false, latency_ms: 0, error: msg })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  /**
+   * 拉取模型：调 providerApi.fetchModels(id)，成功后用返回的 models 覆盖 formState.models。
+   *
+   * 覆盖语义对齐任务约定「拉取成功后用返回的 models 覆盖」——用户当前编辑的目录被丢弃，
+   * 故拉取前不二次确认（按钮文案 + 结果展示已暗示覆盖；若需保护可在 PE-08 验证时加 Popconfirm，
+   * 当前保持简单）。fetchModels 返回的 models 每条浅拷贝切断与响应对象的引用。
+   * 后端 fetchModels 已保证首个 is_default=true（见 api.ts JSDoc），覆盖后单 default 不变量天然成立。
+   */
+  const handleFetchModels = async () => {
+    if (!provider?.id || fetchingModels) return
+    setFetchingModels(true)
+    setFetchModelsResult(null)
+    try {
+      const r = await providerApi.fetchModels(provider.id)
+      if (r.ok && r.models.length > 0) {
+        // 覆盖 formState.models（浅拷贝每条）。保单 default：后端返回首个已 is_default；
+        // 防御性兜底——若后端全 false 则置首个为 default。
+        const models = r.models.map((m) => ({ ...m }))
+        if (!models.some((m) => m.is_default)) {
+          models[0] = { ...models[0], is_default: true }
+        }
+        setFormState((prev) => ({ ...prev, models }))
+        setFetchModelsResult({ ok: true, error: '' })
+        message.success(`已拉取 ${models.length} 个模型`)
+      } else if (r.ok && r.models.length === 0) {
+        // ok=true 但空目录：上游 /models 返空，提示但不清空当前目录（避免误删用户已填）。
+        setFetchModelsResult({ ok: false, error: '上游返回空模型目录' })
+        message.warning('上游返回空模型目录，未覆盖')
+      } else {
+        setFetchModelsResult({ ok: false, error: r.error || '拉取失败' })
+        message.error(`拉取模型失败：${r.error || '未知错误'}`)
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      setFetchModelsResult({ ok: false, error: msg })
+      message.error(`拉取模型失败：${msg}`)
+    } finally {
+      setFetchingModels(false)
+    }
+  }
+
+
   // PE-04 模型目录 Table 列定义。rowKey 用 index（见下方 Table props 说明）。
   const modelColumns: TableProps<LlmModel>['columns'] = [
     {
@@ -660,8 +737,54 @@ export default function ProviderEditor({
         </Row>
         {/* PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
         <Divider plain style={{ fontSize: 12, color: '#999' }}>
-          模型目录 · 测试连通（PE-05 待实现）
+          模型目录
         </Divider>
+        {/* PE-05 测试连通 + 拉取模型：仅编辑态（新增态无 id）。两按钮共享结果展示区。 */}
+        {isEdit && (
+          <div
+            style={{
+              marginBottom: 12,
+              display: 'flex',
+              gap: 8,
+              flexWrap: 'wrap',
+              alignItems: 'center',
+            }}
+          >
+            <Button
+              size="small"
+              loading={testing}
+              onClick={handleTestConnection}
+            >
+              测试连通
+            </Button>
+            <Button
+              size="small"
+              loading={fetchingModels}
+              onClick={handleFetchModels}
+            >
+              拉取模型
+            </Button>
+            {/* 测试连通结果：ok=绿 latency_ms / fail=红 error */}
+            {testResult && (
+              <span
+                style={{
+                  fontSize: 12,
+                  color: testResult.ok ? '#52c41a' : '#ff4d4f',
+                }}
+              >
+                {testResult.ok
+                  ? `连通成功 · ${testResult.latency_ms}ms`
+                  : `连通失败：${testResult.error || '未知错误'}`}
+              </span>
+            )}
+            {/* 拉取模型结果：仅失败时展示（成功已 message.success + 覆盖目录） */}
+            {fetchModelsResult && !fetchModelsResult.ok && (
+              <span style={{ fontSize: 12, color: '#ff4d4f' }}>
+                拉取失败：{fetchModelsResult.error}
+              </span>
+            )}
+          </div>
+        )}
         {/* PE-04 模型目录 Table：每行一个 LlmModel，可增删 + 能力开关 + 单 default Radio。
          *  rowKey 用 index（非 model_id——model_id 可空/重复，作 key 会导致 React
          *  diff 错乱；index 稳定标识行位置，删除时 filter 重建数组 index 自然重排）。 */}
