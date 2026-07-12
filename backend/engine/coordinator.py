@@ -211,28 +211,23 @@ async def _detect_residual_interrupt(
 async def node_classify_incoming(
     state: CoordinatorState, config: Optional[RunnableConfig] = None
 ) -> dict:
-    """Classify the incoming notify: plan-confirm resume vs worker reply vs new demand.
+    """Classify the incoming notify: worker reply vs new demand (resume bypasses classify).
 
     Three branches:
-    - ``confirm_dispatch`` (PL-02): the user confirmed a pending plan. Detected
-      when ``incoming_kind == "plan_confirm"`` (an explicit marker pushed by the
-      plan-confirm API) AND the resident ``dispatch_plan`` (sourced from the
-      checkpointer — ``node_dispatch`` checkpointed it on the interrupt turn)
-      still has at least one pending step. Returning ``confirm_dispatch`` makes
-      ``route_after_classify`` jump straight to ``dispatch_next``, which fans
-      out the pending steps WITHOUT going through the coordinator LLM — the
-      plan was already LLM-decided on the dispatch turn, so confirming is a pure
-      resume, not a re-decision. Falls through to ``llm_decide`` if no step is
-      pending, so a stray confirm can't re-fire a dead plan.
-
-      Note on the interrupt mechanism: ``node_dispatch`` pauses the graph via
-      ``interrupt()`` mid-node. The plan_confirm notify is a *new invoke* on
-      the same thread (not a ``Command(resume=...)``); LangGraph 1.2.5 restarts
-      the graph from the START node (classify) for a fresh-input invoke even
-      when the thread is interrupted, so classify sees the ``plan_confirm``
-      kind and routes to ``dispatch_next`` directly — bypassing the still-paused
-      dispatch node. This is why classify — not the dispatch node's resume —
-      owns the confirm→fan-out routing.
+    - ``confirm_dispatch`` (PL-02, legacy defensive-only): reached only if a
+      ``plan_confirm``-kindled notify ever lands here. Since task 11 the
+      plan-confirm API endpoints resume ``node_dispatch``'s ``interrupt()``
+      directly via ``Command(resume=...)`` (registry ``_handle_notify`` →
+      ``route_plan_resume``), bypassing classify entirely, so this branch is no
+      longer on the normal user-confirm path. It is kept as a defensive branch:
+      if ``incoming_kind == "plan_confirm"`` AND the resident ``dispatch_plan``
+      (sourced from the checkpointer — ``node_dispatch`` checkpointed it on the
+      interrupt turn) still has at least one pending step, route straight to
+      ``dispatch_next`` to fan out the pending steps WITHOUT going through the
+      coordinator LLM (the plan was already LLM-decided on the dispatch turn, so
+      confirming is a pure resume, not a re-decision). Falls through to
+      ``llm_decide`` if no step is pending, so a stray confirm can't re-fire a
+      dead plan.
     - ``handle_reply``: a worker reported back — an ``agent_reply`` notify whose
       ``data.task_id`` matches a dispatched step.
     - ``llm_decide``: everything else (new user demand) → coordinator LLM.
@@ -256,10 +251,19 @@ async def node_classify_incoming(
     kind = state.get("incoming_kind", "")
     sender = state.get("incoming_sender", "")
 
-    # PL-02: explicit user plan-confirmation. The plan is read from state
-    # (checkpointer is the source of truth — node_dispatch checkpointed it on
-    # the interrupt turn via the replace_value reducer), NOT from the notify
-    # payload, so a confirm works even though the API doesn't re-send the plan.
+    # PL-02: explicit user plan-confirmation — *legacy fresh-input channel*
+    # (downgraded to defensive-only in task 11). The plan-confirm API endpoints
+    # (/confirm | /direct | /modify) no longer push a ``plan_confirm`` notify;
+    # they resume ``node_dispatch``'s ``interrupt()`` directly via
+    # ``route_plan_resume`` → ``Command(resume=...)`` (the native resume path in
+    # registry's ``_handle_notify``), bypassing classify entirely. So this branch
+    # is no longer reached on the normal user-confirm path. It is kept as a
+    # defensive branch in case a stray ``plan_confirm`` notify ever reaches
+    # classify (e.g. a stale client or a future code path re-introduces the
+    # marker): the plan is read from state (checkpointer is the source of truth
+    # — ``node_dispatch`` checkpointed it on the interrupt turn via the
+    # replace_value reducer), NOT from the notify payload, so a confirm works
+    # even though no API re-sends the plan.
     if kind == "plan_confirm":
         plan = state.get("dispatch_plan") or []
         if any(s.get("status") == "pending" for s in plan):

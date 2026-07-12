@@ -21,9 +21,11 @@ same group auto-dispatch; ``/modify`` splices the user's amended steps into the
 resident plan before confirming. ``/confirm`` is the plain "continue as planned"
 resume carrying ``{"mode": "confirm"}``.
 
-The legacy ``plan_confirm`` fresh-input notify channel (``route_plan_confirm``)
-remains as a compatibility fallback (task 11 will downgrade/remove it); these
-endpoints now use the native resume channel.
+The legacy ``plan_confirm`` fresh-input notify channel (the removed
+``route_plan_confirm`` pusher) was retired in task 11 — plan-confirm no longer
+goes through the notify-as-fresh-input channel at all. These endpoints are the
+sole plan-confirm inbound path, all via the native resume channel
+(``route_plan_resume``).
 """
 from __future__ import annotations
 

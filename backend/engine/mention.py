@@ -273,64 +273,30 @@ async def route_user_message(group_id: str, content: str) -> None:
         )
 
 
-async def route_plan_confirm(
-    group_id: str, data: dict | None = None
-) -> str | None:
-    """PL-02: route a user plan-confirmation to the group coordinator.
-
-    Pushes a notify with kind ``plan_confirm`` to the coordinator's inbox. The
-    coordinator's classify node detects ``incoming_kind == "plan_confirm"`` and,
-    while the resident ``dispatch_plan`` still has pending steps, routes straight
-    to ``dispatch_next`` (方案 B 引擎内存态等待 resume), skipping the LLM. This is
-    the wake-up entry point called by the plan-confirm API (``/plan/confirm`` and
-    ``/plan/direct``); ``data`` is forwarded verbatim as the notify payload so the
-    API can carry modify instructions or a direct-mode marker for later use.
-
-    Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has no
-    coordinator). Mirrors ``route_user_message``'s coordinator fallback so the
-    two inbound paths share one resolution primitive.
-
-    Legacy channel: the new ``Command(resume=...)`` path (``route_plan_resume``)
-    is preferred for PL-02 — it resumes ``node_dispatch``'s ``interrupt()``
-    directly without re-entering classify. This ``plan_confirm`` fresh-input path
-    remains as a compatibility fallback (task 11 will downgrade/remove it).
-    """
-    group = await crud.get_group(group_id)
-    if not group or not group.coordinator_id:
-        return None
-    await push_notify(
-        group_id,
-        "plan_confirm",
-        "user",
-        group.coordinator_id,
-        "用户确认执行计划",
-        data,
-    )
-    return group.coordinator_id
-
-
 async def route_plan_resume(
     group_id: str, payload: dict | None = None
 ) -> str | None:
-    """PL-02 native resume: push a ``plan_resume`` notify to the coordinator.
+    """PL-02: push a ``plan_resume`` notify to the group's coordinator.
 
-    The LangGraph-native counterpart of ``route_plan_confirm``. Pushes a notify
-    of kind ``plan_resume`` whose ``data`` is the resume payload
+    Pushes a notify of kind ``plan_resume`` whose ``data`` is the resume payload
     (``{"mode": "confirm"|"direct"|"modify", ...}``); the coordinator engine's
     ``_handle_notify`` sees ``type == "plan_resume"`` and dispatches it to the
     graph as ``Command(resume=<payload>)`` — which makes ``node_dispatch``'s
-    ``interrupt()`` return the payload and the graph fan out. This bypasses the
-    classify node entirely (unlike the legacy ``plan_confirm`` fresh-input path
-    that re-enters classify), resuming the interrupted dispatch node directly.
+    ``interrupt()`` return the payload and the graph fan out, bypassing the
+    classify node and resuming the interrupted dispatch node directly.
 
-    Called by the plan-confirm API endpoints (``/plan/confirm`` | ``/direct`` |
-    ``/modify``) now that they migrate to the resume channel (tasks 7-9). The
-    payload is forwarded verbatim — the API owns the ``mode`` semantics, the
-    routing layer only resolves the coordinator and queues the control signal.
+    The single inbound channel for plan confirmation since the M12 interrupt
+    migration retired the legacy ``plan_confirm`` fresh-input notify path (the
+    old ``route_plan_confirm`` pusher was removed in task 11 — plan-confirm no
+    longer goes through the notify-as-fresh-input channel). Called by the
+    plan-confirm API endpoints (``/plan/confirm`` | ``/direct`` | ``/modify``);
+    the payload is forwarded verbatim — the API owns the ``mode`` semantics,
+    the routing layer only resolves the coordinator and queues the control
+    signal.
 
     Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has
-    no coordinator). Mirrors ``route_plan_confirm``'s resolution so both inbound
-    plan-confirm channels share one primitive.
+    no coordinator). Mirrors ``route_user_message``'s coordinator fallback so
+    the two inbound paths share one resolution primitive.
     """
     group = await crud.get_group(group_id)
     if not group or not group.coordinator_id:

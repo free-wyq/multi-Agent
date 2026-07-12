@@ -604,15 +604,14 @@ class AgentEngine:
                 # payload (mode=confirm|direct|modify, optional amended_steps).
                 # Dispatch it as Command(resume=...) so node_dispatch's
                 # interrupt() returns the payload and the graph fans out — this
-                # is the LangGraph-native resume path (vs the legacy plan_confirm
-                # fresh-input path that re-enters classify). Only meaningful on a
+                # is the LangGraph-native resume path. Only meaningful on a
                 # thread currently interrupted at the dispatch node; on an idle
                 # thread Command(resume=) is a harmless no-op resume that runs
                 # classify→llm with empty input (verified safe — see progress
                 # notes for task 5). The plan_resume marker is set by the
-                # plan-confirm API endpoints (api/plan.py) once they migrate to
-                # the resume channel (tasks 7-9); until then the legacy
-                # plan_confirm fresh-input path still works in parallel.
+                # plan-confirm API endpoints (api/plan.py /confirm | /direct |
+                # /modify), the single inbound plan-confirm channel since task 11
+                # retired the legacy ``plan_confirm`` fresh-input notify path.
                 notify_type = notify.get("type") or ""
                 if notify_type == "plan_resume":
                     resume_payload = notify.get("data") or {}
@@ -646,10 +645,11 @@ class AgentEngine:
             # sync dispatch_plan back from graph result (nodes mutate it).
             # On a resume (Command) turn the plan is sourced from the checkpointer
             # (node_dispatch already checkpointed it on the interrupt turn), so the
-            # mirror here stays consistent with the graph's truth. The checkpointer
-            # is the source of truth; self._dispatch_plan is a compatibility mirror
-            # retained so GET /plan (until task 10 migrates it to get_state) and
-            # reset_session (until task 6 migrates it) keep working unchanged.
+            # mirror here is synced back from the resume result to match the graph's
+            # truth. The checkpointer is the source of truth; self._dispatch_plan is
+            # a compatibility mirror retained for the /confirm | /direct | /modify
+            # pending guards + the /modify patch source (see api/plan.py) and for
+            # reset_session's belt-and-suspenders second wipe.
             if result and isinstance(result, dict):
                 updated_plan = result.get("dispatch_plan")
                 if updated_plan is not None:
@@ -783,18 +783,19 @@ class AgentEngine:
         ``interrupt()``, with the resident plan held in the MemorySaver
         checkpointer (the source of truth). A bare mirror clear left a dangling
         interrupt: the next fresh-input demand auto-resumed it, and a subsequent
-        ``plan_confirm`` notify would route to ``dispatch_next`` and re-fire the
-        stale plan (409-style hazard, [[engine-audit-interrupt-replacement]]).
-        So the coordinator reset now resolves the interrupt via the graph's
-        checkpointer API — ``aupdate_state(values=None, as_node=END)`` writes a
-        terminal checkpoint (``next == ()``, pending interrupt tasks cleared),
-        matching the LangGraph idiom for "act as if the thread finished." A
-        coordinator graph that never reached ``node_dispatch`` (idle / cold /
-        auto_confirm-only) has no interrupt to resolve; the END write is a
-        harmless no-op on a terminal or empty thread (verified across cold +
-        interrupted + post-clear re-invoke cases). The mirror clear is kept as a
+        plan-confirm resume would re-fire the stale plan (409-style hazard,
+        [[engine-audit-interrupt-replacement]]). So the coordinator reset now
+        resolves the interrupt via the graph's checkpointer API —
+        ``aupdate_state(values=None, as_node=END)`` writes a terminal checkpoint
+        (``next == ()``, pending interrupt tasks cleared), matching the
+        LangGraph idiom for "act as if the thread finished." A coordinator graph
+        that never reached ``node_dispatch`` (idle / cold / auto_confirm-only)
+        has no interrupt to resolve; the END write is a harmless no-op on a
+        terminal or empty thread (verified across cold + interrupted +
+        post-clear re-invoke cases). The mirror clear is kept as a
         belt-and-suspenders second wipe so readers that still touch
-        ``self._dispatch_plan`` (api/plan.py until tasks 7-10 migrate) see ``[]``.
+        ``self._dispatch_plan`` (the /confirm | /direct | /modify pending guards
+        + the /modify patch source in api/plan.py) see ``[]``.
 
         Does NOT touch the LangGraph graph object, the MemorySaver checkpointer
         thread_id, or the inbox queue wiring — engine identity and graph topology
