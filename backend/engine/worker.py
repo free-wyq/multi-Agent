@@ -17,9 +17,10 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
+from engine.coordinator import _ContentExtractor
 from engine.inbox import push_task
 from engine.state import WorkerState
-from events import emit_message_added
+from events import emit_message_added, emit_task_token
 from llm.client import chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.prompts import build_brain_prompt
@@ -181,6 +182,19 @@ async def node_brain_decide(state: WorkerState) -> dict:
         # task 23 给 worker 引入 reply_id（本函数生成 + 塞进 _stream_stats）；
         # task 24 才在下面 async for 循环里 emit task_token 推逐字 delta（按 reply_id 归并）。
         # 故本 task 仅把 reply_id 落进 stats——单聊回复仍一次性落地（流式气泡待 task 24/25 接通）。
+        # task 24：在 async for 循环里推 task_token，按 reply_id 归并。worker brain
+        # 的 LLM 输出是 strict JSON（``{"action","content","reasoning"}``），可见回复是
+        # ``content`` 字段值——若把 raw_parts（含 JSON 骨架/action/reasoning）逐字推给前端，
+        # 流式气泡会渲染出 ``{"action":"chat","content":"...`` 这种骨架噪声。故复用协调者
+        # 的 ``_ContentExtractor``：feed 每个 content_delta，take() 出「content 字段的解码
+        # 增量」（跳过 JSON 骨架/转义解码/前导散文），只把真正的可见回复文本逐字推。
+        # emit_task_token 的 task_id 形参此处传 reply_id——单聊 worker 无 task_id（非 create_react_agent
+        # 执行路径），前端 task 25 会改用 data.reply_id 归并（复用 coordStreaming 同款流式气泡）。
+        # 当前前端 useBusEvent 的 task_token 分支按 d.task_id 归并且「未带 task_id 丢弃」——
+        # 故 task 24 的事件此刻会被前端丢弃（不渲染流式气泡），task 25 接通 reply_id 归并后才真正
+        # 生效。这与 coordinator 当初推 coordinator_token 时前端尚未接通的状态一致——后端先行、
+        # 前端后接，分两 task 落地降低回归面。
+        extractor = _ContentExtractor()
         start = time.monotonic()
         raw_parts: list[str] = []
         reasoning_parts: list[str] = []
@@ -195,6 +209,24 @@ async def node_brain_decide(state: WorkerState) -> dict:
         ):
             if content_delta:
                 raw_parts.append(content_delta)
+                # 推可见回复的解码增量（跳过 JSON 骨架），按 reply_id 归并。emit 失败
+                # 不阻断 brain 决策（WS 推送是 best-effort，前端断连等不应让 worker 回复挂）。
+                extractor.feed(content_delta)
+                piece = extractor.take()
+                if piece:
+                    try:
+                        await emit_task_token(
+                            state.get("group_id", ""),
+                            reply_id,
+                            state.get("agent_id", ""),
+                            "streaming",
+                            piece,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "[worker %s] failed to emit task_token delta",
+                            state.get("agent_name"),
+                        )
             if reasoning_delta:
                 reasoning_parts.append(reasoning_delta)
             if usage is not None:
