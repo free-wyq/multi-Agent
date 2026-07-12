@@ -218,11 +218,21 @@ def assert_contract() -> list[str]:
         errs.append("[C11] parseStats 缺 String(dd['phase'] ?? 'streaming')（withPhase=true 时 phase 默认）")
     else:
         print("[C11] OK  String(dd['phase'] ?? 'streaming')（withPhase=true 时 phase 默认 streaming）")
-    # [12] raw 非 object 返 null
-    if not re.search(r"if\s*\(!raw\s*\|\|\s*typeof raw !== 'object'\)\s*return null", parse_body):
-        errs.append("[C12] parseStats 缺 raw 非 object → null 兜底")
+    # [12] raw 非 object 返 null（WS 事件 data 缺失/异常兜底）。
+    #     B20：守卫下沉到 safeRecord 单一真源（parseStats 内调 safeRecord(raw)）。
+    #     断言 parseStats 调 safeRecord（守卫真源）+ safeRecord 有非 object → null 兜底。
+    if "safeRecord(raw)" not in parse_body:
+        errs.append("[C12] parseStats 未调 safeRecord(raw)（B20 守卫下沉到单一真源未接线）")
     else:
-        print("[C12] OK  raw 非 object → null（WS 事件 data 缺失/异常兜底）")
+        # safeRecord 真源有非 object → null 兜底（parseStats 复用）
+        api_src = API.read_text(encoding="utf-8")
+        m_safe = re.search(r"export function safeRecord\([^)]*\)[^{]*\{(.*?)\n\}", api_src, re.S)
+        if not m_safe:
+            errs.append("[C12] services/api.ts safeRecord 未找到（B20 单一守卫真源缺失）")
+        elif "typeof raw !== 'object'" not in m_safe.group(1) and "typeof data !== 'object'" not in m_safe.group(1):
+            errs.append("[C12] safeRecord 缺 typeof !== 'object' 守卫（raw 非 object → null 兜底破）")
+        else:
+            print("[C12] OK  parseStats → safeRecord(raw)（B20 守卫下沉）+ safeRecord 非 object → null 兜底")
 
     # ── D. useBusEvent coordinator_stats 接线 parseStats ──
     # [13] coordinator_stats 分支调 parseStats(dd, { withPhase: true })

@@ -1135,8 +1135,9 @@ export function parseStats(
 ): CoordStats | FinalizedStats | null {
   const withPhase = opts?.withPhase ?? true
   const strictElapsed = opts?.strictElapsed ?? false
-  if (!raw || typeof raw !== 'object') return null
-  const dd = raw as Record<string, unknown>
+  // B20：null-guard+类型守卫走 safeRecord 单一真源（原 if (!raw || typeof raw !== 'object')）。
+  const dd = safeRecord(raw)
+  if (!dd) return null
 
   const elapsedMsNum = Number(dd['elapsed_ms'] ?? 0)
   const elapsedMs = Number.isFinite(elapsedMsNum) ? elapsedMsNum : 0
@@ -1158,6 +1159,29 @@ export function parseStats(
   if (!withPhase) return base as FinalizedStats
   const phase = String(dd['phase'] ?? 'streaming')
   return { ...base, phase } as CoordStats
+}
+
+/** B20 共享 null-guard+类型守卫入口：把 ``unknown`` data（WS 事件 d.data / 持久化
+ *  message.data / TraceEvent.data）归一为 ``Record<string, unknown> | null``。
+ *
+ *  原三个 extractor（ChatPanel extractCoordStats / extractCoordReasoning /
+ *  extractFinalizedArtifacts）各自重复 ``if (!data) return ...`` + ``typeof data !==
+ *  'object'`` 守卫——口径虽相同但散在三处，任一处漂移就守卫不一致。抽此单一真源：
+ *  ``unknown`` → null（非 object / null / undefined）或 ``Record<string, unknown>``
+ *  （object）。数组本不是 record（extractFinalizedArtifacts 的 data.artifact manifest
+ *  可能是数组？实测 bus.py emit_task_completed 的 data.artifact 是 dict {files:[...]}`，
+ *  数组走 safeRecord 返 null 是对的——artifact manifest 非对象应返空）。
+ *
+ *  与 parseStats 关系：parseStats 内部已用同一守卫（``if (!raw || typeof raw !==
+ *  'object') return null``）——B18 抽 parseStats 时已固化此守卫。B20 抽 safeRecord
+ *  让 parseStats 复用（守卫单一真源），同时 extractCoordReasoning / extractFinalizedArtifacts
+ *  也复用——四个 extractor 入口统一走 safeRecord。
+ *
+ *  返回 ``Record<string, unknown> | null``：调用方用 ``if (!dd) return <default>`` 兜底，
+ *  ``dd`` 已是 narrowed record（TS 类型收窄，无需再 ``as Record<string, unknown>``）。 */
+export function safeRecord(data: unknown): Record<string, unknown> | null {
+  if (!data || typeof data !== 'object' || Array.isArray(data)) return null
+  return data as Record<string, unknown>
 }
 
 /** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容）。

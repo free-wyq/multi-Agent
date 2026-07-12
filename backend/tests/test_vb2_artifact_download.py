@@ -189,17 +189,27 @@ def assert_frontend_contract() -> list[str]:
             errs.append("[前端1] extractFinalizedArtifacts 函数结构不符")
         else:
             body = m.group(1)
-            # 关键容错：data 非对象返 []、artifact 非对象返 []、files 非数组返 []
-            has_data_guard = "typeof data !== 'object'" in body or "typeof data" in body
-            has_artifact_guard = "typeof artifact !== 'object'" in body
+            # B20：null-guard 下沉到 safeRecord 单一真源（原 typeof data !== 'object' 等三处
+            # 守卫改调 safeRecord）。断言：① 三层都调 safeRecord（data/artifact/file 条目）；
+            # ② files 仍 Array.isArray 守卫（files 是数组，safeRecord 排除数组故单独判）；
+            # ③ safeRecord 真源（services/api.ts）有 typeof !== 'object' 守卫。
+            data_guard = "safeRecord(data)" in body
+            artifact_guard = "safeRecord(dd['artifact'])" in body
+            file_guard = "safeRecord(raw)" in body
             has_files_guard = "Array.isArray(files)" in body
-            if not (has_data_guard and has_artifact_guard and has_files_guard):
+            if not (data_guard and artifact_guard and file_guard and has_files_guard):
                 errs.append(
-                    "[前端1] extractFinalizedArtifacts 容错守卫不全"
-                    f"（data={has_data_guard} artifact={has_artifact_guard} files={has_files_guard}）"
+                    "[前端1] extractFinalizedArtifacts 容错守卫不全（B20 safeRecord 下沉后）"
+                    f"（data={data_guard} artifact={artifact_guard} file={file_guard} files={has_files_guard}）"
                 )
             else:
-                print("[前端1] OK  extractFinalizedArtifacts 容错解析 data.artifact.files[]（非对象/非数组返 []）")
+                # safeRecord 真源守卫
+                api_src = API_TS.read_text(encoding="utf-8")
+                m_safe = re.search(r"export function safeRecord\([^)]*\)[^{]*\{(.*?)\n\}", api_src, re.S)
+                if not m_safe or "typeof data !== 'object'" not in m_safe.group(1):
+                    errs.append("[前端1] services/api.ts safeRecord 守卫缺失（typeof !== 'object'）")
+                else:
+                    print("[前端1] OK  extractFinalizedArtifacts 三层 safeRecord + Array.isArray(files) 容错（B20 守卫下沉真源）")
 
     # [2] finalizedBubbles 把 artifactFiles + groupId 传 ChatMessageBubble
     if "artifactFiles: extractFinalizedArtifacts(e.data)" not in panel:

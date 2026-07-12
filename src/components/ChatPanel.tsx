@@ -7,6 +7,7 @@ import {
   messageApi,
   taskApi,
   parseStats,
+  safeRecord,
   type AgentDefinition,
   type FinalizedStats,
   type Group,
@@ -170,10 +171,19 @@ function extractCoordStats(data: Record<string, unknown> | null): FinalizedStats
 }
 
 /** 取持久化协调者回复的推理文本（agent_reply.data.reasoning，推理模型落盘的 reasoning_content 全文）。
- *  定稿气泡的折叠区据此展开——流式期靠 coordReasoning 实时累加，phase=done 清空后只能靠落盘文本。 */
+ *  定稿气泡的折叠区据此展开——流式期靠 coordReasoning 实时累加，phase=done 清空后只能靠落盘文本。
+ *
+ *  B20：null-guard 走 services/api.ts safeRecord 单一真源（原 ``if (!data) return undefined``，
+ *  与 extractCoordStats/extractFinalizedArtifacts 三处重复守卫去重）。safeRecord 把
+ *  ``unknown`` data 归一为 ``Record<string, unknown> | null``——非 object/null/undefined
+ *  返 null，调用方 ``if (!dd) return undefined`` 兜底。reasoning 字段仍本处守卫
+ *  （typeof string && 非空——reasoning 口径独立于 stats，不复用 parseStats）。 */
 function extractCoordReasoning(data: Record<string, unknown> | null): string | undefined {
-  if (!data) return undefined
-  const r = data.reasoning
+  // B20：data 已是 Record|null（调用方传 msg.data: Record<string,unknown>|null），但 safeRecord
+  // 统一兜底——若上层传入 unknown（未来重构成 TraceEvent.data 透传）也安全。复用单一守卫。
+  const dd = safeRecord(data)
+  if (!dd) return undefined
+  const r = dd['reasoning']
   return typeof r === 'string' && r ? r : undefined
 }
 
@@ -186,19 +196,23 @@ function extractCoordReasoning(data: Record<string, unknown> | null): string | u
  *
  * data 形状：TraceEvent.data（unknown，bus 事件透传）。容错解析——非对象/非数组/files 空
  * 全返 []，不抛错（WS 事件结构偶发异常不应炸渲染）。返回元素字段做最小类型守卫（name/path
- * 字符串化），与 ChatMessageBubble.ArtifactFile 形状对齐。 */
+ * 字符串化），与 ChatMessageBubble.ArtifactFile 形状对齐。
+ *
+ * B20：三层 null-guard（data / artifact / file 条目）都走 services/api.ts safeRecord 单一
+ * 真源——原 ``if (!data || typeof data !== 'object')`` + ``if (!artifact || typeof artifact
+ * !== 'object')`` + ``if (!raw || typeof raw !== 'object')`` 三处重复守卫去重。safeRecord
+ * 额外排除数组（数组非 record），artifact manifest 是 dict 非数组，行为零变。 */
 function extractFinalizedArtifacts(data: unknown): ArtifactFile[] {
-  if (!data || typeof data !== 'object') return []
-  const dd = data as Record<string, unknown>
-  const artifact = dd['artifact']
-  if (!artifact || typeof artifact !== 'object') return []
-  const manifest = artifact as Record<string, unknown>
+  const dd = safeRecord(data)
+  if (!dd) return []
+  const manifest = safeRecord(dd['artifact'])
+  if (!manifest) return []
   const files = manifest['files']
   if (!Array.isArray(files)) return []
   return files
     .map((raw) => {
-      if (!raw || typeof raw !== 'object') return null
-      const f = raw as Record<string, unknown>
+      const f = safeRecord(raw)
+      if (!f) return null
       const name = typeof f['name'] === 'string' ? (f['name'] as string) : ''
       const path = typeof f['path'] === 'string' ? (f['path'] as string) : ''
       if (!name && !path) return null
