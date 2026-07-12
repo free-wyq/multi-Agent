@@ -42,6 +42,7 @@ from events import (
     emit_task_tool,
 )
 from config import WORKER_TASK_TIMEOUT
+from llm import TEAM_INTERACTION_SUFFIX
 from models import get_leader_strategy
 from store import crud
 
@@ -710,13 +711,14 @@ class AgentEngine:
                 # （回「请前端先出第一个成语」搪塞）。这段直接加在 system 层（与人设同级
                 # 权重），明确「本职外也正常参与群内互动」，压住纯工作人设的抗拒。单聊
                 # agent 没有同事互动场景，不加（保持其原 persona）。
+                #
+                # B12：文案抽到 llm.prompts.TEAM_INTERACTION_SUFFIX 单一真源——与
+                # build_brain_prompt 内嵌的决策级提醒同一段文字（system 层 persona 追加 +
+                # 决策层 prompt 内嵌两层强化）。改文案只改常量一处，避免两处分叉。
                 sys_for_invoke = self.system_prompt
                 if not self.single_chat:
                     sys_for_invoke = (
-                        (self.system_prompt or "")
-                        + "\n\n作为团队成员，群里除了本职工作也可能有轻松的互动（成语接龙、"
-                        "你画我猜、多轮讨论）。这类互动请正常参与、配合规则，不必端着工作人设"
-                        "拒绝；接龙等游戏按规则接续即可。"
+                        (self.system_prompt or "") + "\n\n" + TEAM_INTERACTION_SUFFIX
                     )
                 result = await self.graph.ainvoke(
                     {

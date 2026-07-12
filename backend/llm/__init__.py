@@ -6,6 +6,7 @@ from .extract_json import extract_json
 from .json_stream import ContentExtractor
 from .prompts import (
     COORDINATOR_SYSTEM,
+    TEAM_INTERACTION_SUFFIX,
     build_agent_generate_prompt,
     build_brain_prompt,
     build_coordinator_prompt,
@@ -20,6 +21,7 @@ __all__ = [
     "extract_json",
     "ContentExtractor",
     "COORDINATOR_SYSTEM",
+    "TEAM_INTERACTION_SUFFIX",
     "build_agent_generate_prompt",
     "build_brain_prompt",
     "build_coordinator_prompt",

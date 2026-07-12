@@ -24,6 +24,20 @@ COORDINATOR_SYSTEM = r"""
 """
 
 
+# B12 团队互动语义单一真源：群聊普通成员的 system_prompt 追加段——压住纯工作人设
+# 对成语接龙等非工作互动的抗拒（agent 自带 system_prompt 把人设锁死在本职工作，brain 倾向
+# 回避「请前端先出第一个成语」搪塞）。直接加在 system 层（与人设同级权重）明确「本职外
+# 也正常参与」。单聊 agent 无同事互动场景，registry 不追加（保持其原 persona）。
+#
+# 此常量同时被 build_brain_prompt 内嵌为决策级提醒（同一语义在 system 层 persona 追加 +
+# 决策层 prompt 内嵌两层强化，文字一致避免分叉）。改文案只改这一处。
+TEAM_INTERACTION_SUFFIX = (
+    "作为团队成员，群里除了本职工作也可能有轻松的互动（成语接龙、你画我猜、闲聊）"
+    "——这类互动请正常参与、配合规则，不必端着工作人设拒绝。"
+    "接龙等游戏按规则接上即可，不知道前一个成语时可从上下文里其他成员最近说过的成语接续。"
+)
+
+
 def build_brain_prompt(role: str, name: str, context: str, message: str, system_prompt: str = "") -> str:
     """Worker brain prompt (Rust format_brain_prompt).
 
@@ -34,7 +48,10 @@ def build_brain_prompt(role: str, name: str, context: str, message: str, system_
     agent's own persona overrides the brain prompt's「你是一名专业的 {role}…」
     fallback persona (single-chat agent uses its own identity instead of the
     generic role persona). Body unchanged from pre-refactor — this function
-    still returns the ``user``-role decision prompt.
+    still returns the ``user``-role decision prompt. The team-interaction
+    reminder (B12) is interpolated from ``TEAM_INTERACTION_SUFFIX`` so the
+    system-layer persona append (registry) and decision-layer prompt (here)
+    share one source of truth for that paragraph.
     """
     return f"""你是一名专业的 {role}，名字叫 {name}。
 
@@ -58,7 +75,7 @@ def build_brain_prompt(role: str, name: str, context: str, message: str, system_
 
 当同事 @你 进行来回互动（如成语接龙、讨论、对话游戏）时，按规则继续，并在回复末尾 @对方 把话筒传回去；若接不上或无法继续，直接说明，不再 @对方（系统据此自然结束来回）。注意：@后只能写对方的**名字**（如 @后端工程师、@前端工程师），不要写 id。
 
-作为团队成员，群里除了本职工作也可能有轻松的互动（成语接龙、你画我猜、闲聊）——这类互动请正常参与、配合规则，不必端着工作人设拒绝。接龙等游戏按规则接上即可，不知道前一个成语时可从上下文里其他成员最近说过的成语接续。
+{TEAM_INTERACTION_SUFFIX}
 
 请严格按照以下 JSON 格式回复（只输出纯 JSON）：
 {{
