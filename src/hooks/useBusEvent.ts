@@ -168,6 +168,35 @@ export function useBusEvent(groupId: string | null) {
     })
   }, [])
 
+  // logs 批量 flush（B17，同 B16 模式）：原 setLogs((prev) => [...prev.slice(-200),
+  // entry]) 每事件 O(n) 切片。logs 虽经 VF/c32de07 源头过滤剔除了逐字 token delta
+  // （coordinator_token/task_token/coordinator_reasoning/coordinator_stats 不进 logs），
+  // 但 task_log（agent stdout）仍可能突发——chatty agent 跑构建脚本 1s 内打印数十行，
+  // 每行 emit_task_log → setLogs O(200) 切片 + 触发 ChatPanel 桥接 effect。镜像
+  // reasoningBufRef/eventsBufRef 模式：entry 攒进 ref，~50ms flush 一次到 state，把
+  // 数十次 setLogs 压到数次。cap 200 在 flush 时统一 enforce（prev.concat(buf) 超 200
+  // 取末尾 200，与原 slice(-200) 等价）。
+  //
+  // 配套契约：ChatPanel 桥接 effect 原「只取 logs[最后一条]」是旧契约，依赖 logs 逐条
+  // 变化。批量 flush 后单次 effect 可能含多条新 entry——若不改桥接，同批更早的 task_log
+  // /agent_reply 气泡会被丢掉（回归）。故 ChatPanel 桥接同步改为遍历新增尾部（见
+  // ChatPanel.tsx logs effect，B17），靠 wsMsgId 去重（setChatMessages prev.some）+
+  // spokenIdsRef 防 TTS 重读。ref 不触发渲染，flush 才触发；定时器兜底 + effect 清理
+  // flush，不丢日志。
+  const logsBufRef = useRef<LogEntry[]>([])
+  const logsFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushLogs = useCallback(() => {
+    logsFlushTimer.current = null
+    const buf = logsBufRef.current
+    if (buf.length === 0) return
+    logsBufRef.current = []
+    setLogs((prev) => {
+      const merged = prev.concat(buf)
+      if (merged.length <= 200) return merged
+      return merged.slice(merged.length - 200)
+    })
+  }, [])
+
   // 播种 agent status
   useEffect(() => {
     if (!groupId) {
@@ -191,6 +220,8 @@ export function useBusEvent(groupId: string | null) {
 
   // PL-10 重连后重拉历史：连接曾中断 → 上层消息/计划/状态可能过期，从真源补齐。
   // - messages: 重拉后重建 logs（供 GroupPage 聊天列表复原，按 id 去重保留）
+  //   - B17: 重连回灌历史是整批 setLogs（非 WS 逐条），不经过 logsBufRef 节流——
+  //     历史 batch 一次性落盘即可，节流只针对 WS 高频逐条。logsBufRef 不参与回灌。
   // - plan: 重读 coordinator 引擎 _dispatch_plan（无变更则保持，有 pending 则卡片复现）
   // - agentStatuses: 重读 /api/status 重新播种（断线期间状态可能已 idle→executing→idle）
   // useCallback 使引用稳定，仅在 groupId 变化时换实例，避免 WS effect 重订阅。
@@ -325,7 +356,15 @@ export function useBusEvent(groupId: string | null) {
           type: d.type,
           data: d.data,
         }
-        setLogs((prev) => [...prev.slice(-200), entry])
+        // B17 批量 flush：entry 攒进 ref，~50ms flush 一次到 state（同 B16 模式）。
+        // 原每事件 O(n) slice(-200) 在 chatty task_log 突发（构建脚本数十行/秒）时成本高。
+        // 配套 ChatPanel 桥接 effect 遍历新增尾部（见 ChatPanel logs effect，B17）。
+        logsBufRef.current.push(entry)
+        if (!logsFlushTimer.current) {
+          logsFlushTimer.current = window.setTimeout(() => {
+            flushLogs()
+          }, 50)
+        }
       }
 
       // → TaskStatusEvent (旧契约保留)
@@ -552,8 +591,16 @@ export function useBusEvent(groupId: string | null) {
       if (eventsBufRef.current.length > 0) {
         flushEvents()
       }
+      // B17 logs 批量 flush 兜底：切群/卸载前把缓冲残留 flush，防丢日志（同 events 兜底）
+      if (logsFlushTimer.current) {
+        clearTimeout(logsFlushTimer.current)
+        logsFlushTimer.current = null
+      }
+      if (logsBufRef.current.length > 0) {
+        flushLogs()
+      }
     }
-  }, [groupId, handleReconnect, refreshPlan, flushReasoning, flushEvents])
+  }, [groupId, handleReconnect, refreshPlan, flushReasoning, flushEvents, flushLogs])
 
   return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, refreshPlan }
 }

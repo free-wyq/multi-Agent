@@ -226,12 +226,21 @@ def assert_contract() -> list[str]:
         errs.append("[F16] VF reasoning 节流真源缺失（flushReasoning/reasoningBufRef/reasoningFlushTimer 之一缺）")
     else:
         print("[F16] OK  VF reasoning 节流真源完整（flushReasoning + reasoningBufRef + reasoningFlushTimer）")
-    # [17] WS effect 依赖数组含 flushEvents
-    m_deps = re.search(r"\},\s*\[groupId,\s*handleReconnect,\s*refreshPlan,\s*flushReasoning,\s*flushEvents\]\)", hook)
+    # [17] WS effect 依赖数组含 flushEvents（与 flushReasoning 并列，hook lint 完整）。
+    #     注：依赖数组随批次 flush helper 增长（B17 追加 flushLogs），故只断言 flushEvents
+    #     在数组内（非「数组恰为这 5 项」），前向兼容后续 flush helper 追加。
+    m_deps = re.search(r"\},\s*\[([^\]]*flushEvents[^\]]*)\]\)", hook)
     if not m_deps:
         errs.append("[F17] WS effect 依赖数组缺 flushEvents（hook lint 缺依赖）")
     else:
-        print("[F17] OK  WS effect 依赖数组含 flushEvents（与 flushReasoning 并列，hook lint 完整）")
+        deps = m_deps.group(1)
+        # 核心依赖都在（groupId/handleReconnect/refreshPlan/flushReasoning + flushEvents）
+        required = ["groupId", "handleReconnect", "refreshPlan", "flushReasoning", "flushEvents"]
+        missing = [d for d in required if d not in deps]
+        if missing:
+            errs.append(f"[F17] WS effect 依赖数组缺核心依赖 {missing}（deps={deps}）")
+        else:
+            print(f"[F17] OK  WS effect 依赖数组含 flushEvents（与 flushReasoning 并列，核心依赖齐全；数组={deps.strip()}）")
 
     return errs
 

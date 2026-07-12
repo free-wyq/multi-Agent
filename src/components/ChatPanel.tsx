@@ -521,48 +521,64 @@ export default function ChatPanel({
   // 其余 trace 事件（coordinator_think/task_token/task_think/task_tool/agent_status/
   // coordinator_plan/...）不进气泡——否则 coordinator_think 携带的完整回复文本会被
   // 渲染成气泡，与随后 node_chat 的 agent_reply 持久化消息（id 不同，不去重）重复，
-  // 即「协调者回复两次」缺陷根因。logs 只取最后一条（旧契约，保留）。
-  // 注意：lastLog 若是 coordinator_think 直接 return，不落进 chatMessages。
+  // 即「协调者回复两次」缺陷根因。
+  // 注意：coordinator_think 等非白名单 type 直接跳过，不落进 chatMessages。
   // task_think 不走此 logs 桥接通道（会成独立气泡，与归并折叠重复）：它经 TraceEvent
   // 流（useBusEvent events，mapKind→'think'），由 thinkEventsByTask（task 18）按 task_id
   // 归并到对应流式/定稿气泡的 thinkEvents，由 ChatMessageBubble 渲染成气泡内折叠块（task 19）。
+  //
+  // B17 桥接遍历新增尾部（替代「只取 logs 最后一条」旧契约）：useBusEvent B17 把 logs
+  // 改批量 flush（~50ms 聚合多条 entry 一次 setLogs），单次 logs 变化可能含多条新 entry。
+  // 旧「logs[logs.length-1]」只桥接最后一条 → 同批更早的 task_log/agent_reply 气泡被丢
+  // （回归）。改为遍历本次新增的尾部 entry（靠 wsMsgId 去重：setChatMessages prev.some
+  // + spokenIdsRef 防 TTS 重读），已桥接过的 id 跳过，新 id 才桥接+朗读。
+  // 增量判定靠 logsLenRef（上次桥接时的 logs.length）：本次只处理 logs[prevLen..]，避免
+  // 每次 logs 变化都全量重扫（logs cap 200，全量扫虽 O(200) 可接受，但增量更省且语义清晰）。
+  const logsLenRef = useRef(0)
   useEffect(() => {
-    if (logs.length === 0) return
-    const lastLog = logs[logs.length - 1]
-    if (lastLog.agentId === 'user') return
-    // 只把可成气泡的消息类型桥接进 chatMessages；思考/token/工具等 trace 事件跳过
-    if (!CHAT_MESSAGE_TYPES.has(lastLog.type)) return
-    const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
-    // 自动朗读：仅 agent_reply（智能体定稿回复）触发，且需总开关+自动朗读开关+引擎支持。
-    // 去重靠 spokenIdsRef（按 id），不依赖前后端时钟同步（WSL2 后端时钟与 Windows 浏览器常偏差秒级，
-    // 时间戳比较会误判）。切群/重连回灌的历史消息 id 不变 → 在集合里 → 跳过；新 WS 消息是全新 id → 朗读+记入。
-    // autoPlayReadyRef 闸门挡掉切群首拉历史窗口（拉历史前置 false、拉完置 true）。
-    if (
-      lastLog.type === 'agent_reply' &&
-      tts.enabled &&
-      tts.autoPlay &&
-      ttsSupported &&
-      autoPlayReadyRef.current &&
-      !spokenIdsRef.current.has(wsMsgId)
-    ) {
-      spokenIdsRef.current.add(wsMsgId)
-      ttsSpeak(lastLog.message)
+    const prevLen = logsLenRef.current
+    logsLenRef.current = logs.length
+    // B17：增量遍历上次桥接后的新增尾部（替代旧「只取最后一条」）。
+    // prevLen > logs.length 时（重连回灌重建 logs 较短，或切群重置），从 0 重扫更稳——
+    // 重灌的历史 id 不变，wsMsgId 去重会跳过已桥接的，不会重复加气泡。
+    const start = prevLen > logs.length ? 0 : prevLen
+    for (let i = start; i < logs.length; i++) {
+      const log = logs[i]
+      if (log.agentId === 'user') continue
+      // 只把可成气泡的消息类型桥接进 chatMessages；思考/token/工具等 trace 事件跳过
+      if (!CHAT_MESSAGE_TYPES.has(log.type)) continue
+      const wsMsgId = log.id || `ws-${log.timestamp}`
+      // 自动朗读：仅 agent_reply（智能体定稿回复）触发，且需总开关+自动朗读开关+引擎支持。
+      // 去重靠 spokenIdsRef（按 id），不依赖前后端时钟同步（WSL2 后端时钟与 Windows 浏览器常偏差秒级，
+      // 时间戳比较会误判）。切群/重连回灌的历史消息 id 不变 → 在集合里 → 跳过；新 WS 消息是全新 id → 朗读+记入。
+      // autoPlayReadyRef 闸门挡掉切群首拉历史窗口（拉历史前置 false、拉完置 true）。
+      if (
+        log.type === 'agent_reply' &&
+        tts.enabled &&
+        tts.autoPlay &&
+        ttsSupported &&
+        autoPlayReadyRef.current &&
+        !spokenIdsRef.current.has(wsMsgId)
+      ) {
+        spokenIdsRef.current.add(wsMsgId)
+        ttsSpeak(log.message)
+      }
+      setChatMessages((prev) => {
+        if (prev.some((m) => m.id === wsMsgId)) return prev
+        return [...prev, {
+          id: wsMsgId,
+          group_id: chatGroupId || '',
+          task_id: log.taskId || null,
+          sender_id: log.agentId,
+          receiver_id: 'broadcast',
+          type: log.type,
+          content: log.message,
+          data: (log.data ?? null) as Record<string, unknown> | null,
+          created_at: new Date(log.timestamp).toISOString(),
+        }]
+      })
     }
-    setChatMessages((prev) => {
-      if (prev.some((m) => m.id === wsMsgId)) return prev
-      return [...prev, {
-        id: wsMsgId,
-        group_id: chatGroupId || '',
-        task_id: lastLog.taskId || null,
-        sender_id: lastLog.agentId,
-        receiver_id: 'broadcast',
-        type: lastLog.type,
-        content: lastLog.message,
-        data: (lastLog.data ?? null) as Record<string, unknown> | null,
-        created_at: new Date(lastLog.timestamp).toISOString(),
-      }]
-    })
-  }, [logs, chatGroupId])
+  }, [logs, chatGroupId, tts.enabled, tts.autoPlay, ttsSupported])
 
   // 滚动到底部（仅滚动消息列表容器内部，不触发页面级滚动）。
   // 贴底跟随：仅在 stickToBottomRef 为 true（用户在底部附近）时自动滚，
@@ -590,6 +606,10 @@ export default function ChatPanel({
     spokenIdsRef.current = new Set()
     // 重置日期分组游标：新群首条消息应渲染日期分隔条（与旧群末条无关联）。
     lastDateRef.current = null
+    // B17：重置 logs 增量游标——新群 logs（经 useBusEvent 切群清空 + 拉历史重建）
+    // 与旧群无关，避免 logsLenRef 停在旧群长度导致漏桥接/错位。切群后 logs effect
+    // 从 0 重新扫，wsMsgId 去重保证不重复加气泡。
+    logsLenRef.current = 0
     if (chatGroupId) {
       setChatLoading(true)
       messageApi
