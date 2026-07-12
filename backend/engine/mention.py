@@ -5,24 +5,49 @@ punctuation. ``resolve_mention`` matches against group members by agent_id,
 agent name, or alias substring. ``route_mentions`` deduplicates per
 (sender->target, 30s) key to prevent routing loops. ``route_user_message``
 routes an inbound user message: @mention -> target agent, otherwise -> coordinator.
+
+A2A 来回对话：``route_mentions`` 用 ``push_notify``（非 ``push_task``），让被 @ 的
+peer 走 brain→chat 轻路径而非 execute 重路径——这样成语接龙/讨论等互动型任务能在
+成员间来回传递（调度路径仍由 ``dispatcher._dispatch_one`` 直调 ``push_task``，互不
+干涉）。反向清键（push 后清掉 target→sender）允许持续交替；同方向 30s 内连发仍被
+拦（防死循环）。``_a2a_turns`` 按 group 计数 + ``_A2A_CAP`` 上限，防两个 LLM 无限刷屏。
 """
 from __future__ import annotations
 
+import logging
+import os
 import time
 from typing import Any
 
 from engine.inbox import push_notify, push_task
 from store import crud
 
-# trailing punctuation to strip from mention tokens (Chinese + ASCII)
-_TRAIL = "，。：！？.,:!?、"  # include 、 for enumerations
+logger = logging.getLogger("multi-agent.mention")
+
+# trailing punctuation to strip from mention tokens (Chinese + ASCII).
+# 含全角/半角括号与冒号：LLM 常写「@前端工程师（agent_frontend_1）」或「@后端工程师：」，
+# 旧版只吃掉句末标点，遇到「名字（备注）」会把整串「前端工程师（agent_frontend_1），请…」
+# 当成一个 token，resolve 失败 → 接龙断在开局委派。括号等一旦出现就截断，只留括号前的名字。
+_TRAIL = "，。：！？.,:!?、()（）[]【】「」\"'"
+
+# 上述标点同时也作为 mention token 的「终止符」——遇到即停（不只是 rstrip 尾部）。
+# 这样「@前端工程师（agent_frontend_1）」→ token 取到「前端工程师」即止，括号内容不再并入。
+_TERM = _TRAIL
+
+# A2A 来回对话的轮次上限（防两个 worker 互相 @ 无限刷屏）。env 可调；用户每发一条
+# 新消息（route_user_message）就把该群计数清零，故一轮接龙从 0 重新数。
+_A2A_CAP = max(1, int(os.environ.get("MULTI_AGENT_A2A_TURNS", "8")))
+# group_id -> 已发生的 A2A @mention 传递次数
+_a2a_turns: dict[str, int] = {}
 
 
 def find_mentions(content: str) -> list[str]:
     """Scan ``content`` for ``@name`` tokens, stripping trailing punctuation.
 
-    Tokens are delimited by whitespace; trailing punctuation chars are removed.
-    Duplicates are preserved (caller dedups as needed).
+    Token 从 ``@`` 后开始，到**空白或终止标点**（括号/冒号/句末标点等，见 ``_TERM``）
+    为止，再 rstrip 尾部标点。终止符让「@前端工程师（agent_frontend_1）」只取
+    「前端工程师」、「@后端工程师：请…」只取「后端工程师」，避免把括号备注/后续句子
+    并入 token 导致 resolve 失败。Duplicates are preserved (caller dedups).
     """
     tokens: list[str] = []
     i = 0
@@ -30,7 +55,7 @@ def find_mentions(content: str) -> list[str]:
         if content[i] == "@":
             start = i + 1
             j = start
-            while j < len(content) and not content[j].isspace():
+            while j < len(content) and not content[j].isspace() and content[j] not in _TERM:
                 j += 1
             if j > start:
                 name = content[start:j].rstrip(_TRAIL)
@@ -40,6 +65,18 @@ def find_mentions(content: str) -> list[str]:
         else:
             i += 1
     return tokens
+
+
+def _get(obj: Any, key: str, default: Any = None) -> Any:
+    """Read ``key`` from a dict (``.get``) or a Pydantic model (``getattr``).
+
+    Members and agents cross between dict and model forms, so call sites
+    (``resolve_mention`` tiers + the coordinator fallback in ``route_mentions``)
+    share this one normalizer instead of redefining it locally.
+    """
+    if isinstance(obj, dict):
+        return obj.get(key, default)
+    return getattr(obj, key, default)
 
 
 def resolve_mention(
@@ -53,12 +90,6 @@ def resolve_mention(
     normalized to attribute access via ``_get``. Returns the matched agent_id
     or ``None``.
     """
-
-    def _get(obj: Any, key: str, default: Any = None) -> Any:
-        if isinstance(obj, dict):
-            return obj.get(key, default)
-        return getattr(obj, key, default)
-
     # (a) agent_id direct hit on a member
     for m in members:
         if _get(m, "agent_id") == mention:
@@ -66,6 +97,14 @@ def resolve_mention(
     # (b) agent name hit on a member's agent
     for a in agents:
         if _get(a, "name") == mention and any(
+            _get(m, "agent_id") == _get(a, "id") for m in members
+        ):
+            return _get(a, "id")
+    # (b2) agent role hit on a member's agent (e.g. @frontend_engineer / @后端工程师).
+    # role 是创建时的稳定标识（snake_case 英文），LLM 偶尔会用它 @人；name 才是首选，
+    # 但 role 作为兜底匹配让接龙/委派不致因 token 形态不同而断链。仅匹配群成员的 agent。
+    for a in agents:
+        if _get(a, "role") == mention and any(
             _get(m, "agent_id") == _get(a, "id") for m in members
         ):
             return _get(a, "id")
@@ -84,15 +123,31 @@ async def route_mentions(
     content: str,
     recent_routes: dict[str, float],
 ) -> None:
-    """Outbound mention routing with 30s anti-loop.
+    """Outbound mention routing with 30s anti-loop + A2A turn cap.
 
     Scans ``content`` for @mentions, resolves each to a target agent, and
-    ``push_task`` to the target. The ``recent_routes`` dict (mutated in place,
-    owned by the AgentEngine) records ``f"{sender_id}->{target_id}"`` -> timestamp
-    and skips a pair if it was routed within the last 30s.
+    ``push_notify`` to the target（让 peer 走 brain→chat 轻路径，而非 push_task
+    的 execute 重路径——互动型任务如成语接龙/讨论需成员间来回对话，不应被塞进
+    create_react_agent）。The ``recent_routes`` dict (mutated in place, owned by
+    the AgentEngine) records ``f"{sender_id}->{target_id}"`` -> timestamp and
+    skips a *same-direction* pair if it was routed within the last 30s（同方向
+    连发=死循环，挡掉）。成功 push 后清掉反向 key（target→sender），允许 A→B→A→B
+    持续交替——若不清，B→A 之后 A→B 会被 30s 内已存在拦死，来回只能跑 2 轮。
+
+    ``_a2a_turns`` 按 group 计数每次 @ 传递，达 ``_A2A_CAP`` 后不再 push（回复仍
+    落库+emit，话筒自然落地）；用户发新消息时 route_user_message 把计数清零。
     """
     mentions = find_mentions(content)
     if not mentions:
+        return
+
+    # A2A 轮次上限：已达 cap 就不再路由（防无限刷屏）。回复已由调用方 _unified_reply
+    # 落库+emit，用户看得到最后一条，话筒自然落地。
+    if _a2a_turns.get(group_id, 0) >= _A2A_CAP:
+        logger.debug(
+            "[mention] group=%s a2a_turns=%d reached cap=%d, stop routing @mentions",
+            group_id, _a2a_turns.get(group_id, 0), _A2A_CAP,
+        )
         return
 
     now = time.time()
@@ -103,19 +158,48 @@ async def route_mentions(
 
     members = await crud.list_group_members_with_agent(group_id)
     agents = await crud.list_agents()
+    # coordinator 不是 members 表里的成员（members 只存普通成员），但 LLM 常把话筒 @回
+    # 群主（@协调者 / @agent_coord_1）。resolve_mention 只看 members，会漏掉群主 →
+    # 接龙开局后第一条回 @群主 就断链。这里把 coordinator_id 也并入候选解析。
+    group = await crud.get_group(group_id)
+    coordinator_id = (group.coordinator_id if group else "") or ""
 
+    routed_any = False
     for mention in mentions:
         # skip self (by id or name)
         if mention == sender_id or mention == sender_name:
             continue
         target_id = resolve_mention(members, mention, agents)
+        # 兜底：token 命中 coordinator_id / coordinator 名字 / coordinator role
+        if not target_id and coordinator_id:
+            coord_agent = next((a for a in agents if _get(a, "id") == coordinator_id), None)
+            if mention == coordinator_id or (
+                coord_agent and mention in (_get(coord_agent, "name", ""), _get(coord_agent, "role", ""))
+            ):
+                target_id = coordinator_id
         if not target_id or target_id == sender_id:
+            logger.debug(
+                "[mention] group=%s sender=%s mention=%r -> unresolved (or self), skip",
+                group_id, sender_id, mention,
+            )
             continue
         key = f"{sender_id}->{target_id}"
         if key in recent_routes:
-            continue  # anti-loop: already routed this pair within 30s
+            continue  # anti-loop: 同方向 30s 内已路由过（A 连发两次 @B）
+        # push_notify（非 push_task）：peer 走 brain→chat 轻路径，互动型来回对话
+        # 不进 execute 重路径。kind=agent_reply + sender_id，peer 的 brain 能看到
+        # incoming_sender / incoming_message（_format_display_msg 加 [来自智能体 X] 前缀）。
+        await push_notify(
+            group_id, "agent_reply", sender_id, target_id, content, None
+        )
         recent_routes[key] = now
-        await push_task(group_id, sender_id, target_id, content, None)
+        # 反向清键：A→B push 后清 B→A，允许 B 回 @A 再 A 回 @B 持续交替。
+        # 不清的话 B→A 之后 A→B 撞 30s 内已存在，来回 2 轮就死。
+        recent_routes.pop(f"{target_id}->{sender_id}", None)
+        routed_any = True
+
+    if routed_any:
+        _a2a_turns[group_id] = _a2a_turns.get(group_id, 0) + 1
 
 
 async def route_user_message(group_id: str, content: str) -> None:
@@ -124,7 +208,11 @@ async def route_user_message(group_id: str, content: str) -> None:
     If the message mentions a group member, ``push_notify`` to that agent with
     kind ``agent_reply``. Otherwise ``push_notify`` to the group coordinator with
     kind ``coordinator_reply``. The notify wakes the target engine's run loop.
+
+    用户每发一条新消息就把该群 A2A 轮次计数清零——新一轮接龙/讨论从 0 重新数
+    ``_A2A_CAP`` 预算，不会因上一轮触顶而卡住。
     """
+    _a2a_turns[group_id] = 0
     mentions = find_mentions(content)
     if mentions:
         members = await crud.list_group_members_with_agent(group_id)
