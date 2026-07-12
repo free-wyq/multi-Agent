@@ -41,6 +41,10 @@ class CoordinatorState(TypedDict, total=False):
     group_id: str
     agent_id: str
     agent_name: str
+    # agent 基础 system_prompt（agent_def.system_prompt 缓存到引擎）。群聊 Leader
+    # 由 coordinator.py 三处 system 消息拼接成 base+COORDINATOR_SYSTEM；单聊走
+    # worker 图时由 brain 作为独立 system 消息注入。空串=用兜底人设。
+    system_prompt: str
 
     # incoming message
     incoming_message: str
@@ -85,6 +89,9 @@ class WorkerState(TypedDict, total=False):
     agent_id: str
     agent_name: str
     agent_role: str
+    # agent 基础 system_prompt：单聊 chat 路径用（brain 作为独立 system 消息注入）。
+    # 空串时 LLM 以 brain prompt 内「你是一名专业的 {role}…」兜底人设作答。
+    system_prompt: str
 
     # incoming message
     incoming_message: str

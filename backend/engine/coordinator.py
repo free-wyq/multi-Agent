@@ -51,6 +51,18 @@ def set_reply_callback(cb: Any) -> None:
     _REPLY_CB = cb
 
 
+def _leader_system(state: CoordinatorState) -> list[dict[str, str]]:
+    """群主 system 消息：agent.system_prompt 始终拼接 COORDINATOR_SYSTEM（用户不感知）。
+
+    coordinator 不是智能体类型、只是路由标记；群里谁当 Leader，行为就由它自己的
+    system_prompt + 群主职责（COORDINATOR_SYSTEM）共同决定。base 为空时退化为纯
+    COORDINATOR_SYSTEM（与改前等价）。单聊不走 coordinator 图（registry 按 single_chat
+    选 worker 图），故本 helper 只在群聊 Leader 路径生效。
+    """
+    base = (state.get("system_prompt") or "").strip()
+    return [{"role": "system", "content": base + "\n" + COORDINATOR_SYSTEM}]
+
+
 async def _unified_reply(
     group_id: str,
     agent_id: str,
@@ -255,8 +267,7 @@ async def _maybe_adjust_remaining_steps(
     try:
         raw = await chat_completion(
             config,
-            [{"role": "system", "content": COORDINATOR_SYSTEM},
-             {"role": "user", "content": prompt}],
+            _leader_system(state) + [{"role": "user", "content": prompt}],
         )
         decision = _parse_plan_adjust_decision(raw)
     except Exception as e:
@@ -470,8 +481,7 @@ async def _maybe_handle_step_failure(
     try:
         raw = await chat_completion(
             config,
-            [{"role": "system", "content": COORDINATOR_SYSTEM},
-             {"role": "user", "content": prompt}],
+            _leader_system(state) + [{"role": "user", "content": prompt}],
         )
         decision = _parse_step_recovery_decision(raw)
     except Exception as e:
@@ -607,10 +617,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
     try:
         reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = await _stream_coordinator_decision(
             config,
-            [
-                {"role": "system", "content": COORDINATOR_SYSTEM},
-                {"role": "user", "content": prompt},
-            ],
+            _leader_system(state) + [{"role": "user", "content": prompt}],
             state["group_id"],
             state["agent_id"],
         )

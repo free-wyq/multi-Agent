@@ -86,11 +86,19 @@ async def node_brain_decide(state: WorkerState) -> dict:
         state.get("agent_name", ""),
         context,
         display_msg,
+        state.get("system_prompt", ""),
     )
     config = get_llm_config()
     try:
+        # system_prompt 作为独立 system 消息注入（空串时 LLM 以 brain prompt 内
+        # 的 {role} 兜底人设作答）。单聊 agent 用自己的 system_prompt 主导行为，
+        # 不再回「我可以调度团队成员来协助你」（那是 COORDINATOR_SYSTEM 的人设）。
         raw = await chat_completion(
-            config, [{"role": "user", "content": prompt}]
+            config,
+            [
+                {"role": "system", "content": state.get("system_prompt", "") or ""},
+                {"role": "user", "content": prompt},
+            ],
         )
         decision = _parse_brain_decision(raw)
     except Exception as e:

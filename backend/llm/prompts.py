@@ -21,10 +21,17 @@ COORDINATOR_SYSTEM = r"""
 """
 
 
-def build_brain_prompt(role: str, name: str, context: str, message: str) -> str:
+def build_brain_prompt(role: str, name: str, context: str, message: str, system_prompt: str = "") -> str:
     """Worker brain prompt (Rust format_brain_prompt).
 
     Asks the LLM to choose chat/execute/ask and return strict JSON.
+
+    ``system_prompt`` is NOT embedded here: it is passed by the caller
+    (``node_brain_decide``) as a separate ``system``-role message, so the
+    agent's own persona overrides the brain prompt's「你是一名专业的 {role}…」
+    fallback persona (single-chat agent uses its own identity instead of the
+    generic role persona). Body unchanged from pre-refactor — this function
+    still returns the ``user``-role decision prompt.
     """
     return f"""你是一名专业的 {role}，名字叫 {name}。
 

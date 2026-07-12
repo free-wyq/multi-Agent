@@ -59,6 +59,7 @@ class AgentEngine:
         agent_def: dict[str, Any],
         group_id: str,
         coordinator_id: str = "",
+        single_chat: bool = False,
     ) -> None:
         self.agent_id: str = agent_def["id"]
         self.name: str = agent_def["name"]
@@ -68,6 +69,14 @@ class AgentEngine:
         # 不按 role 字符串判定（role 是创建时设的数据，群主身份是群组级配置）。
         self.is_coordinator: bool = self.agent_id == coordinator_id
         self.coordinator_id: str = coordinator_id
+        # agent 基础 system_prompt 缓存到引擎，供 coordinator 图（拼接 COORDINATOR_SYSTEM）
+        # 与 worker 图（brain 注入 system 消息）在 _handle_notify 时读 state.system_prompt 用，
+        # 避免 notify 每次回查 agent。
+        self.system_prompt: str = agent_def.get("system_prompt", "") or ""
+        # single_chat 标记：单聊群里唯一的 agent 虽被设为 coordinator_id（承接无 @mention 的
+        # 消息），但行为应是「个体」而非「调度者」——按业内共识单 agent = 退化多 agent，
+        # supervisor 只在多 agent 里存在，故单聊编译成 worker 图，不拼 COORDINATOR_SYSTEM。
+        self.single_chat: bool = bool(single_chat)
         self.status: str = "idle"  # idle | executing | offline
         self.current_task_id: str | None = None
         self._shutdown: bool = False
@@ -80,10 +89,16 @@ class AgentEngine:
         self._cancel_requested: bool = False  # PL-11: set by a stop request
         self._timeout_fired: bool = False  # MT-17: set by the watchdog when a task times out
 
-        if self.is_coordinator:
+        # 选图：群聊 Leader（is_coordinator 且非单聊）→ coordinator 图；其余（单聊的
+        # 唯一 agent、普通成员）→ worker 图。graph_kind 作为后续 is_coordinator 分支的
+        # 判定基准（_handle_task 看门狗、_execute_body 分流），单聊 worker 也能挂看门狗、
+        # 走 _run_worker_task（不再合成 coordinator_task notify 死循环）。
+        if self.is_coordinator and not self.single_chat:
             self.graph = build_coordinator_graph()
+            self.graph_kind: str = "coordinator"
         else:
             self.graph = build_worker_graph()
+            self.graph_kind = "worker"
         self.thread_id = f"{group_id}:{self.agent_id}"
 
     async def start(self) -> None:
@@ -176,7 +191,7 @@ class AgentEngine:
         # matches the MT-17 "Worker 长时间无响应超时降级" spec precisely.
         self._timeout_fired = False
         watchdog = None
-        if not self.is_coordinator:
+        if self.graph_kind == "worker":
             watchdog = await self._arm_timeout_watchdog(
                 task, self._resolve_worker_timeout()
             )
@@ -231,7 +246,7 @@ class AgentEngine:
         while ``_handle_task``'s post-run ``_reset_idle``/``_drain_pending``
         still execute to leave the engine in a clean idle state.
         """
-        if self.is_coordinator:
+        if self.graph_kind == "coordinator":
             # coordinator does not run the CLI; treat the task as a user demand
             # and trigger the coordinator graph via a synthetic notify.
             await complete_task(task["id"], True, "协调者已接收需求，开始调度。")
@@ -545,7 +560,7 @@ class AgentEngine:
                 self._recent_routes,
             )
 
-        if self.is_coordinator:
+        if self.graph_kind == "coordinator":
             coord_mod.set_reply_callback(reply_cb)
             try:
                 # PL-02/PL-03 + MT-03: read the group's config flags per invoke
@@ -571,6 +586,9 @@ class AgentEngine:
                         "group_id": self.group_id,
                         "agent_id": self.agent_id,
                         "agent_name": self.name,
+                        # 群聊 Leader：system_prompt + COORDINATOR_SYSTEM 由 coordinator.py
+                        # 三处 system 消息拼接（_leader_system）。
+                        "system_prompt": self.system_prompt,
                         "incoming_message": notify.get("content") or "",
                         "incoming_sender": notify.get("sender_id") or "",
                         "incoming_kind": notify.get("type") or "",
@@ -606,6 +624,9 @@ class AgentEngine:
                         "agent_id": self.agent_id,
                         "agent_name": self.name,
                         "agent_role": self.role,
+                        # 单聊/普通成员 worker brain：作为独立 system 消息注入，覆盖
+                        # brain prompt 的兜底人设；空串时退化为兜底（与改前等价）。
+                        "system_prompt": self.system_prompt,
                         "incoming_message": notify.get("content") or "",
                         "incoming_sender": notify.get("sender_id") or "",
                         "memory": self._memory,
@@ -727,12 +748,13 @@ class AgentRegistry:
         group_id: str,
         agent_def: dict[str, Any],
         coordinator_id: str = "",
+        single_chat: bool = False,
     ) -> AgentEngine:
         if group_id not in self._engines:
             self._engines[group_id] = {}
         if agent_def["id"] in self._engines[group_id]:
             return self._engines[group_id][agent_def["id"]]
-        engine = AgentEngine(agent_def, group_id, coordinator_id)
+        engine = AgentEngine(agent_def, group_id, coordinator_id, single_chat)
         await engine.start()
         self._engines[group_id][agent_def["id"]] = engine
         return engine
@@ -843,15 +865,18 @@ class AgentRegistry:
         groups = await crud.list_groups()
         for g in groups:
             coord_id = g.coordinator_id or ""
+            # single_chat 群（唯一 agent 当 coordinator_id 但行为是个体）→ 选图传 True；
+            # 群聊群 → False（Leader 走 coordinator 图）。统一传参保持签名一致。
+            single = bool((g.config or {}).get("single_chat"))
             if coord_id:
                 coord = await crud.get_agent(coord_id)
                 if coord:
-                    await self.add_engine(g.id, coord.model_dump(), coord_id)
+                    await self.add_engine(g.id, coord.model_dump(), coord_id, single)
             members = await crud.list_group_members_with_agent(g.id)
             for m in members:
                 agent = await crud.get_agent(m.agent_id)
                 if agent:
-                    await self.add_engine(g.id, agent.model_dump(), coord_id)
+                    await self.add_engine(g.id, agent.model_dump(), coord_id, single)
         logger.info(
             "[registry] loaded %d group(s) with engines",
             len(self._engines),
