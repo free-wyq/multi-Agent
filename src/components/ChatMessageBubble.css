@@ -133,3 +133,59 @@
   color: #faad14;
   font-weight: 600;
 }
+
+/* ── ST-06 产物下载卡区（气泡内底部，正文之下）──
+ * task 21 数据管道：ChatPanel.finalizedBubbles 从 task_complete 事件 data.artifact.files[]
+ * 提取后经 artifactFiles prop 传入；task 22 渲染按扩展名图标 + 下载按钮。
+ * 视觉与工具摘要区（.chat-tool-block）对称——都是「气泡内附加信息区」，用同款上分隔线
+ * 区隔正文。整组用 flex wrap，多文件自然换行不撑爆气泡宽度。 */
+.chat-artifact-block {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.chat-bubble--self .chat-artifact-block {
+  border-top-color: rgba(255, 255, 255, 0.18);
+}
+
+/* 单个产物文件小卡：紧凑行式，图标 + 文件名（截断）+ 大小 + 下载按钮。
+ * 背景比气泡底色稍深一档，营造「可点文件」的卡片感，与正文文本区分。 */
+.chat-artifact-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  background: rgba(0, 0, 0, 0.04);
+  border-radius: 6px;
+  font-size: 12px;
+  max-width: 100%;
+}
+
+.chat-bubble--self .chat-artifact-card {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.chat-artifact-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 180px;
+  font-weight: 500;
+}
+
+.chat-artifact-size {
+  opacity: 0.55;
+  flex-shrink: 0;
+  font-size: 11px;
+}
+
+.chat-artifact-download {
+  flex-shrink: 0;
+  /* 与小卡同高，避免按钮撑高行 */
+  display: inline-flex;
+  align-items: center;
+}

@@ -24,7 +24,7 @@ import {
 import PlanConfirmCard from './PlanConfirmCard'
 import StopTaskButton from './StopTaskButton'
 import SlashAutocomplete from './SlashAutocomplete'
-import ChatMessageBubble from './ChatMessageBubble'
+import ChatMessageBubble, { type ArtifactFile } from './ChatMessageBubble'
 import BubbleSpeakButton from './BubbleSpeakButton'
 import BubbleCopyButton from './BubbleCopyButton'
 import './ChatPanel.css'
@@ -157,6 +157,41 @@ function extractCoordReasoning(data: Record<string, unknown> | null): string | u
   return typeof r === 'string' && r ? r : undefined
 }
 
+/** ST-06（task 21）：从 task_complete 事件 data 提取产物文件列表（data.artifact.files[]）。
+ *
+ * 后端 bus.py emit_task_completed 仅成功路径把 scan_workspace_artifacts manifest 写入
+ * data.artifact（`{"files":[{name,path,size,modified_at},...]}`），失败/取消/超时路径 artifact
+ * key 缺省（key omission，非 null）→ 本函数返空数组。失败气泡因此自然无下载卡——语义正确，
+ * 失败任务不留可用产物。
+ *
+ * data 形状：TraceEvent.data（unknown，bus 事件透传）。容错解析——非对象/非数组/files 空
+ * 全返 []，不抛错（WS 事件结构偶发异常不应炸渲染）。返回元素字段做最小类型守卫（name/path
+ * 字符串化），与 ChatMessageBubble.ArtifactFile 形状对齐。 */
+function extractFinalizedArtifacts(data: unknown): ArtifactFile[] {
+  if (!data || typeof data !== 'object') return []
+  const dd = data as Record<string, unknown>
+  const artifact = dd['artifact']
+  if (!artifact || typeof artifact !== 'object') return []
+  const manifest = artifact as Record<string, unknown>
+  const files = manifest['files']
+  if (!Array.isArray(files)) return []
+  return files
+    .map((raw) => {
+      if (!raw || typeof raw !== 'object') return null
+      const f = raw as Record<string, unknown>
+      const name = typeof f['name'] === 'string' ? (f['name'] as string) : ''
+      const path = typeof f['path'] === 'string' ? (f['path'] as string) : ''
+      if (!name && !path) return null
+      return {
+        name: name || path,
+        path: path || name,
+        size: typeof f['size'] === 'number' ? (f['size'] as number) : 0,
+        modified_at: typeof f['modified_at'] === 'string' ? (f['modified_at'] as string) : '',
+      } as ArtifactFile
+    })
+    .filter((x): x is ArtifactFile => x !== null)
+}
+
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
 function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
   const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
@@ -233,6 +268,12 @@ interface FinalizedBubble {
   content: string
   isFailed: boolean
   timestamp: number
+  /** ST-06（task 21）：task_complete 事件 data.artifact.files[]（worker 任务产物 manifest）。
+   *  仅成功路径携带（bus.py emit_task_completed 仅 success 时透传 scan_workspace_artifacts
+   *  manifest）——失败/取消/超时路径 artifact key 缺省，extractFinalizedArtifacts 返空数组，
+   *  失败气泡自然无下载卡（语义正确，失败不留产物）。ChatMessageBubble.artifactFiles 据此
+   *  渲染下载卡（task 22：按扩展名图标 + 下载按钮）。 */
+  artifactFiles: ArtifactFile[]
 }
 
 interface ChatPanelProps {
@@ -442,6 +483,9 @@ export default function ChatPanel({
   // 收尾事件）即过滤掉定稿气泡——持久化回复接管，无永久重复。匹配按 sender+时间而非
   // task_id：logs 追加路径会把所有 WS 消息 coerce 成 type:'log' 且 task_id 可能丢失，
   // 故用「该 agent 在收尾时间戳之后的消息」判定回复已落地（_reply 是收尾后唯一后续消息）。
+  // ST-06（task 21）：成功路径同时提取 data.artifact.files[]（extractFinalizedArtifacts）
+  // → artifactFiles 传 ChatMessageBubble 渲染下载卡。失败/取消/超时路径后端不透传 artifact
+  // （bus.py emit_task_completed 仅 success 时写 data.artifact）→ 返空数组 → 失败气泡无下载卡。
   const finalizedBubbles = useMemo(() => {
     const out: FinalizedBubble[] = []
     const seen = new Set<string>()
@@ -466,6 +510,7 @@ export default function ChatPanel({
         content: e.content || '',
         isFailed: e.kind === 'failed',
         timestamp: e.timestamp,
+        artifactFiles: extractFinalizedArtifacts(e.data),
       })
     }
     return out
@@ -1090,6 +1135,7 @@ export default function ChatPanel({
             timestamp={new Date(b.timestamp).toISOString()}
             toolEvents={toolEventsByTask[b.taskId] || []}
             thinkEvents={thinkEventsByTask[b.taskId] || []}
+            artifactFiles={b.artifactFiles}
             isFailed={b.isFailed}
             actionGroup={
               <div className="bubble-action-group">

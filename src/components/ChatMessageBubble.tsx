@@ -1,8 +1,22 @@
 import { useMemo, useState } from 'react'
-import { Collapse, Tag } from 'antd'
-import { CaretRightOutlined, ToolOutlined, BulbOutlined } from '@ant-design/icons'
+import { Collapse, Tag, Tooltip } from 'antd'
+import { CaretRightOutlined, ToolOutlined, BulbOutlined, FileOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import './ChatMessageBubble.css'
+
+/** ST-06（task 21 数据 / task 22 渲染）：worker 任务产物文件条目。
+ *  形状对齐后端 scan_workspace_artifacts（workspace.py）manifest 的 files[] 元素：
+ *  name（basename）、path（工作区相对 POSIX 路径，可能含子目录如 `login-api/index.js`）、
+ *  size（字节）、modified_at（ISO）。与 TaskPage.ArtifactFile 同构——task 22 下载卡复用
+ *  TaskPage 按扩展名图标 + groupApi.downloadFileUrl（GET /api/groups/{id}/files/{name}）。
+ *  定义在此（prop 的消费方）并导出，ChatPanel.finalizedBubbles 导入复用——单一类型真源，
+ *  避免 ChatPanel/ChatMessageBubble 各定义一份漂移。 */
+export interface ArtifactFile {
+  name: string
+  path: string
+  size: number
+  modified_at: string
+}
 
 interface ChatMessageBubbleProps {
   /** 消息发送者 id（'user' | 'coordinator' | agent_id | 'system'）。决定左右对齐 + 头像色。 */
@@ -37,6 +51,12 @@ interface ChatMessageBubbleProps {
    *  复用协调者 reasoning 折叠区视觉（task 19 渲染）——worker think 是 ReAct 中间步，与该
    *  task 最终回复不重复，故可安全作为气泡内折叠块（区别于 coordinator_think 即回复正文）。 */
   thinkEvents?: TraceEvent[]
+  /** ST-06（task 21）：worker 任务产物文件列表（task_complete 事件 data.artifact.files[]）。
+   *  空数组则不渲染下载卡。仅 finalizedBubbles（定稿气泡，task 21 从 task_complete 事件
+   *  data.artifact 提取）传入——失败/取消/超时路径 artifact key 缺省（bus.py emit_task_completed
+   *  仅成功路径透传 manifest），故失败气泡自然无下载卡（失败任务不留产物，语义正确）。
+   *  task 22 在此 prop 基础上渲染按扩展名图标 + 下载按钮（groupApi.downloadFileUrl）。 */
+  artifactFiles?: ArtifactFile[]
   /** 是否正在流式生成（PL-08 逐字 token）。true → 气泡加 streaming 描边 + 正文尾追加闪烁光标。 */
   isStreaming?: boolean
   /** ST-04：是否失败定稿（task_failed 收尾）。true → 气泡加红描边标记失败语义。 */
@@ -85,6 +105,14 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
+/** ST-06（task 21/22）：字节 → 人类可读大小（B/KB/MB），与 TaskPage.humanSize 同算法。
+ *  产物下载卡展示文件大小用——保持与任务页交付物卡一致观感。 */
+function humanSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
 /** 工具名 → Tag 颜色（与 WorkerTrace 工具卡视觉呼应：start 绿 / end 灰）。 */
 function toolTagColor(isEnd: boolean): string {
   return isEnd ? 'default' : 'green'
@@ -126,6 +154,7 @@ export default function ChatMessageBubble({
   timestamp,
   toolEvents = [],
   thinkEvents = [],
+  artifactFiles = [],
   isStreaming = false,
   isFailed = false,
   isUser = false,
@@ -180,6 +209,12 @@ export default function ChatMessageBubble({
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
   const hasReasoning = !!(reasoning && reasoning.length > 0)
+  // ST-06（task 21 数据管道）：worker 任务产物文件列表（task_complete data.artifact.files[]）。
+  // 仅 finalizedBubbles 传入（task 21 从 task_complete 事件 data.artifact 提取）；流式/协调者
+  // 气泡不传（默认空数组）。hasArtifacts 让「既无工具也无内容也无思考也无产物」的防御兜底放行，
+  // 使纯产物定稿气泡（content 空但有产物文件，如 worker 全程用工具产出文件最终回复为空）仍能渲染。
+  // 失败/取消/超时路径后端不透传 artifact（bus.py 仅成功路径写 data.artifact），失败气泡自然无下载卡。
+  const hasArtifacts = artifactFiles.length > 0
   // ST-05（task 18 归并 / task 19 渲染）：worker ReAct 中间思考事件（task_think，data.phase
   // 'thinking'|'final'）。thinkEvents 由父组件（ChatPanel.thinkEventsByTask）按 task_id 过滤后
   // 传入。task 18 完成归并管道（prop + 守卫）；本任务（task 19）渲染为气泡内折叠区。
@@ -211,8 +246,8 @@ export default function ChatMessageBubble({
     reasoningTokens && reasoningTokens > 0
       ? reasoningTokens
       : Math.max(1, Math.ceil((reasoning?.length || 0) / 3))
-  // 既无工具也无内容也无推理也无思考且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
-  if (!hasTools && !hasContent && !hasReasoning && !hasThinks && !isStreaming) return null
+  // 既无工具也无内容也无推理也无思考也无产物且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
+  if (!hasTools && !hasContent && !hasReasoning && !hasThinks && !hasArtifacts && !isStreaming) return null
 
   return (
     <div
@@ -392,6 +427,29 @@ export default function ChatMessageBubble({
             <div className={hasTools ? 'chat-bubble-content' : undefined}>
               {renderContent ? renderContent(content) : content}
               {isStreaming && <span className="chat-streaming-cursor" />}
+            </div>
+          )}
+
+          {/* ST-06（task 21 数据管道 / task 22 渲染）：worker 任务产物下载卡。
+              task_complete 事件 data.artifact.files[]（bus.py emit_task_completed 仅成功路径透传
+              scan_workspace_artifacts manifest）经 ChatPanel.finalizedBubbles 提取 → artifactFiles
+              prop 传入。每文件一张小卡：按扩展名图标 + 文件名（截断 + tooltip 全 path）+ 大小
+              （humanSize B/KB/MB）+ 下载按钮（groupApi.downloadFileUrl → GET /api/groups/{id}/files/{name}，
+              与 TaskPage 交付物卡同下载入口，复用 PL-12 的 saveBlob 逻辑——task 22 落地完整下载交互，
+              本 task 21 先搭数据管道 + 占位渲染）。
+              位置在正文之下（产物是任务收尾后产出，逻辑上跟在回复之后）；失败/取消/超时任务无 artifact
+              （后端不透传），失败气泡自然无下载卡（语义正确——失败不留可用产物）。 */}
+          {hasArtifacts && (
+            <div className="chat-artifact-block">
+              {artifactFiles.map((f) => (
+                <div key={f.path || f.name} className="chat-artifact-card">
+                  <FileOutlined style={{ color: '#1677ff', fontSize: 14, flexShrink: 0 }} />
+                  <Tooltip title={f.path || f.name}>
+                    <span className="chat-artifact-name">{f.name}</span>
+                  </Tooltip>
+                  {f.size > 0 && <span className="chat-artifact-size">{humanSize(f.size)}</span>}
+                </div>
+              ))}
             </div>
           )}
         </div>
