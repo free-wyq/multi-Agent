@@ -8,5 +8,30 @@ html, body, #root {
    * 锁死后所有滚动只能发生在指定的 overflow:auto 容器里：左侧菜单列表、右侧消息列表。 */
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: #f0f2f5;
+  background: #eef1f6;
+}
+
+/* ── 层次感色彩系统（2026-07-12）──────────────────────────
+ * 问题：此前顶栏/侧栏/主区/卡片都用相近的灰白色（#fff / #f7f8fa），边界糊在一起，
+ *      分不清谁浮谁沉。改为「三段灰度梯度 + 投影/边线」拉开层次：
+ *
+ *   后退 ──────────────────────────────────────── 前凸
+ *   ┌─────────────┬───────────────┬──────────────┐
+ *   │ app 外层     │ 主区底         │ 卡片/面板    │
+ *   │ #eef1f6 冷灰 │ #f4f6fa 次冷灰 │ #ffffff 纯白  │
+ *   └─────────────┴───────────────┴──────────────┘
+ *
+ *   顶栏/侧栏 = #ffffff 浮起，靠 box-shadow 与主区底拉开（不靠同色叠），
+ *   卡片/面板 = #ffffff 最前凸，靠 border + 轻投影。
+ *   每级灰度差约 5–8 个色阶，肉眼可辨又不刺眼。
+ * ──────────────────────────────────────────────────────── */
+:root {
+  --app-bg: #eef1f6;        /* app 最外层冷灰（body background，下沉后退） */
+  --surface-main: #f4f6fa;  /* 主内容区次冷灰（介于 app 与白卡之间） */
+  --surface-raised: #ffffff;/* 浮起面：顶栏/侧栏/卡片 */
+  --border-soft: #e6e9ef;   /* 主区与浮起面之间的柔和分隔线 */
+  --border-card: #eceef3;   /* 卡片边线 */
+  --shadow-topbar: 0 1px 3px rgba(15, 23, 42, 0.06);       /* 顶栏投影（轻，不喧宾） */
+  --shadow-sidebar: 0 1px 3px rgba(15, 23, 42, 0.04);      /* 侧栏投影 */
+  --shadow-card: 0 1px 2px rgba(15, 23, 42, 0.04);          /* 卡片静态投影 */
 }

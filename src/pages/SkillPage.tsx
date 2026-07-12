@@ -319,7 +319,8 @@ export default function SkillPage() {
         height: '100%',
         minHeight: 0,
         overflowY: 'auto',
-        padding: 16,
+        padding: 20,
+        background: 'var(--surface-main)',
         display: 'flex',
         flexDirection: 'column',
       }}

@@ -13,8 +13,10 @@ import { agentApi, type AgentCreatePayload } from '../services/api'
 const SIDEBAR_WIDTH = 240
 /** 品牌蓝（强调色，选中项左条 + 品牌字）。 */
 const BRAND = '#0A5ACF'
-/** 侧栏浅灰底色。 */
-const SIDEBAR_BG = '#f7f8fa'
+/** 侧栏浮起面：白底（与顶栏一致，浮于主区冷灰之上）。 */
+const SIDEBAR_BG = 'var(--surface-raised)'
+/** 侧栏与主区的分隔线。 */
+const SIDEBAR_BORDER = 'var(--border-soft)'
 
 /** agent 状态 → 圆点色（与 AgentPage/Statusbar 对齐）。 */
 const STATUS_DOT: Record<string, string> = {
@@ -69,7 +71,10 @@ export default function Sidebar({ onNavigateChat }: SidebarProps) {
         width: SIDEBAR_WIDTH,
         flexShrink: 0,
         background: SIDEBAR_BG,
-        borderRight: '1px solid #ececec',
+        borderRight: `1px solid ${SIDEBAR_BORDER}`,
+        boxShadow: 'var(--shadow-sidebar)',
+        position: 'relative',
+        zIndex: 1,
         display: 'flex',
         flexDirection: 'column',
         height: '100%',

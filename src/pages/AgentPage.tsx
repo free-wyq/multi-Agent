@@ -334,7 +334,7 @@ export default function AgentPage() {
   return (
     <div
       className="agent-page"
-      style={{ height: '100%', minHeight: 0, overflowY: 'auto', padding: 16 }}
+      style={{ height: '100%', minHeight: 0, overflowY: 'auto', padding: 20, background: 'var(--surface-main)' }}
     >
       {/* ── 顶部横幅 ── */}
       <div className="agent-hero">

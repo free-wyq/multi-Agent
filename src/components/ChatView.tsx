@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button, Empty, Tooltip, Typography } from 'antd'
-import { SettingOutlined } from '@ant-design/icons'
+import { TeamOutlined } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
 import { useBusEventContext } from '../contexts/BusEventContext'
@@ -49,7 +49,7 @@ export default function ChatView() {
   // 未选群：占位引导。
   if (!groupId || !activeGroup) {
     return (
-      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#fff' }}>
+      <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-raised)' }}>
         <Empty description="请在左侧选择智能体或群组开始对话" />
       </div>
     )
@@ -67,14 +67,14 @@ export default function ChatView() {
     : undefined
 
   return (
-    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: '#fff', overflow: 'hidden' }}>
-      {/* 标题区 */}
+    <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', flexDirection: 'column', background: 'var(--surface-raised)', overflow: 'hidden' }}>
+      {/* 标题区。浮起白底 + 底部细线，与下方消息区（同白底但有滚动列表）靠投影/分隔线区分。 */}
       <div
         style={{
           height: 48,
           flexShrink: 0,
           padding: '0 20px',
-          borderBottom: '1px solid #f0f0f0',
+          borderBottom: '1px solid var(--border-soft)',
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'space-between',
@@ -115,7 +115,7 @@ export default function ChatView() {
             <Tooltip title="群信息">
               <Button
                 type="text"
-                icon={<SettingOutlined />}
+                icon={<TeamOutlined />}
                 size="small"
                 onClick={() => setInfoOpen(true)}
               />

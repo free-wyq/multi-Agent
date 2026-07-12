@@ -113,10 +113,11 @@
 
 /* ── 单张卡片 ── */
 .agent-card {
-  background: #fff;
+  background: var(--surface-raised);
   border-radius: 14px;
   overflow: hidden;
-  border: 1px solid #f0f0f0;
+  border: 1px solid var(--border-card);
+  box-shadow: var(--shadow-card);
   transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
               border-color 0.25s ease;
@@ -376,12 +377,12 @@
 
 /* ── AG-11 角色模板广场 ── */
 .agent-templates-panel {
-  background: #fff;
-  border: 1px solid #f0f0f0;
+  background: var(--surface-raised);
+  border: 1px solid var(--border-card);
   border-radius: 14px;
   padding: 20px 24px 24px;
   margin-bottom: 28px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.03);
+  box-shadow: var(--shadow-card);
 }
 
 .agent-templates-header {

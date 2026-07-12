@@ -13,13 +13,14 @@
  *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
  */
 import { useEffect, useState } from 'react'
-import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm } from 'antd'
+import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Avatar } from 'antd'
 import {
   ApiOutlined,
   AppstoreOutlined,
   DatabaseOutlined,
   CloudServerOutlined,
   PlusOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
@@ -29,11 +30,17 @@ import { providerApi, type LlmProvider } from '../services/api'
 interface SettingsModalProps {
   open: boolean
   onClose: () => void
+  /** 打开时默认聚焦的导航项（顶部栏头像入口传 'user'，其余默认 'mcp'）。
+   *  destroyOnClose 下每次重开都按此重置。 */
+  initialKey?: NavKey
 }
+
+/** 左侧导航项 key：联合类型供 activeKey/initialKey 共用（导出供 Layout 引用）。 */
+export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user'
 
 /** 左侧导航项定义：key 唯一标识，用于 activeKey 条件渲染右侧内容。 */
 interface NavItem {
-  key: 'mcp' | 'skills' | 'memory' | 'model'
+  key: NavKey
   label: string
   icon: React.ReactNode
 }
@@ -43,14 +50,20 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'skills', label: '技能', icon: <AppstoreOutlined /> },
   { key: 'memory', label: '记忆', icon: <DatabaseOutlined /> },
   { key: 'model', label: '模型服务商', icon: <CloudServerOutlined /> },
+  { key: 'user', label: '用户信息', icon: <UserOutlined /> },
 ]
 
 /** 品牌蓝：仅用于选中项左条 + 选中文字强调，主体保持浅灰白。 */
 const BRAND_BLUE = '#0A5ACF'
 
-export default function SettingsModal({ open, onClose }: SettingsModalProps) {
-  // 选中项：默认 MCP。destroyOnClose 卸载后再次打开会重置为 'mcp'（符合「每次打开都从首项开始」预期）。
-  const [activeKey, setActiveKey] = useState<NavItem['key']>('mcp')
+export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: SettingsModalProps) {
+  // 选中项：默认 MCP（头像入口可传 'user'）。destroyOnClose 卸载后再次打开按 initialKey 重置。
+  const [activeKey, setActiveKey] = useState<NavKey>(initialKey)
+
+  // initialKey 变化时同步（同一弹窗实例复用时，从头像进入 vs 从设置进入的默认页不同）。
+  useEffect(() => {
+    if (open) setActiveKey(initialKey)
+  }, [open, initialKey])
 
   // ── 多服务商管理 state ──
   // 用户反馈：服务商是「一个列表 + 开关样式可选择启用谁」。每行一个 Switch = 启用/停用该服务商；
@@ -236,6 +249,31 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
               }}
             >
               <Empty description="记忆管理开发中（后端 /api/memory 端点待补）" />
+            </div>
+          )}
+          {activeKey === 'user' && (
+            <div style={{ maxWidth: 480 }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: 16,
+                  padding: '20px 0',
+                  borderBottom: '1px solid #f0f0f0',
+                }}
+              >
+                <Avatar size={64} icon={<UserOutlined />} />
+                <div>
+                  <div style={{ fontSize: 18, fontWeight: 600 }}>游客</div>
+                  <div style={{ fontSize: 13, color: '#999', marginTop: 4 }}>
+                    未登录 · 登录功能开发中
+                  </div>
+                </div>
+              </div>
+              <p style={{ fontSize: 13, color: '#666', marginTop: 20, lineHeight: 1.8 }}>
+                后续将支持账号登录，登录后可同步智能体配置、对话历史与技能到云端。
+                当前为本地单机模式，所有数据保存在本机。
+              </p>
             </div>
           )}
           {activeKey === 'model' && (

@@ -72,7 +72,8 @@ export default function MonitorPage() {
         height: '100%',
         minHeight: 0,
         overflowY: 'auto',
-        padding: 16,
+        padding: 20,
+        background: 'var(--surface-main)',
       }}
     >
       {/* L4-05：迁 /monitor 全屏路由，根容器加 height:100%+overflowY:auto 接通高度链。
