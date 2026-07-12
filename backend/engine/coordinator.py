@@ -604,7 +604,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
 
     config = get_llm_config()
     try:
-        reply_id, raw, tokens, elapsed_ms = await _stream_coordinator_decision(
+        reply_id, raw, tokens, elapsed_ms, model = await _stream_coordinator_decision(
             config,
             [
                 {"role": "system", "content": COORDINATOR_SYSTEM},
@@ -621,19 +621,20 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "content": "抱歉，我这边理解有点困难，能再说一次吗？",
             "plan": [],
         }
-        reply_id, tokens, elapsed_ms = "", 0, 0
+        reply_id, tokens, elapsed_ms, model = "", 0, 0, ""
 
     # Stamp the streaming run-stats onto the chat action so node_chat persists
     # them onto the agent_reply's data — the finalized bubble then keeps
-    # rendering "Ns · ↓ N tokens" after the streaming bubble retires (stats
-    # stay visible, don't vanish on completion). Only chat replies carry this;
-    # dispatch/summarize go through their own _unified_reply call sites with
-    # no stats (their "stats" are the plan, not a single LLM turn).
+    # rendering "model · Ns · ↓ N tokens" after the streaming bubble retires
+    # (stats stay visible, don't vanish on completion). Only chat replies carry
+    # this; dispatch/summarize go through their own _unified_reply call sites
+    # with no stats (their "stats" are the plan, not a single LLM turn).
     if decision["action"] == "chat":
         decision["_stream_stats"] = {
             "reply_id": reply_id,
             "elapsed_ms": elapsed_ms,
             "tokens": tokens,
+            "model": model,
         }
 
     await emit_coordinator_think(
@@ -1052,7 +1053,7 @@ async def _stream_coordinator_decision(
     messages: list[dict[str, str]],
     group_id: str,
     coordinator_id: str,
-) -> tuple[str, str, int, int]:
+) -> tuple[str, str, int, int, str]:
     """Stream the coordinator LLM, emitting per-token + live-stats events.
 
     Consumes ``chat_completion_stream``: each ``(delta, completion_tokens)``
@@ -1063,7 +1064,7 @@ async def _stream_coordinator_decision(
     once more at the end with ``phase="done"`` and the real
     ``completion_tokens``.
 
-    Returns ``(reply_id, raw_full, tokens, elapsed_ms)``:
+    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model)``:
 
     - ``reply_id`` — the UUID per-turn streaming key (so the caller can stamp
       it onto the persisted agent_reply's ``data`` and the frontend can keep the
@@ -1073,8 +1074,12 @@ async def _stream_coordinator_decision(
     - ``tokens`` — the final token count (real ``completion_tokens`` if the
       provider sent usage, else the coarse char-based estimate).
     - ``elapsed_ms`` — total wall-clock from stream start to finish.
+    - ``model`` — the LLM model id that produced this reply (``config["model"]``),
+      surfaced through stats + persisted data so the bubble can show *which*
+      model answered (the user can hot-switch models via the provider catalog).
     """
     reply_id = uuid.uuid4().hex
+    model = str(config.get("model") or "")
     extractor = _ContentExtractor()
     raw_parts: list[str] = []
     final_tokens = 0
@@ -1107,6 +1112,7 @@ async def _stream_coordinator_decision(
                     elapsed_ms,
                     live_tokens,
                     "streaming",
+                    model,
                 )
             except Exception:
                 logger.exception("[coordinator] failed to emit streaming stats")
@@ -1123,10 +1129,11 @@ async def _stream_coordinator_decision(
             elapsed_ms,
             real_tokens,
             "done",
+            model,
         )
     except Exception:
         logger.exception("[coordinator] failed to emit final stats")
-    return reply_id, raw_full, real_tokens, elapsed_ms
+    return reply_id, raw_full, real_tokens, elapsed_ms, model
 
 
 def _parse_coordinator_decision(raw: str) -> dict:

@@ -114,7 +114,7 @@ export function useBusEvent(groupId: string | null) {
   // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
   const [coordStreaming, setCoordStreaming] = useState<Record<string, string>>({})
   const [coordStats, setCoordStats] = useState<
-    Record<string, { elapsed_ms: number; tokens: number; phase: string }>
+    Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string }>
   >({})
 
   // 播种 agent status
@@ -368,9 +368,11 @@ export function useBusEvent(groupId: string | null) {
               return next
             })
           } else {
+            const model =
+              typeof dd['model'] === 'string' ? (dd['model'] as string) : undefined
             setCoordStats((prev) => ({
               ...prev,
-              [replyId]: { elapsed_ms: elapsedMs, tokens, phase },
+              [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model },
             }))
           }
         }

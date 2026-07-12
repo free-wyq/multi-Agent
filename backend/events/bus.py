@@ -340,14 +340,20 @@ async def emit_coordinator_stats(
     elapsed_ms: int,
     tokens: int,
     phase: str,
+    model: str = "",
 ) -> None:
     """Live run-statistics for a coordinator reply (elapsed time + token count).
 
     Emitted periodically (throttled ~200ms) while the coordinator LLM streams,
     plus a final emit with ``phase="done"`` carrying the real
     ``completion_tokens`` from the stream's usage chunk. The frontend renders
-    these as a Claude-Code-style status line ("Ns · ↓ N tokens · thinking")
+    these as a Claude-Code-style status line ("model · Ns · ↓ N tokens · thinking")
     that refreshes in real time alongside the streaming bubble.
+
+    ``model`` is the LLM model id that produced this reply (``config["model"]``),
+    surfaced so the bubble can show *which* model answered — useful when the
+    user hot-switches models via the provider catalog. Empty string = unknown
+    (legacy callers); the frontend falls back to omitting the model segment.
     """
     await bus_manager.emit(
         group_id,
@@ -364,6 +370,7 @@ async def emit_coordinator_stats(
                 "elapsed_ms": elapsed_ms,
                 "tokens": tokens,
                 "phase": phase,
+                "model": model,
             },
             "timestamp": _ts(),
         },

@@ -39,8 +39,8 @@ export interface BusEventContextValue {
   streaming: Record<string, string>
   /** 协调者流式回复：reply_id → 累积的 content delta（coordinator_token 逐字拼接）。 */
   coordStreaming: Record<string, string>
-  /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase }（coordinator_stats 节流更新）。 */
-  coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string }>
+  /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase, model }（coordinator_stats 节流更新）。 */
+  coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string }>
   /** 主动从真源拉取驻留计划（对齐后端 _dispatch_plan）。PlanConfirmCard 409 静默刷新、切群首拉复用。 */
   refreshPlan: () => Promise<void>
 }

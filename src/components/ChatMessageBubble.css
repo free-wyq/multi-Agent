@@ -111,11 +111,18 @@
   margin-top: 0;
 }
 
-/* ── 状态行（Claude-Code 风格 "Ns · ↓ N tokens · thinking"）── */
+/* ── 状态行（Claude-Code 风格 "model · Ns · ↓ N tokens · thinking"）── */
 /* 协调者流式气泡的实时统计行：小号灰字，与时间戳同行级。 */
 .chat-status-line {
   font-size: 11px;
   color: #999;
   margin-top: 2px;
   font-family: 'monospace';
+}
+
+/* 状态行中的模型名段——稍深色 + 加粗，与耗时/token 段视觉区分，
+   让用户一眼定位「这条回复是哪个模型生成的」。 */
+.chat-status-model {
+  color: #8b5cf6;
+  font-weight: 600;
 }

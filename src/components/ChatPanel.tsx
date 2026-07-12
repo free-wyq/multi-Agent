@@ -72,18 +72,19 @@ function formatElapsed(ms: number): string {
 }
 
 /** 从持久化 agent_reply 的 data 字段提取协调者流式统计。
- *  node_chat 经 _unified_reply 把 {reply_id, elapsed_ms, tokens} 落盘到 message.data，
- *  定稿气泡据此渲染「Ns · ↓ N tokens · 完成」状态行——流式期间的统计在完成后保留可见，
+ *  node_chat 经 _unified_reply 把 {reply_id, elapsed_ms, tokens, model} 落盘到 message.data，
+ *  定稿气泡据此渲染「model · Ns · ↓ N tokens · 完成」状态行——流式期间的统计在完成后保留可见，
  *  不随流式气泡退场消失。非协调者 chat 回复（dispatch/summarize announce、user_input、
  *  task_log、slash_card）data 无 elapsed_ms → null，不渲染状态行。 */
 function extractCoordStats(
   data: Record<string, unknown> | null,
-): { elapsed_ms: number; tokens: number } | null {
+): { elapsed_ms: number; tokens: number; model?: string } | null {
   if (!data) return null
   const elapsed = Number(data.elapsed_ms)
   if (!Number.isFinite(elapsed) || elapsed <= 0) return null
   const tokens = Number(data.tokens)
-  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0 }
+  const model = typeof data.model === 'string' && data.model ? data.model : undefined
+  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0, model }
 }
 
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
@@ -768,7 +769,9 @@ export default function ChatPanel({
                     {new Date(msg.created_at).toLocaleTimeString()}
                   </div>
                   {/* 定稿协调者回复的状态行：从持久化 agent_reply.data 取流式统计
-                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens}），渲染「Ns · ↓ N tokens · 完成」。
+                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens, model}），渲染
+                      「model · Ns · ↓ N tokens · 完成」状态行。model 在最前——用户能直观看到
+                      这条回复是哪个模型生成的（热切换模型后历史气泡保留当时的模型名）。
                       流式期间的统计在完成后保留可见——不随流式气泡退场消失。
                       非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
                       data 无 elapsed_ms → extractCoordStats 返回 null → 不渲染状态行。 */}
@@ -777,6 +780,10 @@ export default function ChatPanel({
                     if (!stats) return null
                     return (
                       <div className="chat-status-line">
+                        {stats.model && (
+                          <span className="chat-status-model">{stats.model}</span>
+                        )}
+                        {stats.model && ' · '}
                         {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens · 完成`}
                       </div>
                     )
@@ -817,6 +824,7 @@ export default function ChatPanel({
           const tokens = stats?.tokens ?? 0
           const phaseLabel =
             stats?.phase === 'done' ? '完成' : '思考中'
+          const model = stats?.model
           return (
             <ChatMessageBubble
               key={`coord-streaming-${b.replyId}`}
@@ -829,7 +837,11 @@ export default function ChatPanel({
               timestamp={new Date().toISOString()}
               isStreaming={stats?.phase !== 'done'}
               statusLine={
-                <>{`${elapsedStr} · ↓ ${tokens} tokens · ${phaseLabel}`}</>
+                <>
+                  {model && <span className="chat-status-model">{model}</span>}
+                  {model && ' · '}
+                  {`${elapsedStr} · ↓ ${tokens} tokens · ${phaseLabel}`}
+                </>
               }
             />
           )
