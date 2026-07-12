@@ -155,11 +155,18 @@ export default function ProviderEditor({
   onClose,
 }: ProviderEditorProps) {
   const isEdit = !!provider
-  // destroyOnClose 下 Modal 关闭即卸载，再次打开重新跑 useState 初始化器——
-  // 故 provider 变化（新增↔编辑切换）会重新灌入 formState，无需 useEffect 同步。
+  // ProviderEditor 常驻挂载（SettingsModal 始终渲染本组件，open 只控 Modal 显隐，不卸载组件），
+  // 故 useState 初始化器只在首次挂载跑一次（那时 provider 恒 undefined → EMPTY_FORM）。
+  // 不加此 effect，编辑态 provider prop 变化不会重灌 formState → 表单全空白（信息不反显）。
+  // 打开时按 provider 重置：编辑态灌入、新增态清空；关闭态不重置（保留输入供改后重试仅对当前
+  // 仍打开有效，关闭后 formOpen=false，下次打开按新 provider 重置——取消即丢弃未保存编辑）。
   const [formState, setFormState] = useState<ProviderFormState>(() =>
     provider ? providerToFormState(provider) : EMPTY_FORM,
   )
+  useEffect(() => {
+    if (!open) return
+    setFormState(provider ? providerToFormState(provider) : EMPTY_FORM)
+  }, [open, provider])
 
   // ── PE-03 extra_headers JSON 文本镜像 ──
   // formState.extra_headers 是结构化 Record|null（保存时用），但表单里是单行文本框
