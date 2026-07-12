@@ -1,22 +1,29 @@
-"""Plan-confirmation routes — M12 PL-02/PL-03 (方案 B 引擎内存态等待).
+"""Plan-confirmation routes — M12 PL-02/PL-03 (LangGraph native interrupt resume).
 
 Routes map to frontend `planApi`:
-  POST /api/groups/{groupId}/plan/confirm   → plan_confirm   (resume waiting plan)
-  POST /api/groups/{groupId}/plan/direct    → plan_direct     (switch 直接干 mode + resume)
-  POST /api/groups/{groupId}/plan/modify    → plan_modify     (amend steps, then confirm)
+  POST /api/groups/{groupId}/plan/confirm   → plan_resume (resume waiting plan)
+  POST /api/groups/{groupId}/plan/direct    → plan_direct (switch 直接干 mode + resume)
+  POST /api/groups/{groupId}/plan/modify    → plan_modify (amend steps, then confirm)
 
-The coordinator announces a plan via ``node_dispatch`` then ENDS (default,
-``auto_confirm=False``), leaving the plan resident in the engine's
-``_dispatch_plan``. These endpoints are the user-facing wake-up that resumes the
-loop: they push a ``plan_confirm`` notify onto the coordinator's inbox via
-``route_plan_confirm``; the coordinator's classify node detects
-``incoming_kind == "plan_confirm"`` and routes straight to ``dispatch_next``,
-skipping the LLM (方案 B).
+The coordinator announces a plan via ``node_dispatch`` then pauses the thread
+via LangGraph ``interrupt({"plan": plan})`` (default, ``auto_confirm=False``),
+leaving the plan checkpointed in the graph's MemorySaver checkpointer (the
+source of truth). These endpoints are the user-facing wake-up that resumes the
+paused dispatch node: they push a ``plan_resume`` notify onto the coordinator's
+inbox via ``route_plan_resume``; the coordinator engine's ``_handle_notify``
+sees ``type == "plan_resume"`` and dispatches it to the graph as
+``Command(resume=<payload>)`` — ``node_dispatch``'s ``interrupt()`` returns the
+payload and the graph fans out the pending steps, skipping the LLM (the plan was
+already LLM-decided on the dispatch turn, so confirming is a pure resume).
 
 ``/direct`` flips the group's ``config.auto_confirm=True`` so future plans in the
-same group auto-dispatch; ``/modify`` rewrites the resident ``_dispatch_plan``
-with the user's amended steps before confirming. ``/confirm`` is the plain
-"continue as planned" resume.
+same group auto-dispatch; ``/modify`` splices the user's amended steps into the
+resident plan before confirming. ``/confirm`` is the plain "continue as planned"
+resume carrying ``{"mode": "confirm"}``.
+
+The legacy ``plan_confirm`` fresh-input notify channel (``route_plan_confirm``)
+remains as a compatibility fallback (task 11 will downgrade/remove it); these
+endpoints now use the native resume channel.
 """
 from __future__ import annotations
 
@@ -25,7 +32,7 @@ from typing import Any
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
-from engine.mention import route_plan_confirm
+from engine.mention import route_plan_resume
 from engine.registry import registry
 from events import emit_coordinator_plan
 from store import crud
@@ -97,14 +104,16 @@ async def plan_get(group_id: str) -> dict[str, Any]:
 async def plan_confirm(group_id: str) -> dict[str, Any]:
     """Resume the resident plan as-is (user clicked 确认继续).
 
-    Pushes a ``plan_confirm`` notify to the coordinator. classify →
-    ``confirm_dispatch`` → ``dispatch_next`` fans out the pending steps. The plan
-    is *not* mutated.
+    Pushes a ``plan_resume`` notify to the coordinator carrying
+    ``{"mode": "confirm"}``. The engine dispatches it to the graph as
+    ``Command(resume={"mode": "confirm"})`` — ``node_dispatch``'s ``interrupt()``
+    returns the payload and the graph fans out the pending steps via
+    ``dispatch_next``, skipping the LLM. The plan is *not* mutated.
     """
     group, engine = await _require_coordinator_engine(group_id)
     if not any(s.get("status") == "pending" for s in engine._dispatch_plan):
         raise HTTPException(status_code=409, detail="no pending plan to confirm")
-    await route_plan_confirm(group_id, {"mode": "confirm"})
+    await route_plan_resume(group_id, {"mode": "confirm"})
     return {
         "ok": True,
         "group_id": group_id,

@@ -289,6 +289,11 @@ async def route_plan_confirm(
     Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has no
     coordinator). Mirrors ``route_user_message``'s coordinator fallback so the
     two inbound paths share one resolution primitive.
+
+    Legacy channel: the new ``Command(resume=...)`` path (``route_plan_resume``)
+    is preferred for PL-02 — it resumes ``node_dispatch``'s ``interrupt()``
+    directly without re-entering classify. This ``plan_confirm`` fresh-input path
+    remains as a compatibility fallback (task 11 will downgrade/remove it).
     """
     group = await crud.get_group(group_id)
     if not group or not group.coordinator_id:
@@ -300,5 +305,42 @@ async def route_plan_confirm(
         group.coordinator_id,
         "用户确认执行计划",
         data,
+    )
+    return group.coordinator_id
+
+
+async def route_plan_resume(
+    group_id: str, payload: dict | None = None
+) -> str | None:
+    """PL-02 native resume: push a ``plan_resume`` notify to the coordinator.
+
+    The LangGraph-native counterpart of ``route_plan_confirm``. Pushes a notify
+    of kind ``plan_resume`` whose ``data`` is the resume payload
+    (``{"mode": "confirm"|"direct"|"modify", ...}``); the coordinator engine's
+    ``_handle_notify`` sees ``type == "plan_resume"`` and dispatches it to the
+    graph as ``Command(resume=<payload>)`` — which makes ``node_dispatch``'s
+    ``interrupt()`` return the payload and the graph fan out. This bypasses the
+    classify node entirely (unlike the legacy ``plan_confirm`` fresh-input path
+    that re-enters classify), resuming the interrupted dispatch node directly.
+
+    Called by the plan-confirm API endpoints (``/plan/confirm`` | ``/direct`` |
+    ``/modify``) now that they migrate to the resume channel (tasks 7-9). The
+    payload is forwarded verbatim — the API owns the ``mode`` semantics, the
+    routing layer only resolves the coordinator and queues the control signal.
+
+    Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has
+    no coordinator). Mirrors ``route_plan_confirm``'s resolution so both inbound
+    plan-confirm channels share one primitive.
+    """
+    group = await crud.get_group(group_id)
+    if not group or not group.coordinator_id:
+        return None
+    await push_notify(
+        group_id,
+        "plan_resume",
+        "user",
+        group.coordinator_id,
+        "用户确认执行计划",
+        payload,
     )
     return group.coordinator_id
