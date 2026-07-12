@@ -1,4 +1,4 @@
-import { useCallback, useContext, useEffect, useState } from 'react'
+import { useCallback, useContext, useEffect, useRef, useState } from 'react'
 import {
   messageApi,
   onBusEvent,
@@ -122,6 +122,32 @@ export function useBusEvent(groupId: string | null) {
   const [coordStats, setCoordStats] = useState<
     Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string; reasoning_tokens?: number }>
   >({})
+
+  // 推理链逐字 delta 节流缓冲（思考流式优化）：
+  // 推理模型思考阶段 chunk 极密（kimi 写 200 字实测 820 delta），逐条 setState 会触发
+  // ChatPanel 重渲染风暴卡死主线程。把 delta 攒进 ref，~50ms flush 一次到 state，
+  // 把 ~800 次 setState 压到 ~20 次。ref 不触发渲染，flush 才触发。最后 delta 后
+  // 定时器兜底 flush 残留，effect 清理时也 flush，不丢字。
+  const reasoningBufRef = useRef<Array<{ rid: string; delta: string }>>([])
+  const reasoningFlushTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const flushReasoning = useCallback(() => {
+    reasoningFlushTimer.current = null
+    const buf = reasoningBufRef.current
+    if (buf.length === 0) return
+    // 按 rid 聚合本次 flush 的所有 delta，单次 setCoordReasoning 更新多个 reply_id
+    const merged: Record<string, string> = {}
+    for (const { rid, delta } of buf) {
+      merged[rid] = (merged[rid] || '') + delta
+    }
+    reasoningBufRef.current = []
+    setCoordReasoning((prev) => {
+      const next = { ...prev }
+      for (const [rid, d] of Object.entries(merged)) {
+        next[rid] = (next[rid] || '') + d
+      }
+      return next
+    })
+  }, [])
 
   // 播种 agent status
   useEffect(() => {
@@ -247,7 +273,21 @@ export function useBusEvent(groupId: string | null) {
       // task_token 同理（PL-08 create_react_agent 逐字 token + task 25 worker 单聊
       // 流式 token）：content 是逐字 delta，进 logs 会把每个 token 当一条日志灌 LogPanel，
       // 且 task_token 不在白名单（本就不该成独立气泡）。从源头排除。
-      if (d.content && d.type !== 'coordinator_token' && d.type !== 'task_token') {
+      // coordinator_reasoning 同理（思考逐字 delta）：推理模型思考阶段动辄数百~上千个
+      // reasoning chunk（kimi-k2.6 写 200 字实测 820 个，思考持续 39s）。若进 logs：
+      //   ① 每个 chunk setLogs 一次 → ChatPanel 重渲染一次（logs 是 chatMessages
+      //      effect 的依赖，effect 每次都执行）→ 800+ 次 React 重渲染风暴卡死主线程；
+      //   ② WS onmessage 被重渲染占满 → 后端 send_json 背压 → emit 协程排队 →
+      //      正文 content delta 也被堵在后面，页面卡几分钟直到思考结束才流正文。
+      // reasoning 只进 coordReasoning（按 reply_id 累加，折叠区展示），不进日志流。
+      // coordinator_stats 同理（节流统计，非气泡内容），从源头排除防每 200ms 一条灌日志。
+      if (
+        d.content &&
+        d.type !== 'coordinator_token' &&
+        d.type !== 'task_token' &&
+        d.type !== 'coordinator_reasoning' &&
+        d.type !== 'coordinator_stats'
+      ) {
         const entry: LogEntry = {
           id: d.id || `ipc-${ts}`,
           agentId: d.sender_id,
@@ -385,10 +425,19 @@ export function useBusEvent(groupId: string | null) {
             : null
         if (d.content && typeof replyId === 'string') {
           const rid = replyId
-          setCoordReasoning((prev) => ({
-            ...prev,
-            [rid]: (prev[rid] || '') + d.content,
-          }))
+          const delta = d.content
+          // 推理模型思考阶段 chunk 极密（kimi-k2.6 写 200 字实测 820 个 reasoning
+          // delta，39s 持续）。每个 delta 都 setCoordReasoning 触发 ChatPanel 重渲染
+          // → 800+ 次重渲染风暴卡死主线程（加上 logs effect 旧 bug 更甚，已修）。
+          // 节流：把 delta 攒进 ref 缓冲，~50ms（约每帧）flush 一次到 state，把 800 次
+          // setState 压成 ~780 次→~20 次。ref 不触发渲染，flush 才触发；最后一条 delta
+          // 后定时器兜底 flush 残留，不丢字。effect 清理时也 flush，防切群残留。
+          reasoningBufRef.current.push({ rid, delta })
+          if (!reasoningFlushTimer.current) {
+            reasoningFlushTimer.current = window.setTimeout(() => {
+              flushReasoning()
+            }, 50)
+          }
         }
       } else if (d.type === 'coordinator_stats') {
         const dd =
@@ -460,8 +509,16 @@ export function useBusEvent(groupId: string | null) {
     return () => {
       cancelled = true
       if (unlisten) unlisten()
+      // 思考节流兜底：切群/卸载前把缓冲残留 flush，防丢字（最后几条 delta 可能还在 ref 没到 state）
+      if (reasoningFlushTimer.current) {
+        clearTimeout(reasoningFlushTimer.current)
+        reasoningFlushTimer.current = null
+      }
+      if (reasoningBufRef.current.length > 0) {
+        flushReasoning()
+      }
     }
-  }, [groupId, handleReconnect, refreshPlan])
+  }, [groupId, handleReconnect, refreshPlan, flushReasoning])
 
   return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, refreshPlan }
 }

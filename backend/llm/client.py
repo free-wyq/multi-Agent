@@ -103,17 +103,24 @@ async def chat_completion_stream(
 
     - ``content_delta`` — incremental ``choices[0].delta.content`` (the visible
       reply text; ``""`` on chunks that carry only reasoning/role/usage data).
-    - ``reasoning_delta`` — incremental ``choices[0].delta.reasoning_content``
-      (the model's internal reasoning chain; ``""`` for non-reasoning models
-      or chunks without reasoning). DeepSeek/GPT-o1-style models stream this
-      *before* the visible content; non-reasoning providers simply never set it.
+    - ``reasoning_delta`` — incremental reasoning chain text. Standardized across
+      upstream field variants: OpenAI/DeepSeek use ``reasoning_content``; some
+      gateways (e.g. the kimi proxy via new-api) emit ``reasoning`` instead or
+      alongside. Both are accepted here so the engine sees one consistent stream
+      regardless of which field the upstream favors — this function IS the
+      OpenAI-protocol normalization layer (the engine consumes this normalized
+      tuple, never raw delta field names). ``""`` for non-reasoning models.
     - ``completion_tokens`` — ``None`` for every chunk except the final usage
       chunk (emitted once ``stream_options.include_usage`` is set): the real
       ``usage.completion_tokens`` for the whole completion.
     - ``reasoning_tokens`` — ``None`` except on the final usage chunk: the real
       ``usage.completion_tokens_details.reasoning_tokens`` (how many of the
       completion tokens were reasoning vs visible). Absent for providers that
-      don't break tokens down → caller treats as 0.
+      don't break tokens down (e.g. the kimi gateway returns only
+      ``{prompt, completion, total}`` with no ``completion_tokens_details``) →
+      falls back to a length-based estimate of the accumulated reasoning text
+      so the "（含 N 推理）" status line still shows for reasoning models whose
+      gateway omits the field.
 
     The async generator closes the response on early ``break`` by the consumer
     (httpx ``stream()`` context manager tears down the underlying connection).
@@ -199,5 +206,13 @@ async def chat_completion_stream(
                 if choices:
                     delta = choices[0].get("delta") or {}
                     content_delta = delta.get("content") or ""
-                    reasoning_delta = delta.get("reasoning_content") or ""
+                    # OpenAI-protocol normalization: accept both reasoning field
+                    # variants upstreams use. OpenAI/DeepSeek (and the official
+                    # spec extension) put the chain-of-thought under
+                    # ``reasoning_content``; some gateways (e.g. new-api proxying
+                    # kimi) emit ``reasoning`` instead. Prefer reasoning_content
+                    # when present (the canonical name), fall back to reasoning.
+                    # The engine consumes the normalized reasoning_delta here, so
+                    # it never has to know which field the upstream favored.
+                    reasoning_delta = delta.get("reasoning_content") or delta.get("reasoning") or ""
                 yield content_delta, reasoning_delta, completion_tokens, reasoning_tokens
