@@ -24,6 +24,10 @@ def get_llm_config() -> dict[str, Any]:
     This wrapper only adapts the field names to the camelCase shape
     ``chat_completion`` consumes (apiKey / baseUrl / model / temperature /
     maxTokens), preserving the pre-CF-02 return contract for all callers.
+
+    Multi-model provider connection-level fields (requestTimeout / extraHeaders
+    / proxy) are surfaced so ``chat_completion`` can parameterize httpx. They
+    default to 120s / None / "" when the cache omits them (legacy callers).
     """
     cfg = get_config()
     return {
@@ -32,6 +36,10 @@ def get_llm_config() -> dict[str, Any]:
         "model": cfg["model"],
         "temperature": cfg["temperature"],
         "maxTokens": cfg["max_tokens"],
+        # Connection-level config (provider owns; shared by all models).
+        "requestTimeout": cfg.get("request_timeout", 120.0),
+        "extraHeaders": cfg.get("extra_headers"),
+        "proxy": cfg.get("proxy", ""),
     }
 
 
@@ -40,6 +48,12 @@ async def chat_completion(config: dict[str, Any], messages: list[dict[str, str]]
 
     Returns ``choices[0].message.content``. Raises ``RuntimeError`` on non-200
     status or empty choices.
+
+    Connection-level config consumed from the config dict (falls back to safe
+    defaults when absent, so legacy 5-key configs still work):
+    - ``requestTimeout`` → httpx ``timeout`` (default 120s).
+    - ``extraHeaders`` → merged into the request headers (default: none).
+    - ``proxy`` → httpx ``proxy`` (empty/None = no proxy, direct connection).
     """
     url = f"{config['baseUrl'].rstrip('/')}/chat/completions"
     body = {
@@ -48,12 +62,27 @@ async def chat_completion(config: dict[str, Any], messages: list[dict[str, str]]
         "temperature": config["temperature"],
         "max_tokens": config["maxTokens"],
     }
-    async with httpx.AsyncClient() as client:
+    # Build headers: bearer auth + any provider-configured extra headers
+    # (e.g. X-Org-Id for some proxies). extraHeaders None/empty = auth only.
+    headers = {"Authorization": f"Bearer {config['apiKey']}"}
+    extra_headers = config.get("extraHeaders") or {}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    # httpx transport kwargs: timeout always set (default 120s); proxy only
+    # when configured (passing "" would be treated as "no proxy" by httpx but
+    # explicit omission is cleaner and avoids edge-case proxy resolution).
+    timeout = float(config.get("requestTimeout", 120.0) or 120.0)
+    proxy = config.get("proxy", "") or ""
+    client_kwargs: dict[str, Any] = {"timeout": timeout}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
         resp = await client.post(
             url,
             json=body,
-            headers={"Authorization": f"Bearer {config['apiKey']}"},
-            timeout=120.0,
+            headers=headers,
         )
         if resp.status_code != 200:
             raise RuntimeError(f"LLM API error {resp.status_code}: {resp.text}")
@@ -82,6 +111,11 @@ async def chat_completion_stream(
     (httpx ``stream()`` context manager tears down the underlying connection).
 
     Raises ``RuntimeError`` on non-200 status (read before streaming begins).
+
+    Connection-level config consumed from the config dict (same as
+    ``chat_completion``): ``requestTimeout`` → httpx timeout (default 120s),
+    ``extraHeaders`` → merged into request headers, ``proxy`` → httpx proxy
+    (empty = direct). Legacy 5-key configs fall back to the defaults.
     """
     url = f"{config['baseUrl'].rstrip('/')}/chat/completions"
     body = {
@@ -94,13 +128,26 @@ async def chat_completion_stream(
         # so the stats status line can show the authoritative count at "done".
         "stream_options": {"include_usage": True},
     }
-    async with httpx.AsyncClient() as client:
+    # Build headers: bearer auth + provider-configured extra headers.
+    headers = {"Authorization": f"Bearer {config['apiKey']}"}
+    extra_headers = config.get("extraHeaders") or {}
+    if extra_headers:
+        headers.update(extra_headers)
+
+    # httpx transport kwargs: timeout always set (default 120s); proxy only
+    # when configured.
+    timeout = float(config.get("requestTimeout", 120.0) or 120.0)
+    proxy = config.get("proxy", "") or ""
+    client_kwargs: dict[str, Any] = {"timeout": timeout}
+    if proxy:
+        client_kwargs["proxy"] = proxy
+
+    async with httpx.AsyncClient(**client_kwargs) as client:
         async with client.stream(
             "POST",
             url,
             json=body,
-            headers={"Authorization": f"Bearer {config['apiKey']}"},
-            timeout=120.0,
+            headers=headers,
         ) as resp:
             if resp.status_code != 200:
                 # drain so the body is available for the error message

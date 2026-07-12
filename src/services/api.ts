@@ -851,10 +851,40 @@ export const configApi = {
  * 原始密钥永不离开进程；has_key 让 UI 显示「已配置」而不暴露密钥本身。
  * is_active 标识当前生效的 provider（同一时刻只有一个 active）。
  */
+/**
+ * 一个服务商拥有的某个模型条目（多模型目录）。
+ *
+ * 后端 models.llm_provider.LlmModel 的 TS 镜像。model_id 是发给上游
+ * /chat/completions 的 `model` 字段值；display_name 是 UI 显示名；能力元数据
+ * （context_window / 4 个 supports 布尔）让 UI / 引擎判断模型适用场景；
+ * is_default 标识该 provider 当前生效的模型（单 default 不变量，每个 provider
+ * 至多一个 is_default=true）。
+ *
+ * active model 解析：is_default → 匹配 provider.model 列 → catalog 首个 →
+ * provider.model 列（见后端 config.select_active_model 5 级 fallback）。
+ */
+export interface LlmModel {
+  /** 发给上游的模型 id（如 "deepseek-chat" / "gpt-4o"）。 */
+  model_id: string
+  /** UI 显示名（未配置时 fallback 到 model_id）。 */
+  display_name: string
+  /** 上下文窗口大小（token 数）；0 = 未知。 */
+  context_window: number
+  /** 是否支持 function calling / tool use。 */
+  supports_function_calling: boolean
+  /** 是否支持视觉输入（图片）。 */
+  supports_vision: boolean
+  /** 是否支持流式输出（SSE）。 */
+  supports_streaming: boolean
+  /** 是否该 provider 的当前默认模型（单 default 不变量）。 */
+  is_default: boolean
+}
+
 export interface LlmProvider {
   id: string
   name: string
   provider: string
+  /** 旧扁平 model 列（向后兼容）；active model 由 models 优先解析，fallback 到此列。 */
   model: string
   base_url: string
   /** 脱敏密钥预览（首 3 + 尾 3），非原始密钥。 */
@@ -865,10 +895,32 @@ export interface LlmProvider {
   is_active: boolean
   created_at: string
   updated_at: string
+  /** 多模型目录（provider 拥有 N 个模型，恰好 1 个 is_default）。空数组 = legacy 模式。 */
+  models: LlmModel[]
+  // ── 连接级配置（作用于端点，所有模型共享）──
+  /** API 版本（Anthropic 等需 x-api-version 的端点用）；空串 = 未配置。 */
+  api_version: string
+  /** OpenAI 组织 id（部分端点用 org 头路由计费）；空串 = 未配置。 */
+  organization: string
+  /** 自定义请求头（合并到 Authorization 之外）；null = 不附加。 */
+  extra_headers: Record<string, string> | null
+  /** 单请求超时秒数（默认 120）。 */
+  request_timeout: number
+  /** 失败重试次数（默认 2）。 */
+  max_retries: number
+  /** HTTP 代理地址；空串 = 直连。 */
+  proxy: string
 }
 
 /**
  * 创建/更新服务商的 payload。api_key 可选——更新时留空表示「不修改」。
+ *
+ * 多模型目录 + 连接级字段镜像 LlmProvider。全部 optional（`?`）以支持
+ * partial update——更新时只传改动的字段，未传字段保持不变（后端
+ * exclude_unset=True 只落显式提供的字段）。models 特别区分：
+ * - undefined（不传）= 不动 catalog；
+ * - []（显式空数组）= 清空 catalog；
+ * - 非空数组 = 替换 catalog（后端校验单 default，多 default 时保留首个）。
  */
 export interface LlmProviderPayload {
   name: string
@@ -879,6 +931,15 @@ export interface LlmProviderPayload {
   temperature?: number
   max_tokens?: number
   is_active?: boolean
+  /** 模型目录：undefined 不动 / [] 清空 / 非空替换。 */
+  models?: LlmModel[]
+  // ── 连接级配置（未传 = 不变更）──
+  api_version?: string
+  organization?: string
+  extra_headers?: Record<string, string> | null
+  request_timeout?: number
+  max_retries?: number
+  proxy?: string
 }
 
 export const providerApi = {
@@ -893,6 +954,56 @@ export const providerApi = {
   remove: (id: string) => http<{ ok: boolean }>('DELETE', `/api/providers/${id}`),
   /** POST /api/providers/{id}/activate：设为当前服务商。 */
   activate: (id: string) => http<LlmProvider>('POST', `/api/providers/${id}/activate`),
+  /** POST /api/providers/{id}/test：探测连通性（UI「测试连通」按钮）。
+   *  发最小 /chat/completions，返回 {ok, latency_ms, error, status_code}，永不 500。 */
+  test: (id: string) =>
+    http<{ ok: boolean; latency_ms: number; error: string; status_code: number | null }>(
+      'POST',
+      `/api/providers/${id}/test`,
+    ),
+  /** GET /api/providers/{id}/models：拉取上游模型目录（UI「拉取模型」按钮）。
+   *  GET {base_url}/models 归一化为 LlmModel[]（首个 is_default）。返回的 models
+   *  不持久化——前端接受后调 update(id, {models}) 保存。 */
+  fetchModels: (id: string) =>
+    http<{ ok: boolean; models: LlmModel[]; error: string; status_code: number | null }>(
+      'GET',
+      `/api/providers/${id}/models`,
+    ),
+  /** GET /api/providers/catalog：预设服务商目录（UI「预设选择器」）。
+   *  返回 7 个预设（OpenAI/DeepSeek/Anthropic/Kimi/GLM/Qwen/Ollama），每个含
+   *  base_url + 默认连接配置 + 预置 models + note。无 api_key（用户填）。 */
+  catalog: () => http<ProviderPreset[]>('GET', '/api/providers/catalog'),
+}
+
+// ── Provider preset catalog (多模型服务商 · 预设目录) ────────────────────
+
+/**
+ * 预设服务商模板（GET /api/providers/catalog 返回项）。
+ *
+ * 后端 llm_provider_catalog.ProviderPreset 的 TS 镜像。预设是「编辑器加载的模板」
+ * 而非「可直接创建的行」——不含 api_key/is_active/id/timestamps（这些由
+ * crud.create_provider 分配）。用户选预设后填 api_key，再 POST /api/providers 创建。
+ */
+export interface ProviderPreset {
+  /** 稳定 slug（如 "openai" / "deepseek"，catalog 路由键）。 */
+  slug: string
+  name: string
+  provider: string
+  base_url: string
+  // ── 默认连接级配置（作用于端点）──
+  api_version: string
+  organization: string
+  extra_headers: Record<string, string> | null
+  request_timeout: number
+  max_retries: number
+  proxy: string
+  // ── 默认采样参数 ──
+  temperature: number
+  max_tokens: number
+  /** 预置模型目录（含能力元数据，恰好 1 个 is_default）。 */
+  models: LlmModel[]
+  /** UI 提示（如「需自备 API Key」）。 */
+  note: string
 }
 
 // ── Slash helper API (BE-01: 后端代解析前端无法独立完成的 slash 命令) ────

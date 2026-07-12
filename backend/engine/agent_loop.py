@@ -174,13 +174,48 @@ async def run_agent_loop(
     tools = tools + mcp_tools
 
     # ── build the agent graph (factory owns the ReAct loop) ──
+    # ChatOpenAI connection-level kwargs: only pass non-default values so the
+    # framework's own defaults apply when the provider hasn't configured them
+    # (passing max_retries=0 would disable retries; passing timeout=None would
+    # wait forever — so omit rather than override with a falsy placeholder).
+    # cfg carries the 13-key active-provider cache (see config.set_active_cache).
     try:
-        model = ChatOpenAI(
-            model=model_name,
-            base_url=cfg["base_url"],
-            api_key=cfg["api_key"],
-            temperature=cfg["temperature"],
-        )
+        chat_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "base_url": cfg["base_url"],
+            "api_key": cfg["api_key"],
+            "temperature": cfg["temperature"],
+        }
+        # max_tokens: only pass when explicitly configured (>0); ChatOpenAI's
+        # default (None = provider max) is preferable to a low cap.
+        max_tokens = cfg.get("max_tokens")
+        if max_tokens and int(max_tokens) > 0:
+            chat_kwargs["max_tokens"] = int(max_tokens)
+        # max_retries: provider-tunable retry count (default 2 in cache). Only
+        # forward when set; langchain's own default applies otherwise.
+        max_retries = cfg.get("max_retries")
+        if max_retries is not None:
+            chat_kwargs["max_retries"] = int(max_retries)
+        # timeout: per-request wall-clock (default 120s). Forward as float;
+        # langchain accepts httpx-style timeout.
+        request_timeout = cfg.get("request_timeout")
+        if request_timeout and float(request_timeout) > 0:
+            chat_kwargs["timeout"] = float(request_timeout)
+        # organization: OpenAI org header (some compatible endpoints use it).
+        # Empty string = not configured → omit (don't send empty header).
+        organization = (cfg.get("organization") or "").strip()
+        if organization:
+            chat_kwargs["organization"] = organization
+        # default_headers: merge extra_headers (provider-configured custom
+        # headers like X-Org-Id). None/empty → omit. Non-dict → skip defensively.
+        extra_headers = cfg.get("extra_headers")
+        if isinstance(extra_headers, dict) and extra_headers:
+            chat_kwargs["default_headers"] = dict(extra_headers)
+        # proxy: langchain ChatOpenAI has no direct proxy kwarg, but httpx
+        # picks up HTTP_PROXY/HTTPS_PROXY env vars. Provider-level proxy is
+        # honored by chat_completion/chat_completion_stream (direct httpx);
+        # the langchain path relies on env or a custom http_client (future).
+        model = ChatOpenAI(**chat_kwargs)
     except Exception as exc:
         logger.exception("[agent_loop %s] failed to init model", agent_name)
         if on_log:

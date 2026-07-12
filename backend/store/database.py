@@ -69,6 +69,18 @@ def _migrate_schema() -> None:
         conn = sqlite3.connect(str(DB_PATH))
         _ensure_column(conn, "agents", "mounted_skills", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "agents", "mounted_mcp", "JSON NOT NULL DEFAULT '[]'")
+        # Multi-model provider catalog (PRD 多模型服务商): models JSON list +
+        # 6 connection-level columns. Defaults mirror LlmProviderEntity /
+        # LlmProvider output model so a legacy row upgrades to a usable config
+        # (empty catalog falls back to the legacy `model` column via
+        # crud._select_model). See backend/store/entities.py.
+        _ensure_column(conn, "llm_providers", "models", "JSON NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "llm_providers", "api_version", "VARCHAR NOT NULL DEFAULT ''")
+        _ensure_column(conn, "llm_providers", "organization", "VARCHAR NOT NULL DEFAULT ''")
+        _ensure_column(conn, "llm_providers", "extra_headers", "JSON")
+        _ensure_column(conn, "llm_providers", "request_timeout", "FLOAT NOT NULL DEFAULT 120.0")
+        _ensure_column(conn, "llm_providers", "max_retries", "INTEGER NOT NULL DEFAULT 2")
+        _ensure_column(conn, "llm_providers", "proxy", "VARCHAR NOT NULL DEFAULT ''")
         conn.close()
     except Exception:
         # database may not exist yet on first import; create_all handles it

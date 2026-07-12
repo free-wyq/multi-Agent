@@ -223,6 +223,17 @@ class LlmProviderEntity(Base):
     plaintext (single-user local desktop app, same trust level as ``.env``)
     but NEVER returned raw over HTTP — the crud mapper masks it via
     ``config._mask_key`` before building the Pydantic output model.
+
+    Multi-model catalog: ``models`` is the provider's list of model entries
+    (each carrying capability metadata — see ``LlmModel``). The connection-
+    level columns (``api_version``/``organization``/``extra_headers``/
+    ``request_timeout``/``max_retries``/``proxy``) describe how to reach the
+    upstream endpoint and are shared by every model under this provider. The
+    active model is resolved from ``models`` first (is_default → legacy
+    ``model`` match → first entry), falling back to the flat ``model`` column;
+    see ``crud._select_model``. ``models`` mirrors the JSON-column pattern of
+    ``AgentEntity.mounted_skills`` / ``mounted_mcp`` (provider + models are
+    always read/written together, never queried independently).
     """
 
     __tablename__ = "llm_providers"
@@ -237,6 +248,19 @@ class LlmProviderEntity(Base):
     api_key: Mapped[str] = mapped_column(String, nullable=False, default="")
     temperature: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
     max_tokens: Mapped[int] = mapped_column(Integer, nullable=False, default=4096)
+    # Multi-model catalog (provider owns N models, exactly one is_default).
+    # Empty list [] means "no catalog, use legacy flat model column".
+    models: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list
+    )
+    # Connection-level config (applies to the endpoint, shared by all models).
+    # Defaults mirror LlmProvider output model / LlmProviderCreatePayload.
+    api_version: Mapped[str] = mapped_column(String, nullable=False, default="")
+    organization: Mapped[str] = mapped_column(String, nullable=False, default="")
+    extra_headers: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    request_timeout: Mapped[float] = mapped_column(Float, nullable=False, default=120.0)
+    max_retries: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    proxy: Mapped[str] = mapped_column(String, nullable=False, default="")
     is_active: Mapped[bool] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)

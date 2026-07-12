@@ -49,8 +49,14 @@ from __future__ import annotations
 import asyncio
 import os
 import sys
+from pathlib import Path
 
 import httpx
+
+# 纯单元测路径：测试从 backend/tests/ 下运行，需把 backend/ 加到 sys.path，
+# 这样 `import config` 能解析到 backend/config.py（_check_multi_model_cache
+# 直接读 config._ACTIVE_CACHE 内部真源，绕过 public 脱敏层）。
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 BASE = "http://localhost:8000"
 
@@ -81,6 +87,218 @@ async def put_config(model: str | None) -> dict:
         r = await c.put(f"{BASE}/api/config", json=body, timeout=10.0)
         assert r.status_code == 200, f"PUT /api/config model={model!r} status={r.status_code} body={r.text}"
         return r.json()
+
+
+async def _create_provider(payload: dict, timeout: float = 10.0) -> dict:
+    """POST /api/providers → 返回新建 provider（masked）。"""
+    async with httpx.AsyncClient() as c:
+        r = await c.post(f"{BASE}/api/providers", json=payload, timeout=timeout)
+        assert r.status_code == 200, f"POST /api/providers status={r.status_code} body={r.text}"
+        return r.json()
+
+
+async def _update_provider(pid: str, payload: dict, timeout: float = 10.0) -> dict:
+    """PUT /api/providers/{id} → 返回更新后 provider。"""
+    async with httpx.AsyncClient() as c:
+        r = await c.put(f"{BASE}/api/providers/{pid}", json=payload, timeout=timeout)
+        assert r.status_code == 200, f"PUT /api/providers/{pid} status={r.status_code} body={r.text}"
+        return r.json()
+
+
+async def _delete_provider(pid: str, timeout: float = 10.0) -> dict:
+    async with httpx.AsyncClient() as c:
+        r = await c.delete(f"{BASE}/api/providers/{pid}", timeout=timeout)
+        return {"status": r.status_code, "body": r.json() if r.status_code == 200 else r.text}
+
+
+async def _list_providers(timeout: float = 10.0) -> list[dict]:
+    async with httpx.AsyncClient() as c:
+        r = await c.get(f"{BASE}/api/providers", timeout=timeout)
+        assert r.status_code == 200, f"GET /api/providers status={r.status_code}"
+        return r.json()
+
+
+async def _check_multi_model_cache() -> list[str]:
+    """T28：create/update provider 后 cache 含 6 连接级 key + 选定 model。
+
+    cache 是后端进程的内部状态，HTTP 测不到（GET /api/config 只暴露 7 字段
+    脱敏层）。故此校验走**纯单元测**：在测试进程内用临时 DB 直接调
+    ``crud.create_provider`` + 手动 ``set_active_cache(_provider_to_cache_dict(entity))``
+    （精确复刻 T15 路由层 ``_refresh_active_cache`` 的逻辑），然后直查
+    ``config._ACTIVE_CACHE`` 真源。不依赖后端在线，CI 确定性。
+
+    选定 model 验证 is_default fallback 链：
+    - create 时 models 含 is_default=deepseek-chat → cache["model"]==deepseek-chat
+      （_select_model 第 1 级 is_default 命中，非 legacy model 列）。
+    - update 把 is_default 改成 deepseek-reasoner → cache["model"] 跟着变。
+    - create 时 models 为空（legacy 风格）→ cache["model"] fallback 到 model 列。
+    """
+    errs: list[str] = []
+    import tempfile
+    # 临时 DATA_DIR 隔离，不污染开发库
+    orig_data_dir = os.environ.get("MULTI_AGENT_DATA_DIR")
+    tmp_dir = tempfile.mkdtemp(prefix="cf_t28_test_")
+    os.environ["MULTI_AGENT_DATA_DIR"] = tmp_dir
+    try:
+        import importlib
+        import store.database as _db
+        importlib.reload(_db)
+        from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
+        _db.engine = create_async_engine(_db.DB_URL, echo=False, connect_args={"check_same_thread": False}, pool_pre_ping=True)
+        _db.SessionLocal = async_sessionmaker(_db.engine, expire_on_commit=False, class_=AsyncSession)
+
+        import config as _config
+        from store import crud
+        from models.llm_provider import LlmProviderCreatePayload, LlmModel
+
+        await _db.init_db()
+        # init_db 会 env-seed 一个 active provider + set_active_cache，记录为 baseline
+        baseline_cache = dict(_config._ACTIVE_CACHE) if _config._ACTIVE_CACHE else None
+
+        # ── 用例 1：create active provider（带 models + 6 连接级字段）──
+        # models 含 is_default=deepseek-chat → cache["model"] 应 == deepseek-chat
+        payload = LlmProviderCreatePayload(
+            name="cf-t28-probe",
+            provider="deepseek",
+            model="legacy-deepseek-chat",  # 故意不同于 is_default，验证 _select_model 走 is_default
+            base_url="https://api.deepseek.com/v1",
+            api_key="sk-cf-t28-cache-test-123456",
+            temperature=0.3,
+            max_tokens=8192,
+            models=[
+                LlmModel(model_id="deepseek-chat", is_default=True, context_window=64000),
+                LlmModel(model_id="deepseek-reasoner", is_default=False),
+            ],
+            api_version="2024-02-15",
+            organization="org-cf-t28",
+            extra_headers={"X-Custom": "cf-t28"},
+            request_timeout=55.0,
+            max_retries=4,
+            proxy="http://cf-t28-proxy:8080",
+            is_active=True,
+        )
+        created = await crud.create_provider(payload)
+        created_id = created.id
+        # 路由层 _refresh_active_cache 的精确复刻：取 active entity → cache dict → set_active_cache
+        active_entity = await crud.get_active_provider_entity()
+        if active_entity:
+            _config.set_active_cache(crud._provider_to_cache_dict(active_entity))
+        print(f"[create] provider id={created_id[:16]}… active=True")
+
+        cache = _config._ACTIVE_CACHE
+        if cache is None:
+            errs.append("create active 后 _ACTIVE_CACHE 仍 None")
+            return errs
+
+        # cache 应含 13 key（6 legacy + models + 6 连接级）
+        expected_keys = {
+            "provider", "model", "base_url", "api_key", "temperature", "max_tokens",
+            "models", "api_version", "organization", "extra_headers",
+            "request_timeout", "max_retries", "proxy",
+        }
+        missing = expected_keys - set(cache.keys())
+        if missing:
+            errs.append(f"cache 缺连接级 key: {missing}（实际 {sorted(cache.keys())}）")
+        else:
+            print("[check 8a] cache 含 13 key（6 legacy + models + 6 连接级）  OK")
+
+        # 6 连接级字段值正确
+        conn_checks = [
+            ("api_version", "2024-02-15"),
+            ("organization", "org-cf-t28"),
+            ("extra_headers", {"X-Custom": "cf-t28"}),
+            ("request_timeout", 55.0),
+            ("max_retries", 4),
+            ("proxy", "http://cf-t28-proxy:8080"),
+        ]
+        conn_errs_before = len(errs)
+        for k, expected in conn_checks:
+            actual = cache.get(k)
+            if actual != expected:
+                errs.append(f"cache[{k!r}]={actual!r} 期望 {expected!r}")
+        if len(errs) == conn_errs_before:
+            print("[check 8b] 6 连接级字段值全正确  OK")
+
+        # 选定 model：is_default 命中（deepseek-chat），非 legacy 列（legacy-deepseek-chat）
+        if cache.get("model") != "deepseek-chat":
+            errs.append(
+                f"cache['model']={cache.get('model')!r} 期望 'deepseek-chat'"
+                f"（_select_model 应走 is_default，非 legacy 列 legacy-deepseek-chat）"
+            )
+        else:
+            print("[check 8c] 选定 model=deepseek-chat（is_default 命中，非 legacy 列）  OK")
+
+        # raw api_key 在 cache（INTERNAL，供 engine 认证）
+        if cache.get("api_key") != "sk-cf-t28-cache-test-123456":
+            errs.append("cache['api_key'] 应为 raw key（INTERNAL，供 engine 认证）")
+        else:
+            print("[check 8d] cache 含 raw api_key（INTERNAL，engine 认证用）  OK")
+
+        # models 列表落进 cache
+        if not isinstance(cache.get("models"), list) or len(cache["models"]) != 2:
+            errs.append(f"cache['models'] 应 2 条，实际 {cache.get('models')!r}")
+        else:
+            print("[check 8e] cache['models'] 含 2 条 catalog  OK")
+
+        # ── 用例 2：update 把 is_default 改成 reasoner → cache["model"] 跟着变 ──
+        upd_payload = LlmProviderCreatePayload(
+            name="cf-t28-probe",
+            models=[
+                LlmModel(model_id="deepseek-chat", is_default=False),
+                LlmModel(model_id="deepseek-reasoner", is_default=True),  # 现在它是 default
+            ],
+        )
+        await crud.update_provider(created_id, upd_payload)
+        # 复刻路由刷新
+        active_entity2 = await crud.get_active_provider_entity()
+        if active_entity2:
+            _config.set_active_cache(crud._provider_to_cache_dict(active_entity2))
+        cache2 = _config._ACTIVE_CACHE
+        if cache2 and cache2.get("model") != "deepseek-reasoner":
+            errs.append(
+                f"update is_default 后 cache['model']={cache2.get('model')!r}"
+                f" 期望 'deepseek-reasoner'（is_default fallback 应跟踪新 default）"
+            )
+        else:
+            print("[check 8f] update is_default 后 cache['model']=deepseek-reasoner  OK")
+
+        # ── 用例 3：legacy 风格 create（无 models）→ cache["model"] fallback 到 model 列 ──
+        legacy_payload = LlmProviderCreatePayload(
+            name="cf-t28-legacy",
+            provider="openai",
+            model="gpt-4o-legacy-fallback",
+            base_url="https://api.openai.com/v1",
+            api_key="sk-cf-t28-legacy-654321",
+            is_active=True,
+        )
+        legacy_created = await crud.create_provider(legacy_payload)
+        active_entity3 = await crud.get_active_provider_entity()
+        if active_entity3:
+            _config.set_active_cache(crud._provider_to_cache_dict(active_entity3))
+        cache3 = _config._ACTIVE_CACHE
+        # _migrate_legacy_models 从 model 列 seed is_default → cache["model"] == model 列值
+        if cache3 and cache3.get("model") != "gpt-4o-legacy-fallback":
+            errs.append(
+                f"legacy create 后 cache['model']={cache3.get('model')!r}"
+                f" 期望 'gpt-4o-legacy-fallback'（空 models → fallback 到 model 列 + seed）"
+            )
+        else:
+            print("[check 8g] legacy create（无 models）→ cache model fallback 到 model 列  OK")
+        # legacy 仍含 13 key（连接级走默认）
+        if cache3 and len(cache3) != 13:
+            errs.append(f"legacy create 后 cache key 数={len(cache3)} 期望 13")
+
+        await _db.engine.dispose()
+    except Exception as exc:
+        errs.append(f"多模型 cache 校验异常: {exc!r}")
+    finally:
+        # 恢复 DATA_DIR
+        if orig_data_dir is not None:
+            os.environ["MULTI_AGENT_DATA_DIR"] = orig_data_dir
+        else:
+            os.environ.pop("MULTI_AGENT_DATA_DIR", None)
+
+    return errs
 
 
 async def main() -> int:
@@ -190,6 +408,16 @@ async def main() -> int:
     else:
         print(f"[check 7] 已切回 model={restore_resp.get('model')!r}  OK")
 
+    # ── 步骤 8：多模型服务商目录 · cache 连接级字段 + 选定 model ──
+    # T28 新增：create/update provider 后 _ACTIVE_CACHE 应含 13 key（6 legacy +
+    # models + 6 连接级），且 cache["model"] 经 _select_model 解析（is_default
+    # fallback 链）。通过 create active provider → GET /api/config 旁证 cache
+    # 已刷新（get_config_public 读 cache，但只暴露 7 字段——所以 cache 的完整
+    # 13 key 用直接 import config._ACTIVE_CACHE 校验，绕过 public 脱敏层）。
+    print("\n── 步骤7：多模型 cache 连接级字段 + 选定 model（is_default fallback）──")
+    mm_errs = await _check_multi_model_cache()
+    errs.extend(mm_errs)
+
     # ── 结果 ──
     print("\n" + "=" * 50)
     if errs:
@@ -204,7 +432,9 @@ async def main() -> int:
     print("  · PUT {model} 热切换：响应 model==新值，os.environ 已写回（再 GET 确认）；")
     print("  · 空 model no-op（不覆盖当前值）；")
     print("  · LLM 配置就绪旁证（has_key + base_url）；")
-    print("  · 收尾切回原始 model，不污染 .env 配置。")
+    print("  · 收尾切回原始 model，不污染 .env 配置；")
+    print("  · 多模型：create/update 后 cache 含 13 key（6 legacy + models + 6 连接级）；")
+    print("    选定 model 经 _select_model 解析（is_default 命中→update 切 default→legacy fallback）。")
     return 0
 
 

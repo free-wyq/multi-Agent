@@ -1180,6 +1180,14 @@ def _provider_to_model(p: LlmProviderEntity) -> LlmProvider:
     The raw ``api_key`` is masked via ``config._mask_key`` — the model's
     ``api_key`` field carries a preview (first 3 + last 3 chars), NEVER the
     raw secret. ``has_key`` lets the UI show configured status without the key.
+
+    Multi-model catalog: ``models`` is the provider's list of LlmModel entries
+    (capability metadata per model); the 6 connection-level fields
+    (``api_version``/``organization``/``extra_headers``/``request_timeout``/
+    ``max_retries``/``proxy``) are passed through so the UI can render the
+    full connection config. The flat ``model`` column is still emitted as-is
+    (the legacy field) — the UI / engine resolves the active model from
+    ``models`` first (see ``config.select_active_model``).
     """
     import config as _config
 
@@ -1198,6 +1206,15 @@ def _provider_to_model(p: LlmProviderEntity) -> LlmProvider:
             "is_active": bool(p.is_active),
             "created_at": p.created_at,
             "updated_at": p.updated_at,
+            # Multi-model catalog (provider owns N models, one is_default).
+            "models": p.models or [],
+            # Connection-level config (applies to the endpoint, shared by all models).
+            "api_version": p.api_version or "",
+            "organization": p.organization or "",
+            "extra_headers": p.extra_headers,
+            "request_timeout": p.request_timeout,
+            "max_retries": p.max_retries,
+            "proxy": p.proxy or "",
         }
     )
 
@@ -1207,15 +1224,95 @@ def _provider_to_cache_dict(p: LlmProviderEntity) -> dict:
 
     INTERNAL only — never returned over HTTP. The raw key is needed so the
     engine can actually authenticate to the provider.
+
+    Outputs the full 13-key cache shape (6 legacy + ``models`` catalog + 6
+    connection-level fields). The active ``model`` is resolved via
+    :func:`_select_model` so the cache reflects the catalog's is_default
+    entry (not just the legacy flat ``model`` column) — e.g. a provider
+    whose catalog marks ``deepseek-reasoner`` as default will run that model
+    even if the legacy ``model`` column still holds ``deepseek-chat``.
+    ``set_active_cache`` re-normalizes, so passing the entity's raw values
+    here (with None/empty tolerated) is safe.
     """
     return {
+        # Legacy flat config.
         "provider": p.provider,
-        "model": p.model,
+        "model": _select_model(p),
         "base_url": p.base_url,
         "api_key": p.api_key or "",
         "temperature": p.temperature,
         "max_tokens": p.max_tokens,
+        # Multi-model catalog (list of LlmModel-shaped dicts; [] = legacy).
+        "models": p.models or [],
+        # Connection-level config (applies to the endpoint, shared by all models).
+        "api_version": p.api_version or "",
+        "organization": p.organization or "",
+        "extra_headers": p.extra_headers,
+        "request_timeout": p.request_timeout,
+        "max_retries": p.max_retries,
+        "proxy": p.proxy or "",
     }
+
+
+def _select_model(p: LlmProviderEntity) -> str:
+    """Resolve the active ``model_id`` for a provider entity (single source).
+
+    Delegates to :func:`config.select_active_model` so the 5-level fallback
+    chain (is_default → match ``entity.model`` → first catalog entry →
+    legacy ``model`` column → ``_DEFAULT_MODEL``) lives in exactly one place.
+    ``entity.models`` is the JSON-column list of LlmModel-shaped dicts (may be
+    ``[]`` for a legacy / unmigrated row → falls back to ``entity.model``).
+
+    Returns the model id string that should be sent to the upstream
+    ``/chat/completions`` ``model`` field. Used by ``_provider_to_cache_dict``
+    (to set the cache's active model) and any code that needs to know which
+    model a provider will actually run.
+    """
+    import config
+
+    return config.select_active_model(
+        {
+            "model": p.model,
+            "models": p.models or [],
+        }
+    )
+
+
+def _migrate_legacy_models(row: LlmProviderEntity) -> None:
+    """Seed a single is_default model entry when ``row.models`` is empty.
+
+    Legacy provider rows (created before the multi-model catalog) have an
+    empty ``models`` JSON list and rely on the flat ``model`` column. This
+    back-fills a one-entry catalog from that column so the UI / engine see a
+    consistent ``models`` list (the active model is the seeded entry, marked
+    ``is_default=True``). Idempotent: a non-empty ``models`` list is left
+    untouched (the user has explicitly configured a catalog). A row whose
+    ``model`` column is also empty gets an empty catalog (caller falls back
+    to ``config._DEFAULT_MODEL``).
+
+    Called from ``create_provider`` (when the payload omits ``models``) and
+    ``update_provider`` (same) so neither path needs to special-case the
+    legacy column. Mutates ``row.models`` in place; the caller commits.
+    """
+    if row.models:
+        return  # catalog already configured — don't clobber user data.
+    legacy_model = (row.model or "").strip()
+    if not legacy_model:
+        # No model info at all — leave the catalog empty; _select_model falls
+        # back to config._DEFAULT_MODEL.
+        row.models = []
+        return
+    row.models = [
+        {
+            "model_id": legacy_model,
+            "display_name": legacy_model,
+            "context_window": 0,
+            "supports_function_calling": True,
+            "supports_vision": False,
+            "supports_streaming": True,
+            "is_default": True,
+        }
+    ]
 
 
 async def list_providers() -> list[LlmProvider]:
@@ -1236,6 +1333,21 @@ async def get_provider(provider_id: str) -> LlmProvider | None:
     async with SessionLocal() as db:
         row = await db.get(LlmProviderEntity, provider_id)
         return _provider_to_model(row) if row else None
+
+
+async def get_provider_entity(provider_id: str) -> LlmProviderEntity | None:
+    """Return the ORM row of a provider by id (raw api_key intact).
+
+    INTERNAL use only — probe.test_provider / fetch_models need the raw key
+    to actually authenticate to the upstream. NOT for HTTP output (use
+    ``get_provider`` for that, which masks). Mirrors
+    ``get_active_provider_entity`` but for an explicit id rather than the
+    active row.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        return await db.get(LlmProviderEntity, provider_id)
 
 
 async def get_active_provider_entity() -> LlmProviderEntity | None:
@@ -1266,10 +1378,33 @@ async def _deactivate_all(db) -> None:
 
 async def create_provider(payload: Any) -> LlmProvider:
     """Insert a new provider. If ``is_active`` is True, deactivate all others
-    first (single-active invariant). Returns the masked model."""
+    first (single-active invariant). Returns the masked model.
+
+    Multi-model catalog: ``payload.models`` is persisted as the JSON ``models``
+    column (list of LlmModel-shaped dicts). When the payload omits ``models``
+    (``None``), the catalog is seeded from the legacy ``model`` column via
+    :func:`_migrate_legacy_models` so a legacy-style create (model only, no
+    catalog) still yields a one-entry catalog. The 6 connection-level fields
+    default to their entity defaults when the payload omits them.
+    """
     from store.database import SessionLocal
 
     ts = _now_iso()
+    # Normalize payload.models → list[dict]. None (omitted) → defer to
+    # _migrate_legacy_models (seed from `model`); [] (explicit empty) → keep
+    # empty catalog (user intends no catalog yet).
+    raw_models = getattr(payload, "models", None)
+    if raw_models is None:
+        models_value: list = []  # placeholder; _migrate_legacy_models fills it
+        seed_from_legacy = True
+    else:
+        # Pydantic LlmModel instances → dict for JSON column storage.
+        models_value = [
+            m.model_dump() if hasattr(m, "model_dump") else dict(m)
+            for m in raw_models
+        ]
+        seed_from_legacy = False
+
     entity = LlmProviderEntity(
         id=_next_id("provider"),
         name=payload.name,
@@ -1279,10 +1414,24 @@ async def create_provider(payload: Any) -> LlmProvider:
         api_key=payload.api_key or "",
         temperature=float(payload.temperature if payload.temperature is not None else 0.0),
         max_tokens=int(payload.max_tokens if payload.max_tokens is not None else 4096),
+        # Multi-model catalog + connection-level config (defaults via entity
+        # mapped_column when payload omits them; `or ""`/`or 0.0` coerces
+        # None → default to match the NOT NULL columns).
+        models=models_value,
+        api_version=payload.api_version or "",
+        organization=payload.organization or "",
+        extra_headers=payload.extra_headers,
+        request_timeout=float(payload.request_timeout if payload.request_timeout is not None else 120.0),
+        max_retries=int(payload.max_retries if payload.max_retries is not None else 2),
+        proxy=payload.proxy or "",
         is_active=1 if getattr(payload, "is_active", False) else 0,
         created_at=ts,
         updated_at=ts,
     )
+    # payload omitted models → seed a single is_default entry from the legacy
+    # `model` column so the catalog is never empty on a legacy-style create.
+    if seed_from_legacy:
+        _migrate_legacy_models(entity)
     async with SessionLocal() as db:
         if entity.is_active:
             await _deactivate_all(db)
@@ -1295,7 +1444,16 @@ async def create_provider(payload: Any) -> LlmProvider:
 async def update_provider(provider_id: str, payload: Any) -> LlmProvider | None:
     """Update whitelisted fields on a provider. ``api_key`` empty/None means
     "leave unchanged" (so editing other fields doesn't wipe the stored key).
-    If ``is_active`` is set True, deactivate all others. Returns masked model."""
+    If ``is_active`` is set True, deactivate all others. Returns masked model.
+
+    Multi-model catalog: ``models`` (when present in the payload) is persisted
+    as the JSON column after enforcing the single-default invariant — at most
+    one entry may be ``is_default=True``; if multiple are marked default, only
+    the first is kept and the rest are demoted (so the catalog is never in an
+    inconsistent state). ``models=None`` (omitted) leaves the catalog unchanged;
+    ``models=[]`` (explicit empty) clears it. The 6 connection-level fields are
+    whitelisted alongside the legacy fields.
+    """
     from store.database import SessionLocal
 
     data = payload.model_dump(exclude_unset=True, exclude_none=True)
@@ -1317,6 +1475,31 @@ async def update_provider(provider_id: str, payload: Any) -> LlmProvider | None:
                     row.is_active = 1
                 elif not v:
                     row.is_active = 0
+            elif k == "models":
+                # Normalize to list[dict] (LlmModel → dict for JSON storage).
+                norm = [
+                    m.model_dump() if hasattr(m, "model_dump") else dict(m)
+                    for m in v
+                ]
+                # Single-default invariant: at most one is_default=True. If the
+                # payload marks several, keep the first True and demote the rest
+                # rather than rejecting — the catalog stays usable and the UI
+                # gets a consistent state (a hard reject would lose the user's
+                # other edits). Empty catalog ([]) is allowed (legacy mode).
+                seen_default = False
+                for entry in norm:
+                    if entry.get("is_default"):
+                        if seen_default:
+                            entry["is_default"] = False
+                        else:
+                            seen_default = True
+                row.models = norm
+            elif k in ("api_version", "organization", "proxy"):
+                setattr(row, k, v or "")
+            elif k == "extra_headers":
+                setattr(row, k, v)  # None = "do not attach" (nullable column)
+            elif k in ("request_timeout", "max_retries"):
+                setattr(row, k, v)
         row.updated_at = _now_iso()
         await db.commit()
         await db.refresh(row)
@@ -1427,21 +1610,40 @@ async def load_active_provider_into_cache() -> None:
         # No provider row at all — seed one from env (preserves .env behavior)
         import os
 
+        env_model = os.environ.get("LLM_MODEL", "glm-5.1")
         ts = _now_iso()
         seeded = LlmProviderEntity(
             id=_next_id("provider"),
             name="默认",
             provider=os.environ.get("LLM_PROVIDER", "openai"),
-            model=os.environ.get("LLM_MODEL", "glm-5.1"),
+            model=env_model,
             base_url=os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1"),
             api_key=os.environ.get("OPENAI_API_KEY", "")
             or os.environ.get("ANTHROPIC_API_KEY", ""),
             temperature=0.0,
             max_tokens=4096,
+            # Seed a single-entry catalog from the env model so the cache/UI see
+            # a consistent models list (is_default entry = the env model). This
+            # mirrors create_provider's legacy-seed path and keeps the env-seeded
+            # provider indistinguishable from a user-created one.
+            models=[],
+            # Connection-level config: env seed has none — emit the entity defaults
+            # (empty strings / None / 120.0 / 2) so _provider_to_cache_dict
+            # produces a complete 13-key cache.
+            api_version="",
+            organization="",
+            extra_headers=None,
+            request_timeout=120.0,
+            max_retries=2,
+            proxy="",
             is_active=1,
             created_at=ts,
             updated_at=ts,
         )
+        # Seed the is_default catalog entry from the env model (same logic as
+        # create_provider's legacy path — _migrate_legacy_models fills models
+        # from the `model` column when the catalog is empty).
+        _migrate_legacy_models(seeded)
         db.add(seeded)
         await db.commit()
         await db.refresh(seeded)

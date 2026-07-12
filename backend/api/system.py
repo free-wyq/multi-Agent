@@ -89,16 +89,10 @@ async def update_llm_config_route(body: ConfigUpdateBody) -> dict:
         if active:
             row = await crud.update_provider_model(active.id, body.model)
             if row:
-                _config.set_active_cache(
-                    {
-                        "provider": row.provider,
-                        "model": row.model,
-                        "base_url": row.base_url,
-                        "api_key": row.api_key or "",
-                        "temperature": row.temperature,
-                        "max_tokens": row.max_tokens,
-                    }
-                )
+                # Explicit model hot-switch: refresh from the active entity but
+                # force the cache's `model` to the just-written value (it may
+                # differ from the catalog's is_default entry).
+                await _refresh_active_cache(model_override=body.model)
             else:
                 set_config(model=body.model)
         else:
@@ -111,12 +105,63 @@ async def update_llm_config_route(body: ConfigUpdateBody) -> dict:
 from models import LlmProvider, LlmProviderCreatePayload  # noqa: E402
 
 
+async def _refresh_active_cache(model_override: str | None = None) -> None:
+    """Refresh the in-memory active-provider cache from the DB-backed active row.
+
+    Single helper for every route that mutates providers (create / update /
+    delete / activate + the ``PUT /api/config`` model hot-switch). Fetches the
+    active provider entity and feeds its full config dict to
+    ``set_active_cache`` — including the multi-model catalog + 6 connection-
+    level fields (via ``crud._provider_to_cache_dict``, which also resolves the
+    active model via ``_select_model``). No-op when no active provider exists
+    (the env fallback in ``get_config()`` handles the no-provider case).
+
+    ``model_override``: used only by ``PUT /api/config`` (explicit model
+    hot-switch). The catalog's ``is_default`` entry may point to a different
+    model than the one just written to the legacy ``model`` column; an explicit
+    hot-switch must honor the requested model, so the override forces the
+    cache's ``model`` key after the refresh. ``None`` (the 4 CRUD routes) lets
+    ``_select_model`` pick (is_default → match → first → legacy column).
+    """
+    from store import crud
+
+    entity = await crud.get_active_provider_entity()
+    if not entity:
+        return
+    # crud._provider_to_cache_dict is the crud-internal 13-key cache-dict
+    # builder (raw api_key for auth, models + connection-level fields).
+    cache_dict = crud._provider_to_cache_dict(entity)
+    if model_override:
+        cache_dict["model"] = model_override
+    _config.set_active_cache(cache_dict)
+
+
 @router.get("/api/providers")
 async def list_providers_route() -> list[LlmProvider]:
     """List all configured LLM providers (api_key masked on each)."""
     from store import crud
 
     return await crud.list_providers()
+
+
+@router.get("/api/providers/catalog")
+async def list_provider_catalog_route() -> list[dict[str, Any]]:
+    """List preset provider templates (UI "预设服务商" picker).
+
+    Returns the static, curated catalog of well-known providers (OpenAI /
+    DeepSeek / Anthropic / Kimi / GLM / Qwen / Ollama) — each with a ready
+    base_url + default connection config + seeded models catalog. No
+    ``api_key`` (the user supplies that); no DB row (selecting a preset just
+    pre-fills the editor, which POSTs via ``POST /api/providers`` to persist).
+
+    Registered BEFORE any ``{provider_id}`` path so FastAPI matches the
+    static ``catalog`` segment literally instead of treating it as a
+    provider_id (defensive — there is no ``GET /api/providers/{id}`` today,
+    but a static path ahead of a parameterized one is the safe ordering).
+    """
+    from llm_provider_catalog import list_catalog
+
+    return list_catalog()
 
 
 @router.post("/api/providers")
@@ -127,18 +172,7 @@ async def create_provider_route(body: LlmProviderCreatePayload) -> LlmProvider:
 
     provider = await crud.create_provider(body)
     if provider.is_active:
-        entity = await crud.get_active_provider_entity()
-        if entity:
-            _config.set_active_cache(
-                {
-                    "provider": entity.provider,
-                    "model": entity.model,
-                    "base_url": entity.base_url,
-                    "api_key": entity.api_key or "",
-                    "temperature": entity.temperature,
-                    "max_tokens": entity.max_tokens,
-                }
-            )
+        await _refresh_active_cache()
     return provider
 
 
@@ -155,18 +189,7 @@ async def update_provider_route(
     if provider is None:
         return {"ok": False, "error": "provider not found"}
     if provider.is_active:
-        entity = await crud.get_active_provider_entity()
-        if entity:
-            _config.set_active_cache(
-                {
-                    "provider": entity.provider,
-                    "model": entity.model,
-                    "base_url": entity.base_url,
-                    "api_key": entity.api_key or "",
-                    "temperature": entity.temperature,
-                    "max_tokens": entity.max_tokens,
-                }
-            )
+        await _refresh_active_cache()
     return provider
 
 
@@ -180,18 +203,7 @@ async def delete_provider_route(provider_id: str) -> dict:
     if not deleted:
         return {"ok": False, "error": "provider not found"}
     if reassigned:
-        entity = await crud.get_active_provider_entity()
-        if entity:
-            _config.set_active_cache(
-                {
-                    "provider": entity.provider,
-                    "model": entity.model,
-                    "base_url": entity.base_url,
-                    "api_key": entity.api_key or "",
-                    "temperature": entity.temperature,
-                    "max_tokens": entity.max_tokens,
-                }
-            )
+        await _refresh_active_cache()
     return {"ok": True}
 
 
@@ -204,19 +216,54 @@ async def activate_provider_route(provider_id: str) -> LlmProvider | dict:
     provider = await crud.set_active_provider(provider_id)
     if provider is None:
         return {"ok": False, "error": "provider not found"}
-    entity = await crud.get_active_provider_entity()
-    if entity:
-        _config.set_active_cache(
-            {
-                "provider": entity.provider,
-                "model": entity.model,
-                "base_url": entity.base_url,
-                "api_key": entity.api_key or "",
-                "temperature": entity.temperature,
-                "max_tokens": entity.max_tokens,
-            }
-        )
+    await _refresh_active_cache()
     return provider
+
+
+@router.post("/api/providers/{provider_id}/test")
+async def test_provider_route(provider_id: str) -> dict:
+    """Probe a provider's connectivity (UI "测试连通" button).
+
+    Issues a minimal ``/chat/completions`` call against the provider's own
+    connection-level config (base_url / api_key / proxy / extra_headers /
+    request_timeout / resolved active model) and returns a structured go/no-go
+    result. Uses the RAW entity (raw api_key intact) via
+    ``crud.get_provider_entity`` — the probe must actually authenticate, so
+    the masked ``get_provider`` model won't do. Never 500s: all failure modes
+    (timeout / connect error / 4xx / empty choices) are captured into the
+    ``error`` field with ``ok=False`` so the UI can render them directly.
+    """
+    from store import crud
+    from llm.probe import test_provider
+
+    entity = await crud.get_provider_entity(provider_id)
+    if not entity:
+        return {"ok": False, "latency_ms": 0, "error": "provider not found", "status_code": None}
+    return await test_provider(entity)
+
+
+@router.get("/api/providers/{provider_id}/models")
+async def fetch_provider_models_route(provider_id: str) -> dict:
+    """Pull the upstream model catalog (UI "拉取模型" button).
+
+    GET ``{base_url}/models`` with the provider's connection config and
+    normalize the response into a list of LlmModel entries (capability
+    metadata defaulted, first entry ``is_default``). Uses the RAW entity (raw
+    api_key intact) via ``crud.get_provider_entity`` — the fetch must
+    authenticate, same as the test probe. Never 500s: all failure modes are
+    captured into ``error`` with ``ok=False`` and an empty ``models`` list so
+    the UI can render the failure inline rather than crash the picker.
+
+    The returned ``models`` are NOT persisted — the frontend sends them back
+    via ``PUT /api/providers/{id}`` if the user accepts the pulled catalog.
+    """
+    from store import crud
+    from llm.probe import fetch_models
+
+    entity = await crud.get_provider_entity(provider_id)
+    if not entity:
+        return {"ok": False, "models": [], "error": "provider not found", "status_code": None}
+    return await fetch_models(entity)
 
 
 # ── Slash helper (BE-01: backend parsing the frontend can't do alone) ────

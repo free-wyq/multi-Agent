@@ -55,6 +55,18 @@ _DEFAULT_MODEL = "glm-5.1"
 _DEFAULT_BASE_URL = "https://api.openai.com/v1"
 _DEFAULT_PROVIDER = "openai"
 
+# Multi-model provider: connection-level defaults (mirror LlmProvider output
+# model / LlmProviderEntity columns). Empty string / None = "not configured,
+# downstream caller must skip this when building the upstream client". The
+# active model is resolved from `models` first (see `select_active_model`),
+# falling back to the flat `model` key — so `models` is optional metadata,
+# not a required field.
+_DEFAULT_API_VERSION = ""
+_DEFAULT_ORGANIZATION = ""
+_DEFAULT_REQUEST_TIMEOUT = 120.0
+_DEFAULT_MAX_RETRIES = 2
+_DEFAULT_PROXY = ""
+
 # In-memory cache of the ACTIVE provider's raw config. Populated by the async
 # loader at startup (``crud.load_active_provider_into_cache``) and refreshed by
 # async route handlers on every provider switch / model change. ``get_config()``
@@ -86,6 +98,15 @@ def _env_config() -> dict[str, Any]:
         or os.environ.get("ANTHROPIC_API_KEY", ""),
         "temperature": _DEFAULT_TEMPERATURE,
         "max_tokens": _DEFAULT_MAX_TOKENS,
+        # Multi-model provider: env fallback has no catalog / connection-level
+        # config — emit the defaults so downstream callers see a complete dict.
+        "models": [],
+        "api_version": _DEFAULT_API_VERSION,
+        "organization": _DEFAULT_ORGANIZATION,
+        "extra_headers": None,
+        "request_timeout": _DEFAULT_REQUEST_TIMEOUT,
+        "max_retries": _DEFAULT_MAX_RETRIES,
+        "proxy": _DEFAULT_PROXY,
     }
 
 
@@ -132,21 +153,95 @@ def get_config_public() -> dict[str, Any]:
 def set_active_cache(cfg: dict[str, Any]) -> None:
     """Populate the in-memory active-provider cache (called by async loaders/routes).
 
-    Normalizes the dict to the 6 keys ``get_config()`` returns. Called from:
+    Normalizes the dict to the ~18 keys ``get_config()`` returns. The 6 legacy
+    keys (provider/model/base_url/api_key/temperature/max_tokens) are coerced
+    to their typed defaults; the 7 multi-model keys (models catalog + 6
+    connection-level fields) are filled from ``cfg`` with defaults so a
+    legacy caller (or a DB row upgraded in place by ``_migrate_schema``) that
+    omits them still yields a complete, usable config. Called from:
     - ``init_db`` → ``crud.load_active_provider_into_cache`` at startup
     - ``POST /api/providers/{id}/activate`` route handler
     - ``PUT /api/config`` model hot-switch route handler
     - ``POST/PUT/DELETE /api/providers`` when the active provider changes
     """
     global _ACTIVE_CACHE
+    # Coerce models to a list of plain dicts (LlmModel-shaped). None / missing
+    # → empty catalog (active model falls back to the flat `model` key).
+    raw_models = cfg.get("models")
+    models = list(raw_models) if isinstance(raw_models, list) else []
     _ACTIVE_CACHE = {
+        # Legacy flat config (always present).
         "provider": cfg.get("provider", _DEFAULT_PROVIDER),
         "model": cfg.get("model", _DEFAULT_MODEL),
         "base_url": cfg.get("base_url", _DEFAULT_BASE_URL),
         "api_key": cfg.get("api_key", ""),
         "temperature": float(cfg.get("temperature", _DEFAULT_TEMPERATURE)),
         "max_tokens": int(cfg.get("max_tokens", _DEFAULT_MAX_TOKENS)),
+        # Multi-model catalog (provider owns N models; empty = legacy mode).
+        "models": models,
+        # Connection-level config (applies to the endpoint, shared by all models).
+        # extra_headers None = "do not attach" (truthy check downstream).
+        "api_version": cfg.get("api_version", _DEFAULT_API_VERSION) or _DEFAULT_API_VERSION,
+        "organization": cfg.get("organization", _DEFAULT_ORGANIZATION) or _DEFAULT_ORGANIZATION,
+        "extra_headers": cfg.get("extra_headers", None),
+        "request_timeout": float(cfg.get("request_timeout", _DEFAULT_REQUEST_TIMEOUT)),
+        "max_retries": int(cfg.get("max_retries", _DEFAULT_MAX_RETRIES)),
+        "proxy": cfg.get("proxy", _DEFAULT_PROXY) or _DEFAULT_PROXY,
     }
+
+
+def select_active_model(cfg: dict[str, Any]) -> str:
+    """Resolve the active ``model_id`` from a config dict (single source of truth).
+
+    Selection precedence (first match wins):
+
+    1. **``is_default`` model** — the first entry in ``cfg["models"]`` whose
+       ``is_default`` is truthy. This is the canonical "selected model" for a
+       multi-model provider (the UI marks exactly one default; see
+       ``crud.update_provider`` single-default invariant).
+    2. **Match the legacy ``model`` key** — the first entry whose ``model_id``
+       equals ``cfg["model"]``. Covers the hot-switch path: ``PUT /api/config``
+       sets ``_ACTIVE_CACHE["model"]`` to the chosen id, and this finds the
+       matching catalog entry (so capability metadata can be looked up by id).
+       Also handles a legacy DB row where ``model`` was the only model and the
+       catalog was seeded from it.
+    3. **First catalog entry** — if the catalog is non-empty but no entry is
+       marked default and none matches ``model``, take the first (deterministic
+       fallback — never returns "no model" when a catalog exists).
+    4. **Legacy ``model`` column** — if the catalog is empty/missing, fall back
+       to ``cfg["model"]`` (the flat legacy column). This keeps pre-migration
+       providers working unchanged.
+    5. **``_DEFAULT_MODEL``** — if even ``model`` is empty, the import-time
+       default (``glm-5.1``) so the caller always gets a non-empty model id.
+
+    ``cfg`` is the dict shape returned by :func:`get_config` /
+    :func:`set_active_cache` (13 keys: 6 legacy + ``models`` + 6
+    connection-level). ``models`` entries are plain dicts (LlmModel-shaped);
+    missing keys coerce to safe defaults. Safe to call on the env-fallback dict
+    (``models=[]`` → falls through to ``model`` key).
+    """
+    models = cfg.get("models") or []
+    if isinstance(models, list):
+        # 1. is_default entry.
+        for m in models:
+            if isinstance(m, dict) and m.get("is_default"):
+                mid = m.get("model_id")
+                if mid:
+                    return str(mid)
+        # 2. match the legacy `model` key.
+        legacy_model = cfg.get("model", "") or ""
+        if legacy_model:
+            for m in models:
+                if isinstance(m, dict) and str(m.get("model_id", "")) == str(legacy_model):
+                    return str(legacy_model)
+        # 3. first catalog entry (catalog non-empty, no default, no match).
+        for m in models:
+            if isinstance(m, dict):
+                mid = m.get("model_id")
+                if mid:
+                    return str(mid)
+    # 4 + 5. legacy `model` column, then import-time default.
+    return str(cfg.get("model", "") or _DEFAULT_MODEL)
 
 
 def set_config(model: str | None = None) -> dict[str, Any]:
