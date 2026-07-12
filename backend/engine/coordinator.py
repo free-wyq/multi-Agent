@@ -623,13 +623,25 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
         }
         reply_id, tokens, elapsed_ms, model = "", 0, 0, ""
 
-    # Stamp the streaming run-stats onto the chat action so node_chat persists
-    # them onto the agent_reply's data — the finalized bubble then keeps
+    # Stamp the streaming run-stats onto the chat/ask/continue action so node_chat
+    # persists them onto the agent_reply's data — the finalized bubble then keeps
     # rendering "model · Ns · ↓ N tokens" after the streaming bubble retires
-    # (stats stay visible, don't vanish on completion). Only chat replies carry
-    # this; dispatch/summarize go through their own _unified_reply call sites
-    # with no stats (their "stats" are the plan, not a single LLM turn).
-    if decision["action"] == "chat":
+    # (stats stay visible, don't vanish on completion).
+    #
+    # Which actions carry stats: any action whose reply_content IS the streamed
+    # LLM text and routes to node_chat. chat/ask/continue all reuse decision
+    # ["content"] verbatim through node_chat (route_after_llm_decide sends ask/
+    # continue to "chat" too), so they all consumed real tokens and deserve the
+    # status line. dispatch is excluded — its reply is a templated "📋 已制定
+    # 协作计划..." announce built in node_dispatch, NOT the streamed decision
+    # text, so the stream's tokens/elapsed wouldn't match the persisted content.
+    #
+    # Pre-fix this only stamped "chat", so ask/continue replies (clarifying
+    # questions, continuations) lost their status line on finalization — the
+    # streaming bubble showed "model · Ns · ↓ N tokens · 思考中" live, then the
+    # stats vanished when the finalized bubble took over. Symptom: some
+    # coordinator bubbles showed the model line, others didn't.
+    if decision["action"] in ("chat", "ask", "continue"):
         decision["_stream_stats"] = {
             "reply_id": reply_id,
             "elapsed_ms": elapsed_ms,

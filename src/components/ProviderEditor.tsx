@@ -12,7 +12,18 @@
  * 组件可独立编译；SettingsModal 尚未接入（PE-07 改造）。
  */
 import { useState, useEffect } from 'react'
-import { Modal, Form, Input, Divider, Select, message } from 'antd'
+import {
+  Modal,
+  Form,
+  Input,
+  Divider,
+  Select,
+  AutoComplete,
+  InputNumber,
+  Row,
+  Col,
+  message,
+} from 'antd'
 import { providerApi } from '../services/api'
 import type { LlmProvider, LlmModel, ProviderPreset } from '../services/api'
 
@@ -62,13 +73,26 @@ const EMPTY_FORM: ProviderFormState = {
 }
 
 /**
+ * Provider 类型 AutoComplete 候选项（用户可手输不在列表内的值）。
+ * 与旧 SettingsModal PROVIDER_OPTIONS 同源，结构对齐 AutoComplete options（{value}）。
+ */
+const PROVIDER_OPTIONS = [
+  { value: 'openai' },
+  { value: 'deepseek' },
+  { value: 'anthropic' },
+  { value: 'kimi' },
+  { value: 'glm' },
+  { value: 'qwen' },
+  { value: 'ollama' },
+]
+
+/**
  * 编辑态：把 LlmProvider 灌入 formState。
  *
  * api_key 留空（后端返回的 api_key 是脱敏 mask，不可回填；PE-03 用 placeholder
  * 提示「留空则不修改」）。models 浅拷贝每个条目，避免前端编辑直接改后端返回对象。
  */
-function providerToFormState(p: LlmProvider): ProviderFormState {
-  return {
+function providerToFormState(p: LlmProvider): ProviderFormState {  return {
     name: p.name,
     provider: p.provider,
     base_url: p.base_url,
@@ -107,6 +131,27 @@ export default function ProviderEditor({
   const [formState, setFormState] = useState<ProviderFormState>(() =>
     provider ? providerToFormState(provider) : EMPTY_FORM,
   )
+
+  // ── PE-03 extra_headers JSON 文本镜像 ──
+  // formState.extra_headers 是结构化 Record|null（保存时用），但表单里是单行文本框
+  // （用户手输 JSON）。extraHeadersText 是它的字符串镜像：加载时 stringify，输入时
+  // 仅更新文本（容错：非法 JSON 不抛错、不回灌 formState，解析成功才同步）。
+  // 这样用户可自由编辑半成品 JSON（如缺右括号中途态），不会因每次按键 parse 失败而弹错。
+  const [extraHeadersText, setExtraHeadersText] = useState<string>(() =>
+    formState.extra_headers ? JSON.stringify(formState.extra_headers) : '',
+  )
+  /** extra_headers 解析态：''=空(未输入) / 'ok'=合法JSON已同步 / 'error'=非法JSON。 */
+  const [extraHeadersError, setExtraHeadersError] = useState<
+    '' | 'ok' | 'error'
+  >('')
+  // 预设/编辑态灌入 extra_headers 后同步文本镜像（applyPreset 用 setFormState 改 extra_headers，
+  // 文本镜像需跟上——监听 formState.extra_headers 引用变化时 stringify）。
+  useEffect(() => {
+    setExtraHeadersText(
+      formState.extra_headers ? JSON.stringify(formState.extra_headers) : '',
+    )
+    setExtraHeadersError('')
+  }, [formState.extra_headers])
 
   // ── PE-02 预设选择器 ──
   // 预设是「编辑器加载的模板」（base_url + 连接配置 + 预置 models），用户选预设后一键灌入
@@ -166,6 +211,43 @@ export default function ProviderEditor({
   const activePreset = presets.find((p) => p.slug === selectedPreset)
   const presetNote = activePreset?.note ?? ''
 
+  /**
+   * PE-03 extra_headers 文本变更：仅更新文本镜像 + 实时尝试 parse。
+   *
+   * 容错策略——空串 = null（清除自定义头）；合法 JSON = 解析为 Record 写回 formState；
+   * 非法 JSON = 标记 error 但保留文本（不回灌、不抛错），用户可继续编辑到合法为止。
+   * 解析结果非对象（如 JSON.parse('"str"') 得 string、'123' 得 number）也算 error
+   * ——extra_headers 必须是 string→string 的对象（Record<string,string>）。
+   */
+  const handleExtraHeadersChange = (text: string) => {
+    setExtraHeadersText(text)
+    const trimmed = text.trim()
+    if (trimmed === '') {
+      setFormState((prev) => ({ ...prev, extra_headers: null }))
+      setExtraHeadersError('')
+      return
+    }
+    try {
+      const parsed: unknown = JSON.parse(trimmed)
+      // 必须是 plain object（Record<string,string>）；数组/null/原始值均不接受。
+      if (
+        typeof parsed !== 'object' ||
+        parsed === null ||
+        Array.isArray(parsed)
+      ) {
+        setExtraHeadersError('error')
+        return
+      }
+      setFormState((prev) => ({
+        ...prev,
+        extra_headers: parsed as Record<string, string>,
+      }))
+      setExtraHeadersError('ok')
+    } catch {
+      setExtraHeadersError('error')
+    }
+  }
+
   // PE-06 将实现完整保存：name 必填校验 → 构造 LlmProviderPayload（api_key 仅非空传；
   //  models 整体传并保证恰好一个 is_default，无 default 时把首个置 true）→
   //  编辑态 update / 新增态 create → message.success + onSaved + 关闭。
@@ -219,9 +301,182 @@ export default function ProviderEditor({
             placeholder="如 OpenAI 官方、DeepSeek"
           />
         </Form.Item>
-        {/* PE-03 连接配置 · PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
+        {/* ── PE-03 连接配置 ── */}
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="Provider 类型">
+              <AutoComplete
+                value={formState.provider}
+                onChange={(v) =>
+                  setFormState({ ...formState, provider: v })
+                }
+                options={PROVIDER_OPTIONS}
+                placeholder="如 openai / deepseek"
+                filterOption={(input, option) =>
+                  (option?.value ?? '')
+                    .toLowerCase()
+                    .includes(input.toLowerCase())
+                }
+              />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="Base URL">
+              <Input
+                value={formState.base_url}
+                onChange={(e) =>
+                  setFormState({ ...formState, base_url: e.target.value })
+                }
+                placeholder="https://api.openai.com/v1"
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Form.Item label="API Key">
+          <Input.Password
+            value={formState.api_key}
+            onChange={(e) =>
+              setFormState({ ...formState, api_key: e.target.value })
+            }
+            // 编辑态：后端返回的是脱敏 mask，留空 = 不修改；新增态：正常占位。
+            placeholder={isEdit ? '留空则不修改' : 'sk-...'}
+          />
+        </Form.Item>
         <Divider plain style={{ fontSize: 12, color: '#999' }}>
-          连接配置 · 模型目录 · 测试连通（PE-03~05 待实现）
+          采样参数
+        </Divider>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="Temperature">
+              <InputNumber
+                value={formState.temperature}
+                onChange={(v) =>
+                  setFormState({
+                    ...formState,
+                    temperature: v ?? 0.0,
+                  })
+                }
+                step={0.1}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="Max Tokens">
+              <InputNumber
+                value={formState.max_tokens}
+                onChange={(v) =>
+                  setFormState({
+                    ...formState,
+                    max_tokens: v ?? 4096,
+                  })
+                }
+                step={256}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Divider plain style={{ fontSize: 12, color: '#999' }}>
+          高级连接配置
+        </Divider>
+        <Row gutter={12}>
+          <Col span={12}>
+            <Form.Item label="API Version">
+              <Input
+                value={formState.api_version}
+                onChange={(e) =>
+                  setFormState({
+                    ...formState,
+                    api_version: e.target.value,
+                  })
+                }
+                placeholder="如 2024-02-15（Anthropic 留空）"
+              />
+            </Form.Item>
+          </Col>
+          <Col span={12}>
+            <Form.Item label="Organization">
+              <Input
+                value={formState.organization}
+                onChange={(e) =>
+                  setFormState({
+                    ...formState,
+                    organization: e.target.value,
+                  })
+                }
+                placeholder="OpenAI 组织 id（可留空）"
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+        <Form.Item
+          label="Extra Headers"
+          validateStatus={
+            extraHeadersError === 'error' ? 'error' : undefined
+          }
+          help={
+            extraHeadersError === 'error'
+              ? 'JSON 格式错误，请检查（如 {"X-Custom":"value"}）'
+              : 'JSON 格式自定义请求头，空则不附加'
+          }
+        >
+          <Input.TextArea
+            value={extraHeadersText}
+            onChange={(e) => handleExtraHeadersChange(e.target.value)}
+            placeholder='{"X-Custom-Header": "value"}'
+            autoSize={{ minRows: 2, maxRows: 4 }}
+          />
+        </Form.Item>
+        <Row gutter={12}>
+          <Col span={8}>
+            <Form.Item label="Request Timeout (s)">
+              <InputNumber
+                value={formState.request_timeout}
+                onChange={(v) =>
+                  setFormState({
+                    ...formState,
+                    request_timeout: v ?? 120,
+                  })
+                }
+                min={0}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          </Col>
+          <Col span={8}>
+            <Form.Item label="Max Retries">
+              <InputNumber
+                value={formState.max_retries}
+                onChange={(v) =>
+                  setFormState({
+                    ...formState,
+                    max_retries: v ?? 2,
+                  })
+                }
+                min={0}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+          </Col>
+          <Col span={8}>
+            <Form.Item label="Proxy">
+              <Input
+                value={formState.proxy}
+                onChange={(e) =>
+                  setFormState({
+                    ...formState,
+                    proxy: e.target.value,
+                  })
+                }
+                placeholder="http://127.0.0.1:7890"
+              />
+            </Form.Item>
+          </Col>
+        </Row>
+        {/* PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
+        <Divider plain style={{ fontSize: 12, color: '#999' }}>
+          模型目录 · 测试连通（PE-04~05 待实现）
         </Divider>
       </Form>
     </Modal>
