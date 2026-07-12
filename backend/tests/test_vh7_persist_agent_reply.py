@@ -111,15 +111,19 @@ def assert_contract() -> list[str]:
         errs.append("[setup] persist_agent_reply 函数体未找到")
         return errs
 
-    # [2] 构建 agent_reply dict（type="agent_reply" / receiver_id="broadcast" / task_id=None）
+    # [2] 构建 agent_reply dict（type="agent_reply" / receiver_id="broadcast" / task_id=task_id）
+    # B22：persist_agent_reply 加 task_id 参数（registry _reply 透传收尾任务 id，
+    # graph _unified_reply 不传保持默认 None）。message dict 的 "task_id" 改为
+    # 透传 task_id 参数（非恒 None）——原 B10 「task_id=None」断言不再成立，改为
+    # 断言透传 task_id 参数（B22 真源接线）。
     if '"type": "agent_reply"' not in pa_body:
         errs.append('[A2] persist_agent_reply 未构建 type="agent_reply" message dict')
     elif '"receiver_id": "broadcast"' not in pa_body:
         errs.append('[A2] persist_agent_reply message dict 缺 receiver_id="broadcast"')
-    elif '"task_id": None' not in pa_body:
-        errs.append('[A2] persist_agent_reply message dict 缺 task_id=None')
+    elif '"task_id": task_id' not in pa_body:
+        errs.append('[A2] persist_agent_reply message dict 缺 "task_id": task_id（B22 应透传 task_id 参数非恒 None）')
     else:
-        print("[A2] OK  persist_agent_reply 构建 agent_reply dict（type/broadcast/task_id=None）")
+        print('[A2] OK  persist_agent_reply 构建 agent_reply dict（type/broadcast/task_id=task_id，B22 透传）')
 
     # [3] 调 crud.create_message + emit_message_added
     if "crud.create_message" not in pa_body:
@@ -134,6 +138,15 @@ def assert_contract() -> list[str]:
         errs.append('[A4] persist_agent_reply 未透传 "data": data（应接 data 参数非恒 None）')
     else:
         print('[A4] OK  persist_agent_reply 透传 "data": data（接 data 参数，非恒 None）')
+    # [4b] B22：接 task_id 参数（默认 None，registry _reply 透传真 task_id）
+    if "task_id: str | None = None" not in pa_body and "task_id: Optional[str] = None" not in pa_body:
+        # _fn_body 抽的是函数体（{ 后到 } 前），形参在签名行——查 reply_mod 全文（含签名）。
+        if "task_id: str | None = None" in reply_mod or "task_id: Optional[str] = None" in reply_mod:
+            print('[A4b] OK  persist_agent_reply 签名接 task_id: str | None = None（B22 默认 None 保全既有调用方）')
+        else:
+            errs.append('[A4b] persist_agent_reply 缺 task_id: str | None = None 参数（B22 未加 task_id 形参）')
+    else:
+        print('[A4b] OK  persist_agent_reply 接 task_id: str | None = None（B22 默认 None 保全既有调用方）')
 
     # ── B. coordinator _unified_reply 委托 ──
     c_reply = _fn_body(coord, "_unified_reply", indent_opts=("",))
@@ -182,14 +195,17 @@ def assert_contract() -> list[str]:
     if not r_reply:
         errs.append("[D11] registry _reply 函数体未找到")
     else:
-        # [11] 调 persist_agent_reply(..., None)（恒 data=None）
+        # [11] 调 persist_agent_reply(..., None, task_id)（恒 data=None，B22 透传 task_id）
+        # B22：_reply 加 task_id 参数透传到 persist_agent_reply 第 5 参。data 仍恒 None
+        # （第 4 参，execute announce 不带 stats）。断言：persist_agent_reply 调用含 None
+        # （data=None）+ task_id 参数名（B22 接线）。
         delegates_none = "persist_agent_reply" in r_reply and re.search(
-            r"persist_agent_reply\([^)]*,\s*None\s*\)", r_reply, re.S
+            r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_reply, re.S
         ) is not None
         if not delegates_none:
-            errs.append("[D11] registry _reply 未调 persist_agent_reply(..., None)（恒 data=None）")
+            errs.append("[D11] registry _reply 未调 persist_agent_reply(..., None, task_id)（恒 data=None + B22 透传 task_id）")
         else:
-            print("[D11] OK  registry _reply → persist_agent_reply(..., None)（恒 data=None）")
+            print("[D11] OK  registry _reply → persist_agent_reply(..., None, task_id)（恒 data=None + B22 透传 task_id）")
         # [12] 不再内联 crud.create_message agent_reply dict
         if '"type": "agent_reply"' in r_reply:
             errs.append("[D12] registry _reply 仍内联 agent_reply dict（B10 未去重）")

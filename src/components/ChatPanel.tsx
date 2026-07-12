@@ -522,10 +522,26 @@ export default function ChatPanel({
   // 定稿气泡（ChatMessageBubble isStreaming=false）：content=收尾事件 result，toolEvents
   // 保留 ST-03 工具摘要行。填补「流式气泡消失 ↔ 持久化回复出现」的间隙——避免生成内容
   // + 工具调用瞬间蒸发。
-  // 自动退场：当该 agent 的持久化回复消息落进 chatMessages（sender_id 匹配 + 时间晚于
-  // 收尾事件）即过滤掉定稿气泡——持久化回复接管，无永久重复。匹配按 sender+时间而非
-  // task_id：logs 追加路径会把所有 WS 消息 coerce 成 type:'log' 且 task_id 可能丢失，
-  // 故用「该 agent 在收尾时间戳之后的消息」判定回复已落地（_reply 是收尾后唯一后续消息）。
+  // 自动退场：当该 task 的持久化回复消息落进 chatMessages 即过滤掉定稿气泡——持久化
+  // 回复接管，无永久重复。
+  // 退场匹配（B22 重写·消除时序依赖）：主路径按 task_id 精确匹配——
+  //   replied = chatMessages.some(m => m.sender_id === e.agentId && m.task_id === e.taskId)
+  // 后端 _reply（execute 收尾 announce：任务完成🎉/执行出错了/⏹任务已停止/⏱超时）经
+  // persist_agent_reply(task_id=...) 把 task_id 落到 message.task_id + message_added WS
+  // 事件，前端 ChatPanel logs 桥接（line ~614）把 log.taskId 回填到 chatMessages 的
+  // task_id——故 e.taskId（task_complete/failed 事件的 task_id）== m.task_id（持久化回复
+  // 的 task_id）时回复已落地，退场定稿气泡。
+  // 这取代了原 fragile 的「sender_id 匹配 + created_at >= 收尾事件时间戳」判定——原判定
+  // 依赖前后端时钟同步（WSL2 后端 UTC 与 Windows 浏览器本地时区常偏差秒级，时间戳比较
+  // 会误判）+ logs 追加路径 coerce WS 消息时 task_id「可能丢失」（原注释自承 fragile）。
+  // B22 让后端把 task_id 持久化到回复行（reload-safe：切群/重连回灌从 DB 重建 chatMessages
+  // 时 task_id 仍在），前端按精确 task_id 匹配——同一 task_id 在收尾事件和退场回复上都有，
+  // 不论经 live WS 还是 reload-from-DB 抵达都能匹配。
+  // 兜底 sender+时间戳保留：chat 路径（coordinator/worker node_chat）的 agent_reply
+  // 不经 _reply（走 graph _unified_reply 不传 task_id）→ m.task_id===null，task_id 匹配
+  // 不命中。但 chat 路径无 task_complete/failed 事件（非 execute 路径），finalizedBubbles
+  // 循环根本不会为 chat 回复生成定稿气泡（kind 仅 complete/failed 进循环）——故兜底分支
+  // 实际不命中，保留仅防御性（未来若 chat 路径也接 task_complete 收尾，兜底仍能退场）。
   // ST-06（task 21）：成功路径同时提取 data.artifact.files[]（extractFinalizedArtifacts）
   // → artifactFiles 传 ChatMessageBubble 渲染下载卡。失败/取消/超时路径后端不透传 artifact
   // （bus.py emit_task_completed 仅 success 时写 data.artifact）→ 返空数组 → 失败气泡无下载卡。
@@ -538,11 +554,14 @@ export default function ChatPanel({
       seen.add(e.taskId)
       // 仍在流式（缓冲未清）→ 流式气泡自己渲染，不定稿
       if (streaming[e.taskId]) continue
-      // 持久化回复已落进 chatMessages → 已被替换，不再渲染定稿气泡
+      // 持久化回复已落进 chatMessages → 已被替换，不再渲染定稿气泡。
+      // B22：主路径按 task_id 精确匹配（reload-safe，不依赖时钟同步）；
+      // 兜底 sender+时间戳（chat 路径无 task_id 时防御性退场，实际不命中）。
       const replied = chatMessages.some(
         (m) =>
           m.sender_id === e.agentId &&
-          new Date(m.created_at).getTime() >= e.timestamp,
+          (m.task_id === e.taskId ||
+            new Date(m.created_at).getTime() >= e.timestamp),
       )
       if (replied) continue
       out.push({

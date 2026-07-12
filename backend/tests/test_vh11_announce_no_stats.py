@@ -206,13 +206,19 @@ def assert_contract() -> list[str]:
             print("[C10] OK  node_dispatch 注释引用 dispatcher 派发 announce（互相引用形成真源）")
 
     # ── D. 行为零变（announce 落盘 shape 不变）──
-    # [11] persist_agent_reply 内部 type="agent_reply" / receiver_id="broadcast" / task_id=None
+    # [11] persist_agent_reply 内部 type="agent_reply" / receiver_id="broadcast" / task_id=task_id
+    # B22：persist_agent_reply message dict 的 "task_id" 从恒 None 改为透传 task_id 参数
+    # （registry _reply 透传真 task_id，graph _unified_reply 不传保持默认 None）。原「task_id=None」
+    # 字面量断言不再成立——announce 路径（dispatcher _dispatch_one / coordinator node_dispatch）
+    # 走 persist_agent_reply(..., None) 不传 task_id，task_id 默认 None 落盘（行为零变）。
+    # 断言改为：message dict 含 "task_id": task_id（透传参数）+ dispatcher announce 仍调
+    # persist_agent_reply(..., None)（data=None，不传 task_id → 默认 None）。
     if '"type": "agent_reply"' not in reply_mod or '"receiver_id": "broadcast"' not in reply_mod:
         errs.append("[D11] persist_agent_reply 内部 agent_reply shape 异常（D11 契约破）")
-    elif '"task_id": None' not in reply_mod:
-        errs.append("[D11] persist_agent_reply 内部缺 task_id=None")
+    elif '"task_id": task_id' not in reply_mod:
+        errs.append("[D11] persist_agent_reply 内部缺 \"task_id\": task_id（B22 应透传 task_id 参数）")
     else:
-        print("[D11] OK  persist_agent_reply 内部 agent_reply shape 不变（type/broadcast/task_id=None）")
+        print("[D11] OK  persist_agent_reply 内部 agent_reply shape（type/broadcast/task_id=task_id，B22 透传）")
     # [12] node_dispatch 仍走 _unified_reply → persist_agent_reply（[C8] 已锁调用，此处确认 _unified_reply 仍模块级）
     if not re.search(r"^async def _unified_reply\(", coord, re.M):
         errs.append("[D12] coordinator 无模块级 _unified_reply（node_dispatch announce 链断）")
@@ -236,13 +242,16 @@ def assert_contract() -> list[str]:
         errs.append("[E14] node_llm_decide chat/ask/continue 盖 _stream_stats 契约破（A8/vg2 回归）")
     else:
         print("[E14] OK  node_llm_decide 仍只在 chat/ask/continue 盖 _stream_stats（dispatch 不盖，A8/vg2 不破）")
-    # [15] registry._reply 仍 persist_agent_reply(..., None)（execute announce 无 stats）
+    # [15] registry._reply 仍 persist_agent_reply(..., None, task_id)（execute announce 无 stats）
+    # B22：_reply 调用形如 persist_agent_reply(self.group_id, self.agent_id, content, None, task_id)
+    # 第 4 参 None = data 恒 None（execute announce 无 stats 不变）；第 5 参 task_id = B22 透传。
+    # 断言 None 在 persist_agent_reply 调用里（data=None，核心契约「announce 无 stats」不变）。
     reg = (REPO / "backend" / "engine" / "registry.py").read_text(encoding="utf-8")
     r_reply = _fn_body(reg, "_reply", indent_opts=("    ",))
-    if not r_reply or not re.search(r"persist_agent_reply\([^)]*,\s*None\s*\)", r_reply, re.S):
-        errs.append("[E15] registry._reply 未 persist_agent_reply(..., None)（execute announce 链断）")
+    if not r_reply or not re.search(r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_reply, re.S):
+        errs.append("[E15] registry._reply 未 persist_agent_reply(..., None, task_id)（execute announce 无 stats + B22 task_id 链断）")
     else:
-        print("[E15] OK  registry._reply 仍 persist_agent_reply(..., None)（三类 announce 统一无 stats）")
+        print("[E15] OK  registry._reply 仍 persist_agent_reply(..., None, task_id)（data 恒 None 无 stats + B22 透传 task_id）")
 
     # ── F. 无回归（dispatch_ready_steps 调用链不破）──
     # [16] _dispatch_one 仍 -> None + push_task + emit_task_dispatched

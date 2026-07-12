@@ -431,7 +431,8 @@ class AgentEngine:
             )
         else:
             reply = f"执行出错了: {result.get('output') or ''}"
-        await self._reply(reply)
+        # B22：透传 task_id，让前端 finalizedBubbles 按 task_id 精确退场（非 sender+时间戳）。
+        await self._reply(reply, task_id)
 
         # single agent_reply notify to coordinator (Rust 318-339)
         # 用 engine 启动时缓存的 coordinator_id（身份层·startup-baked，B11 时效契约
@@ -463,7 +464,8 @@ class AgentEngine:
             self.group_id, task_id, self.agent_id, False, "任务已停止", None
         )
         await self._publish_log(task_id, "⏹ 任务已被用户停止")
-        await self._reply("⏹ 任务已停止")
+        # B22：透传 task_id（取消收尾的 announce 归属本任务，前端按 task_id 退场定稿气泡）。
+        await self._reply("⏹ 任务已停止", task_id)
 
     # ── MT-17: worker-task timeout watchdog ─────────────────────────
 
@@ -562,7 +564,8 @@ class AgentEngine:
             self.group_id, task_id, self.agent_id, False, timeout_result, None
         )
         await self._publish_log(task_id, "⏱ 任务已超时降级")
-        await self._reply(f"⏱ {timeout_result}")
+        # B22：透传 task_id（超时收尾的 announce 归属本任务，前端按 task_id 退场定稿气泡）。
+        await self._reply(f"⏱ {timeout_result}", task_id)
         # report-back to coordinator (same channel as _run_worker_task's failure
         # path) so MT-15 recovery wakes — without this the step stays
         # "dispatched" forever and the plan deadlocks.
@@ -749,7 +752,7 @@ class AgentEngine:
 
     # ── unified reply / publish (Rust engine.reply / publish_log) ────
 
-    async def _reply(self, content: str) -> None:
+    async def _reply(self, content: str, task_id: str | None = None) -> None:
         """Persist an agent_reply message + emit + mention route (Rust engine.reply).
 
         Persistence + emit delegated to ``persist_agent_reply`` (engine.reply, B10)
@@ -763,6 +766,15 @@ class AgentEngine:
         流式 LLM 输出，不携带 model/elapsed_ms/tokens 等 stats —— 前端
         extractCoordStats 在 data.elapsed_ms 缺失时返 null 不渲染状态行（与协调者
         dispatch announce 同理：announce 与流式决策文本不同源，stats 不匹配 content）。
+
+        ``task_id`` (B22)：本 announce 收尾的任务 id。透传到 persist_agent_reply
+        落盘到 message.task_id + 透传到 message_added WS 事件，让前端
+        ``finalizedBubbles`` 退场判定能按 task_id 精确匹配「收尾事件 ↔ 持久化回复」
+        （主路径），不再只靠 sender+时间戳（原 fragile：logs 追加路径 coerce WS 消息
+        时 task_id 可能丢失，时间戳比较依赖前后端时钟同步）。3 个调用方
+        （_run_worker_task 成功 / _on_task_cancelled 取消 / _on_task_timed_out 超时）
+        都传 ``task["id"]``。chat 路径（coordinator/worker node_chat）不经 _reply，
+        其 agent_reply 仍 task_id=None（graph 走 _unified_reply 不传 task_id）。
 
         已知限制（A6 评估·保守不改）：execute→task→「任务完成🎉」路径的 announce
         不带 stats。理论上可透传 ``run_agent_loop`` 累加的 create_react_agent usage
@@ -779,7 +791,7 @@ class AgentEngine:
         execute 路径只服务真工程任务（写代码/改配置/运行命令/调工具），其 announce
         不带 stats 是设计取舍而非 bug。若未来要修，见上述三步改造路径。
         """
-        await persist_agent_reply(self.group_id, self.agent_id, content, None)
+        await persist_agent_reply(self.group_id, self.agent_id, content, None, task_id)
         # 防循环用群级共享 dict（见 mention._get_recent_routes）——原 self._recent_routes
         # 是 per-engine，反向清键打不中对方 dict 导致接龙 4 轮断。传 None 让 route_mentions
         # 自动取群级共享视图。

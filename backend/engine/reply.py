@@ -47,14 +47,15 @@ async def persist_agent_reply(
     agent_id: str,
     content: str,
     data: dict[str, Any] | None = None,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     """Persist an ``agent_reply`` message + emit ``message_added``. Return the row.
 
-    Single source for the agent_reply shape (``task_id=None``, ``receiver_id=
-    "broadcast"``, ``type="agent_reply"``) and the persist+emit sequence. Both
-    the registry's execute-path announce and the coordinator/worker graph
-    nodes' reply paths delegate here; the message dict can no longer drift
-    between the three former copies (B10).
+    Single source for the agent_reply shape (``receiver_id="broadcast"``,
+    ``type="agent_reply"``) and the persist+emit sequence. Both the registry's
+    execute-path announce and the coordinator/worker graph nodes' reply paths
+    delegate here; the message dict can no longer drift between the three
+    former copies (B10).
 
     ``data`` is threaded onto the persisted message so it survives reload /
     reconnect. The coordinator/worker chat paths pass the streaming run-stats
@@ -64,6 +65,34 @@ async def persist_agent_reply(
     execute-path announce) leaves no stats — the frontend's ``extractCoordStats``
     returns null on a missing ``elapsed_ms`` and renders no status line, which
     is correct for template announce text (not brain LLM output).
+
+    ``task_id`` (B22): the task this reply closes, for the registry's
+    execute-path announce (``任务完成 🎉`` / ``执行出错了`` / ``⏹ 任务已停止``
+    / ``⏱ 超时``). Threaded onto the persisted row + the emitted
+    ``message_added`` WS event so the frontend ``finalizedBubbles`` auto-retire
+    can match the reply to its closing ``task_complete``/``task_failed`` event by
+    exact ``task_id`` (primary), falling back to sender+timestamp only when the
+    reply carries no ``task_id`` (single-chat worker chat path — worker graph
+    replies have no task_id; their ``_stream_stats`` carries a ``reply_id``
+    instead). Default ``None`` preserves every existing caller: the coordinator/
+    worker graph ``_unified_reply`` paths pass only ``data`` and leave
+    ``task_id`` unset, so their agent_reply rows keep ``task_id=None`` exactly as
+    before B22. The registry's ``_reply`` is the only caller that passes a real
+    task_id (B22 wires it; see ``_run_worker_task`` / ``_on_task_cancelled`` /
+    ``_on_task_timed_out`` passing ``task["id"]``).
+
+    Why thread task_id through the reply row (B22) rather than the WS event
+    alone: the frontend ``finalizedBubbles`` retire check reads
+    ``chatMessages`` (the persisted-message list, rebuilt from
+    ``messageApi.listByGroup`` on reconnect/switch-group). The WS
+    ``task_complete`` event already carries ``task_id``, but the retiring reply
+    was matched to it only by ``sender_id`` + ``created_at >= event.timestamp``
+    — fragile (the prior comment self-flagged "fragile": the logs-append path
+    coerces WS messages and task_id "may be lost"). Persisting ``task_id`` on
+    the reply row makes the match exact and reload-safe: the same task_id is on
+    both the closing event and the retiring reply regardless of which transport
+    (live WS vs reload-from-DB) delivered them. The sender+timestamp fallback
+    stays (for the task_id-less chat paths), so B22 is strictly additive.
 
     Routing (``@mention`` / ``route_mentions``) is deliberately NOT done here —
     the registry owns the engine context and routes directly, while the graph
@@ -78,7 +107,7 @@ async def persist_agent_reply(
     msg = await crud.create_message(
         {
             "group_id": group_id,
-            "task_id": None,
+            "task_id": task_id,
             "sender_id": agent_id,
             "receiver_id": "broadcast",
             "type": "agent_reply",
