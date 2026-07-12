@@ -1,10 +1,9 @@
 import { useState } from 'react'
-import { Avatar, Segmented, Tooltip } from 'antd'
+import { Segmented } from 'antd'
 import {
   MessageOutlined,
   AppstoreOutlined,
   ShopOutlined,
-  UserOutlined,
 } from '@ant-design/icons'
 
 import Sidebar from './Sidebar'
@@ -22,13 +21,14 @@ type View = 'chat' | 'agent' | 'skill'
  * Layout — 应用根布局（顶部栏 + 左右两栏）。
  *
  * 布局演进 2026-07-12：在原「Sidebar + ChatView」之上加全局顶部栏，承载品牌 +
- * 三视图切换（对话 / 智能体广场 / skill广场）+ 用户头像入口。主内容区按 activeView 在
+ * 三视图切换（对话 / 智能体广场 / skill广场）。主内容区按 activeView 在
  * ChatView / AgentPage / SkillPage 间切换——后两者直接复用全屏路由页组件，它们自带
  * 数据拉取与 height:100%+overflowY:auto，无需额外适配。
  *
- * 右上角原「⚙ 设置」改为用户头像（后续接登录）。点击头像打开 SettingsModal 并默认定位到
- * 「用户信息」项（initialKey='user'）；SettingsModal 左侧导航仍含 MCP/技能/记忆/模型服务商/
- * 用户信息 五项，故头像入口 ≈ 进入设置的快捷路径 + 默认落在用户信息页。
+ * 用户入口（头像 → SettingsModal 默认「用户信息」项）原在顶栏右上角，2026-07-12 移至
+ * 侧栏左下角——顶栏是品牌+视图切换的语义区，混入用户/登录入口语义杂；侧栏底部恰空，
+ * 符合 VS Code/Cursor/Linear 等开发者工具「用户入口放左下角」的习惯。回调 openUserSettings
+ * 下发给 Sidebar 渲染。
  *
  * 侧栏列表项点击（selectAgent/selectGroup）时经 onNavigateChat 自动切回对话视图，
  * 保证「在广场页点侧栏某个智能体 → 立即进入与它的单聊」直觉化。
@@ -43,7 +43,7 @@ export default function Layout() {
   const [settingsInitialKey, setSettingsInitialKey] = useState<NavKey>('user')
   const [view, setView] = useState<View>('chat')
 
-  // 头像入口：打开弹窗并默认定位到「用户信息」。
+  // 用户入口（现移至侧栏左下角）：打开弹窗并默认定位到「用户信息」。
   const openUserSettings = () => {
     setSettingsInitialKey('user')
     setSettingsOpen(true)
@@ -51,8 +51,9 @@ export default function Layout() {
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%', overflow: 'hidden' }}>
-      {/* 顶部栏：品牌 + 视图切换 + 用户头像。
-          三段等分（左/右各 flex:1）让中间 Segmented 真正居中，不随品牌/头像宽度偏移。
+      {/* 顶部栏：品牌 + 视图切换。
+          三段等分（左/右各 flex:1）让中间 Segmented 真正居中。用户入口已移至侧栏左下角，
+          右段留白保持居中布局（不再放头像）。
           白底浮起 + 底部投影，与主区灰底拉开层次（见 App.css --shadow-topbar）。 */}
       <div
         style={{
@@ -81,16 +82,8 @@ export default function Layout() {
             { value: 'skill', label: <ViewLabel icon={<ShopOutlined />} text="skill广场" /> },
           ]}
         />
-        <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
-          <Tooltip title="用户信息">
-            <Avatar
-              size={30}
-              icon={<UserOutlined />}
-              style={{ cursor: 'pointer', background: BRAND }}
-              onClick={openUserSettings}
-            />
-          </Tooltip>
-        </div>
+        {/* 右段留白（flex:1）仅用于平衡左段让 Segmented 居中——用户入口已移至侧栏左下角 */}
+        <div style={{ flex: 1 }} />
       </div>
 
       {/* 主区：侧栏 + 视图内容。
@@ -99,7 +92,10 @@ export default function Layout() {
           注意：本层必须 display:flex——ChatView 用 flex:1 撑高度，若退回 block，
           flex:1 失效 → 高度塌 0 → 对话框与消息滚动一并消失（曾踩坑）。 */}
       <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', overflow: 'hidden', background: 'var(--surface-main)' }}>
-        <Sidebar onNavigateChat={() => setView('chat')} />
+        <Sidebar
+          onNavigateChat={() => setView('chat')}
+          onOpenUserSettings={openUserSettings}
+        />
         <div style={{ flex: 1, minWidth: 0, minHeight: 0, display: 'flex', overflow: 'hidden' }}>
           {view === 'chat' && <ChatView />}
           {view === 'agent' && <AgentPage />}

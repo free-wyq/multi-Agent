@@ -1,9 +1,10 @@
 import { useState } from 'react'
-import { Button, Collapse, Empty, Form, Input, Modal, Select, Spin, Tooltip, message } from 'antd'
+import { Avatar, Button, Collapse, Empty, Form, Input, Modal, Select, Spin, Tooltip, message } from 'antd'
 import {
   PlusOutlined,
   RobotOutlined,
   TeamOutlined,
+  UserOutlined,
 } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
@@ -32,16 +33,24 @@ interface SidebarProps {
    * 而非停留在广场页。
    */
   onNavigateChat: () => void
+  /**
+   * 打开「用户信息」设置弹窗。用户入口（头像）现渲染在侧栏左下角（原顶栏右上角），
+   * 点击触发由 Layout 下发的 openUserSettings（默认定位到 SettingsModal 的 user 项）。
+   */
+  onOpenUserSettings: () => void
 }
 
 /**
  * Sidebar — 左栏导航（顶部栏改版 2026-07-12）。
  *
  * 240px 浅灰侧栏，VS Code/Linear 极简风格。结构：
- *  - 两个可折叠分组（antd Collapse）：「智能体」= agent 列表（点选进单聊），
+ *  - 上：两个可折叠分组（antd Collapse）：「智能体」= agent 列表（点选进单聊），
  *    「多智能体」= 群组列表（点选进群聊，过滤掉 config.single_chat===true 的单聊群）。
  *    每组底部带 +新建入口。
- *  - 品牌区与设置入口已上移至全局顶部栏（见 Layout），本组件不再渲染头部/尾部。
+ *  - 下：用户入口条（头像 + 「用户信息」），点击打开 SettingsModal 并默认落在用户信息项。
+ *    2026-07-12 从顶栏右上角移来——顶栏是品牌+视图切换语义区，用户/登录入口混入语义杂；
+ *    侧栏底部符合 VS Code/Cursor/Linear 等工具习惯。
+ *  - 品牌区与设置入口已上移至全局顶部栏（见 Layout），本组件不再渲染头部。
  *
  * 选择态走 SelectionContext：selectAgent（find-or-create 单聊群）/ selectGroup（直接切群）。
  * 数据（groups/agents/agentStatusMap）由 SelectionContext 集中加载，Sidebar 只消费渲染。
@@ -49,7 +58,7 @@ interface SidebarProps {
  *
  * 高亮：多智能体选中 = activeGroupId===g.id；智能体选中 = activeAgentId===agent.id。
  */
-export default function Sidebar({ onNavigateChat }: SidebarProps) {
+export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarProps) {
   const { groups, agents, agentStatusMap, loading, activeAgentId, activeGroup, selectAgent, selectGroup } =
     useSelection()
 
@@ -118,6 +127,34 @@ export default function Sidebar({ onNavigateChat }: SidebarProps) {
           />
         )}
       </div>
+
+      {/* 用户入口条（头像 + 「用户信息」）。2026-07-12 从顶栏右上角移来——顶栏是品牌+
+          视图切换语义区，用户/登录入口混入语义杂；侧栏底部符合 VS Code/Cursor/Linear 习惯。
+          flexShrink:0 固定在侧栏底部，列表区 flex:1 滚动时此条不动。顶分隔线与列表区拉开。 */}
+      <Tooltip title="用户信息" placement="right">
+        <div
+          onClick={onOpenUserSettings}
+          style={{
+            flexShrink: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 10,
+            padding: '10px 12px',
+            borderTop: `1px solid ${SIDEBAR_BORDER}`,
+            cursor: 'pointer',
+            transition: 'background 0.15s',
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLDivElement).style.background = '#f5f5f5'
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLDivElement).style.background = 'transparent'
+          }}
+        >
+          <Avatar size={28} icon={<UserOutlined />} style={{ background: BRAND, flexShrink: 0 }} />
+          <span style={{ fontSize: 13, color: '#333' }}>用户信息</span>
+        </div>
+      </Tooltip>
     </div>
   )
 }
