@@ -713,7 +713,29 @@ class AgentEngine:
     # ── unified reply / publish (Rust engine.reply / publish_log) ────
 
     async def _reply(self, content: str) -> None:
-        """Persist an agent_reply message + emit + mention route (Rust engine.reply)."""
+        """Persist an agent_reply message + emit + mention route (Rust engine.reply).
+
+        ``data`` 恒为 None：execute 路径的收尾 announce（``任务完成 🎉`` /
+        ``执行出错了`` / ``⏹ 任务已停止`` / ``⏱ 超时``）是模板化文本，非 brain
+        流式 LLM 输出，不携带 model/elapsed_ms/tokens 等 stats —— 前端
+        extractCoordStats 在 data.elapsed_ms 缺失时返 null 不渲染状态行（与协调者
+        dispatch announce 同理：announce 与流式决策文本不同源，stats 不匹配 content）。
+
+        已知限制（A6 评估·保守不改）：execute→task→「任务完成🎉」路径的 announce
+        不带 stats。理论上可透传 ``run_agent_loop`` 累加的 create_react_agent usage
+        （LangChain AIMessage.usage_metadata 含 input/output/total_tokens），但：
+          (1) ``run_agent_loop`` 当前不捕获 usage（astream_events 只取 content/tool），
+              需在 on_chat_model_end 读 msg.usage_metadata 累加 + return 加 usage 字段；
+          (2) ``_reply`` 需加 data 参数 + 3 处调用方（成功/取消/超时）分别处理，
+              后两处无 usage 需 data=None 兜底；
+          (3) 改造跨 agent_loop.py + agent_executor.py + registry.py 三文件，触碰
+              LangGraph 框架事件层（usage_metadata 字段稳定性跨 provider 需验证）。
+        工程任务的「模型消耗」已由 task_think/task_token/task_tool 过程气泡（PL-08
+        流式 + task_think 折叠块）体现，定稿 announce 带不带 token 数对用户价值有限。
+        优先靠 A4/A5 把创作类请求锚定到 chat 路径（chat 路径 stats 已透传，见 A2/A3），
+        execute 路径只服务真工程任务（写代码/改配置/运行命令/调工具），其 announce
+        不带 stats 是设计取舍而非 bug。若未来要修，见上述三步改造路径。
+        """
         msg = await crud.create_message(
             {
                 "group_id": self.group_id,
