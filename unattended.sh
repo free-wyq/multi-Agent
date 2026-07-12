@@ -223,9 +223,13 @@ main_loop() {
       git add -A 2>/dev/null || true
       if ! git diff --cached --quiet 2>/dev/null; then
         # 从任务行提取编号 [CF-01] 作为 scope，提取描述作 message
+        # ⚠️ 命令替换必须 || true 兜底：无 [XX-NN] tag 的任务会让 grep 无匹配返回非0，
+        #    set -e + pipefail 会在这一行直接杀死 main_loop —— 表现为「每轮主进程退出
+        #    + commit 永远跳过」(git add 已执行但 commit 走不到)。这是与 sed/grep -c
+        #    兜底写法一致的本意修复。
         local task_tag task_desc commit_msg
-        task_tag=$(echo "$CURRENT_TASK" | grep -oE '\[[A-Z]+-[0-9]+\]' | head -1 | tr -d '[]')
-        task_desc=$(echo "$CURRENT_TASK" | sed 's/^- \[[ x]\] //; s/\[[A-Z]*-[0-9]*\] *//' | head -c 200)
+        task_tag=$(echo "$CURRENT_TASK" | grep -oE '\[[A-Z]+-[0-9]+\]' | head -1 | tr -d '[]' || true)
+        task_desc=$(echo "$CURRENT_TASK" | sed 's/^- \[[ x]\] //; s/\[[A-Z]*-[0-9]*\] *//' | head -c 200 || true)
         if [ -n "$task_tag" ]; then
           commit_msg="feat($task_tag): $task_desc"
         else
