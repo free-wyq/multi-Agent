@@ -16,7 +16,7 @@
  *  - 用户信息：游客态占位，待接登录。
  */
 import { useEffect, useState } from 'react'
-import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Avatar } from 'antd'
+import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Avatar, Slider, Select, Space, Tooltip } from 'antd'
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -26,11 +26,14 @@ import {
   UserOutlined,
   ExportOutlined,
   MessageOutlined,
+  SoundOutlined,
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
 import ProviderEditor from './ProviderEditor'
 import { providerApi, type LlmProvider } from '../services/api'
+import { useSettings } from '../contexts/SettingsContext'
+import { useTts } from '../hooks/useTts'
 
 interface SettingsModalProps {
   open: boolean
@@ -41,7 +44,7 @@ interface SettingsModalProps {
 }
 
 /** 左侧导航项 key：联合类型供 activeKey/initialKey 共用（导出供 Layout 引用）。 */
-export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user' | 'external' | 'im'
+export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user' | 'external' | 'im' | 'tts'
 
 /** 左侧导航项定义：key 唯一标识，用于 activeKey 条件渲染右侧内容。 */
 interface NavItem {
@@ -55,6 +58,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'skills', label: '技能', icon: <AppstoreOutlined /> },
   { key: 'memory', label: '记忆', icon: <DatabaseOutlined /> },
   { key: 'model', label: '模型服务商', icon: <CloudServerOutlined /> },
+  { key: 'tts', label: '语音朗读', icon: <SoundOutlined /> },
   { key: 'external', label: '外部系统', icon: <ExportOutlined /> },
   { key: 'im', label: '即时消息', icon: <MessageOutlined /> },
   { key: 'user', label: '用户信息', icon: <UserOutlined /> },
@@ -258,6 +262,7 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
               <Empty description="记忆管理开发中（后端 /api/memory 端点待补）" />
             </div>
           )}
+          {activeKey === 'tts' && <TtsSettingsPanel />}
           {activeKey === 'external' && (
             <div style={{ maxWidth: 560 }}>
               <div style={{ marginBottom: 4, fontSize: 16, fontWeight: 600 }}>
@@ -557,6 +562,159 @@ function ImChannelCard({
         <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
       </div>
       <Button size="small" onClick={onAction}>接入</Button>
+    </div>
+  )
+}
+
+/** 语音朗读设置面板：纯前端偏好（绑 useSettings + useTts）。
+ *  Web Speech API 不依赖后端，音色列表来自浏览器/Electron 语音引擎（中文优先）。
+ *  不支持时整块灰禁 + 提示，不报错。 */
+function TtsSettingsPanel() {
+  const { tts, updateTts } = useSettings()
+  const { supported, voices, speak, stop } = useTts()
+
+  if (!supported) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: '100%',
+        }}
+      >
+        <Empty description="当前环境不支持语音朗读（无语音引擎）" />
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ maxWidth: 560 }}>
+      <div style={{ marginBottom: 4, fontSize: 16, fontWeight: 600 }}>语音朗读</div>
+      <div style={{ fontSize: 13, color: '#999', marginBottom: 20 }}>
+        智能体回复可朗读为语音。开启「自动朗读」后，每条新回复定稿即读；也可在对话气泡上 hover 点喇叭按需朗读。
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        {/* 总开关 */}
+        <SettingRow
+          title="启用语音朗读"
+          desc="总开关。关闭后所有语音入口（自动朗读、气泡喇叭）一并禁用"
+        >
+          <Switch checked={tts.enabled} onChange={(v) => updateTts({ enabled: v })} />
+        </SettingRow>
+
+        {/* 自动朗读 */}
+        <SettingRow
+          title="自动朗读新回复"
+          desc="智能体回复定稿后自动朗读（用户上滑读历史时不打断；切群/重连不误读历史）"
+        >
+          <Switch
+            checked={tts.autoPlay}
+            disabled={!tts.enabled}
+            onChange={(v) => updateTts({ autoPlay: v })}
+          />
+        </SettingRow>
+
+        {/* 音色 */}
+        <SettingRow title="音色" desc="系统语音引擎提供的音色（中文优先排列）">
+          <Select
+            style={{ width: 280 }}
+            value={tts.voiceURI ?? undefined}
+            disabled={!tts.enabled}
+            placeholder="系统默认"
+            allowClear
+            onChange={(v) => updateTts({ voiceURI: v ?? null })}
+            options={voices.map((v) => ({
+              value: v.voiceURI,
+              label: `${v.name}（${v.lang}）`,
+            }))}
+            notFoundContent={voices.length === 0 ? <Spin size="small" /> : '无可用音色'}
+          />
+        </SettingRow>
+
+        {/* 语速 */}
+        <SettingRow title="语速" desc={`0.5 ~ 2 倍，当前 ${tts.rate.toFixed(1)} 倍`}>
+          <Slider
+            style={{ width: 280 }}
+            min={0.5}
+            max={2}
+            step={0.1}
+            value={tts.rate}
+            disabled={!tts.enabled}
+            onChange={(v) => updateTts({ rate: v })}
+          />
+        </SettingRow>
+
+        {/* 音量 */}
+        <SettingRow title="音量" desc={`0 ~ 1，当前 ${(tts.volume * 100).toFixed(0)}%`}>
+          <Slider
+            style={{ width: 280 }}
+            min={0}
+            max={1}
+            step={0.05}
+            value={tts.volume}
+            disabled={!tts.enabled}
+            onChange={(v) => updateTts({ volume: v })}
+          />
+        </SettingRow>
+
+        {/* 音调 */}
+        <SettingRow title="音调" desc={`0 ~ 2，当前 ${tts.pitch.toFixed(1)}`}>
+          <Slider
+            style={{ width: 280 }}
+            min={0}
+            max={2}
+            step={0.1}
+            value={tts.pitch}
+            disabled={!tts.enabled}
+            onChange={(v) => updateTts({ pitch: v })}
+          />
+        </SettingRow>
+
+        {/* 试听 */}
+        <div style={{ display: 'flex', justifyContent: 'flex-end' }}>
+          <Tooltip title={tts.enabled ? undefined : '请先开启总开关'}>
+            <Space>
+              <Button onClick={() => stop()} disabled={!tts.enabled}>停止</Button>
+              <Button
+                type="primary"
+                disabled={!tts.enabled}
+                onClick={() => speak('这是一条语音朗读测试，可据此调整音色、语速、音量与音调。')}
+              >
+                试听
+              </Button>
+            </Space>
+          </Tooltip>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** 设置行：左侧标题 + 描述，右侧控件。与现有设置面板密度一致。 */
+function SettingRow({
+  title,
+  desc,
+  children,
+}: {
+  title: string
+  desc: string
+  children: React.ReactNode
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 16,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ fontSize: 14, fontWeight: 500 }}>{title}</div>
+        <div style={{ fontSize: 12, color: '#999', marginTop: 2, lineHeight: 1.5 }}>{desc}</div>
+      </div>
+      <div style={{ flexShrink: 0 }}>{children}</div>
     </div>
   )
 }

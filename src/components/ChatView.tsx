@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Button, Empty, Tooltip, Typography } from 'antd'
+import { Button, Empty, Switch, Tooltip, Typography } from 'antd'
 import { TeamOutlined } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
 import { useBusEventContext } from '../contexts/BusEventContext'
+import { useSettings } from '../contexts/SettingsContext'
 import { groupApi, type GroupMember } from '../services/api'
 import ChatPanel from './ChatPanel'
 import GroupInfoDrawer from './GroupInfoDrawer'
@@ -27,6 +28,7 @@ const { Text } = Typography
 export default function ChatView() {
   const { agents, activeGroup, refreshAll } = useSelection()
   const { groupId, agentStatuses } = useBusEventContext()
+  const { tts, updateTts } = useSettings()
 
   const [members, setMembers] = useState<GroupMember[]>([])
   const [membersLoading, setMembersLoading] = useState(false)
@@ -97,6 +99,19 @@ export default function ChatView() {
           )}
         </div>
         <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          {/* 自动朗读开关：高频一键切当前会话的「新回复自动朗读」。
+              总开关 tts.enabled 关时灰禁（需先去设置开启语音功能）。 */}
+          <Tooltip title={tts.enabled ? (tts.autoPlay ? '关闭自动朗读' : '开启自动朗读（新回复读出来）') : '请先在设置-语音朗读中开启总开关'}>
+            <Switch
+              size="small"
+              checked={tts.enabled && tts.autoPlay}
+              disabled={!tts.enabled}
+              onChange={(v) => updateTts({ autoPlay: v })}
+            />
+          </Tooltip>
+          <Tooltip title="自动朗读">
+            <span style={{ fontSize: 12, color: '#999', userSelect: 'none', cursor: 'help' }}>朗读</span>
+          </Tooltip>
           {executingAgent && groupId && !isSingleChat && (
             <StopTaskButton
               taskId={executingAgent.current_task_id!}

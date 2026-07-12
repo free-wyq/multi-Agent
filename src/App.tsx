@@ -2,11 +2,12 @@ import { useState } from 'react'
 import { ConfigProvider } from 'antd'
 import { BusEventProvider } from './contexts/BusEventContext'
 import { SelectionProvider } from './contexts/SelectionContext'
+import { SettingsProvider } from './contexts/SettingsContext'
 import Layout from './components/Layout'
 
 /**
- * App — 顶层：ConfigProvider（主题）→ BusEventProvider（全局唯一群组 WS）→
- * SelectionProvider（左栏选择模型）→ Layout（左右两栏）。
+ * App — 顶层：ConfigProvider（主题）→ SettingsProvider（前端偏好持久化）→
+ * BusEventProvider（全局唯一群组 WS）→ SelectionProvider（左栏选择模型）→ Layout（左右两栏）。
  *
  * 布局重构 2026-07-11：去 react-router。单聊/群聊都收敛到「一个 groupId + ChatPanel」，
  * 左栏 Sidebar 触发选择（selectAgent find-or-create single_chat 群 / selectGroup 直接切群），
@@ -16,6 +17,10 @@ import Layout from './components/Layout'
  *
  * activeGroupId 起始 null（未选群不订阅 WS，避免冷启动对空群组建连）；切换群组时旧 WS 在
  * useBusEvent effect cleanup 中 unlisten，零泄漏。
+ *
+ * SettingsProvider 2026-07-12：首个纯前端偏好持久化基座（语音朗读 TTS 配置）。
+ * 放在 BusEventProvider 外——偏好是比群组 WS 更外层的全局态，且 ChatView 标题栏
+ * 开关需在未选群时也能切（虽然实际朗读要等有群才触发）。
  *
  * 品牌蓝统一为 #0A5ACF（极简开发者工具风格）。
  */
@@ -31,11 +36,13 @@ function App() {
         },
       }}
     >
-      <BusEventProvider groupId={activeGroupId} setGroupId={setActiveGroupId}>
-        <SelectionProvider>
-          <Layout />
-        </SelectionProvider>
-      </BusEventProvider>
+      <SettingsProvider>
+        <BusEventProvider groupId={activeGroupId} setGroupId={setActiveGroupId}>
+          <SelectionProvider>
+            <Layout />
+          </SelectionProvider>
+        </BusEventProvider>
+      </SettingsProvider>
     </ConfigProvider>
   )
 }

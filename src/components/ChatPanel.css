@@ -73,9 +73,12 @@
   }
 }
 
-/* ── 气泡容器 ── */
+/* ── 气泡容器 ──
+ * position:relative 是气泡内绝对定位元素（如朗读按钮）的定位锚点——缺此，
+ * absolute 子元素会相对更外层祖先偏移，朗读按钮飘到错位置。 */
 .chat-bubble-wrap {
   max-width: 70%;
+  position: relative;
 }
 
 /* 发送者名称 */
@@ -139,4 +142,23 @@
 /* SH-04 修正：GroupPage 原缺失此变体（用户消息时间戳未右对齐），ChatPanel 补齐。 */
 .chat-timestamp--right {
   text-align: right;
+}
+
+/* ── 气泡朗读按钮（hover 显隐）──
+ * 默认透明，hover 父级 .chat-bubble-wrap 时浮现。opacity+transition 平滑显隐，
+ * 不用 display:none（无法过渡）也不用 visibility（点击区域问题）。
+ * 定位到气泡右上角；朗读中（.is-speaking）常驻可见并高亮，便于用户找到停止入口。 */
+.bubble-speak-btn {
+  position: absolute;
+  top: -4px;
+  right: -4px;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+  z-index: 3;
+  pointer-events: auto;
+}
+
+.chat-bubble-wrap:hover .bubble-speak-btn,
+.bubble-speak-btn.is-speaking {
+  opacity: 1;
 }

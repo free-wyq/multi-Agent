@@ -13,6 +13,8 @@ import {
   type TraceEvent,
 } from '../services/api'
 import { useBusEventContext } from '../contexts/BusEventContext'
+import { useSettings } from '../contexts/SettingsContext'
+import { useTts } from '../hooks/useTts'
 import {
   getSlashCommand,
   matchSlashCommands,
@@ -23,6 +25,7 @@ import PlanConfirmCard from './PlanConfirmCard'
 import StopTaskButton from './StopTaskButton'
 import SlashAutocomplete from './SlashAutocomplete'
 import ChatMessageBubble from './ChatMessageBubble'
+import BubbleSpeakButton from './BubbleSpeakButton'
 import './ChatPanel.css'
 
 const { Text } = Typography
@@ -227,6 +230,9 @@ export default function ChatPanel({
   hideHeader,
 }: ChatPanelProps) {
   const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordReasoning, coordStats, refreshPlan } = useBusEventContext()
+  // TTS 自动朗读：读 SettingsContext.tts 配置 + useTts 引擎。speak 在新 agent_reply 落地 effect 中触发。
+  const { tts } = useSettings()
+  const { supported: ttsSupported, speak: ttsSpeak } = useTts()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -236,6 +242,14 @@ export default function ChatPanel({
   // 用户是否「贴底」——上滑读历史时置 false，新消息/流式增量不再自动滚到底，
   // 避免用户正读着旧消息被一把拽回最底部。发送消息 / 切群 时重置为 true。
   const stickToBottomRef = useRef(true)
+  // 自动朗读「就绪」闸门：切群/重连会批量回灌历史消息进 logs，逐条触发 logs effect。
+  // 拉历史前置 false、拉完置 true——仅 effect 在 true 时才朗读，挡掉初始历史回灌窗口。
+  const autoPlayReadyRef = useRef(false)
+  // 已朗读过的消息 id 集合——按 id 去重而非按时间戳。
+  // 切群/重连会把历史消息重新灌进 logs（id 不变），用集合记下「读过哪些 id」即可跳过，
+  // 不依赖前后端时钟同步（WSL2 后端时钟与 Windows 浏览器时钟常偏差秒级，时间戳比较会误判）。
+  // 新到的 WS agent_reply 是全新 id，不在集合中 → 朗读 + 记入集合。
+  const spokenIdsRef = useRef<Set<string>>(new Set())
 
   const handleContainerScroll = useCallback(() => {
     const el = messagesContainerRef.current
@@ -382,8 +396,23 @@ export default function ChatPanel({
     if (lastLog.agentId === 'user') return
     // 只把可成气泡的消息类型桥接进 chatMessages；思考/token/工具等 trace 事件跳过
     if (!CHAT_MESSAGE_TYPES.has(lastLog.type)) return
+    const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
+    // 自动朗读：仅 agent_reply（智能体定稿回复）触发，且需总开关+自动朗读开关+引擎支持。
+    // 去重靠 spokenIdsRef（按 id），不依赖前后端时钟同步（WSL2 后端时钟与 Windows 浏览器常偏差秒级，
+    // 时间戳比较会误判）。切群/重连回灌的历史消息 id 不变 → 在集合里 → 跳过；新 WS 消息是全新 id → 朗读+记入。
+    // autoPlayReadyRef 闸门挡掉切群首拉历史窗口（拉历史前置 false、拉完置 true）。
+    if (
+      lastLog.type === 'agent_reply' &&
+      tts.enabled &&
+      tts.autoPlay &&
+      ttsSupported &&
+      autoPlayReadyRef.current &&
+      !spokenIdsRef.current.has(wsMsgId)
+    ) {
+      spokenIdsRef.current.add(wsMsgId)
+      ttsSpeak(lastLog.message)
+    }
     setChatMessages((prev) => {
-      const wsMsgId = lastLog.id || `ws-${lastLog.timestamp}`
       if (prev.some((m) => m.id === wsMsgId)) return prev
       return [...prev, {
         id: wsMsgId,
@@ -418,13 +447,22 @@ export default function ChatPanel({
   useEffect(() => {
     // 切群即贴底：新群历史消息加载后应展示最新一条，默认停在底部。
     stickToBottomRef.current = true
+    // 关闭自动朗读闸门——拉历史期间不朗读历史 agent_reply（拉完置 true）。
+    autoPlayReadyRef.current = false
+    // 清空已朗读 id 集合：新群的 WS 消息都是新 id，旧集合的 id 与新群无关，
+    // 保留会误把「旧群某条 id 恰好与新群新消息前缀撞上」的概率（虽极低）清掉。
+    spokenIdsRef.current = new Set()
     if (chatGroupId) {
       setChatLoading(true)
       messageApi
         .listByGroup(chatGroupId)
         .then((data) => setChatMessages(data))
         .catch(() => setChatMessages([]))
-        .finally(() => setChatLoading(false))
+        .finally(() => {
+          setChatLoading(false)
+          // 历史加载完打开闸门——仅此后通过 WS 新到达的 agent_reply 才朗读。
+          autoPlayReadyRef.current = true
+        })
     } else {
       setChatMessages([])
     }
@@ -773,6 +811,10 @@ export default function ChatPanel({
               >
                 <ChatAvatar id={msg.sender_id} agents={agents} />
                 <div className="chat-bubble-wrap">
+                  {/* 单条气泡朗读按钮：hover 显隐，仅非用户消息且总开关开时渲染（用户自己的话不需朗读）。 */}
+                  {!isUser && tts.enabled && (
+                    <BubbleSpeakButton content={msg.content ?? ''} />
+                  )}
                   <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
                     <SenderName id={msg.sender_id} agents={agents} />
                   </div>
@@ -941,6 +983,7 @@ export default function ChatPanel({
             timestamp={new Date(b.timestamp).toISOString()}
             toolEvents={toolEventsByTask[b.taskId] || []}
             isFailed={b.isFailed}
+            speakButton={tts.enabled ? <BubbleSpeakButton content={b.content} /> : undefined}
           />
         ))}
         <div ref={chatEndRef} />
