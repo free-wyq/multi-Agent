@@ -21,6 +21,11 @@ interface ChatMessageBubbleProps {
    *  不传（undefined → 不渲染折叠区）。用户可点击展开/收起——默认收起，想看模型「怎么想的」
    *  再展开，不干扰正常阅读回复正文。 */
   reasoning?: string
+  /** 推理 token 数（流式期 coordStats[reply_id].reasoning_tokens，后端 ~200ms 节流推送的实时估值）。
+   *  折叠区标题用它显示「思考过程（N tokens）」——与状态行「↓ N tokens」同单位，不用字符数。
+   *  首个 stats 事件到达前（前 ~200ms）可能为 undefined，此时用 reasoning.length//3 临时估算
+   *  （与后端 live_reasoning_tokens 同启发式），stats 一到即切回真实值。 */
+  reasoningTokens?: number
   /** ISO 时间戳（消息或事件时间），渲染为气泡下时间。 */
   timestamp: string
   /** 该消息关联的任务的工具调用事件（kind==='tool'，已由父组件按 agent+task 过滤）。
@@ -108,6 +113,7 @@ export default function ChatMessageBubble({
   avatar,
   content,
   reasoning,
+  reasoningTokens,
   timestamp,
   toolEvents = [],
   isStreaming = false,
@@ -163,6 +169,13 @@ export default function ChatMessageBubble({
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
   const hasReasoning = !!(reasoning && reasoning.length > 0)
+  // 折叠区标题「思考过程（N tokens）」的 token 数：优先用后端 stats 推的真实 reasoning_tokens；
+  // 流式前 ~200ms 首个 stats 未到时用 reasoning.length//3 临时估算（与后端 live_reasoning_tokens
+  // 同启发式）。用 token 不用字符数——与状态行「↓ N tokens」同单位。
+  const reasoningTokenLabel =
+    reasoningTokens && reasoningTokens > 0
+      ? reasoningTokens
+      : Math.max(1, Math.ceil((reasoning?.length || 0) / 3))
   // 既无工具也无内容也无推理且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
   if (!hasTools && !hasContent && !hasReasoning && !isStreaming) return null
 
@@ -201,7 +214,7 @@ export default function ChatMessageBubble({
                   label: (
                     <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                       <BulbOutlined style={{ fontSize: 12 }} />
-                      思考过程（{reasoning!.length} 字）
+                      思考过程（{reasoningTokenLabel} tokens）
                     </span>
                   ),
                   children: (

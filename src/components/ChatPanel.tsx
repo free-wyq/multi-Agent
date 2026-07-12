@@ -778,10 +778,13 @@ export default function ChatPanel({
                   <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
                     {/* 定稿协调者回复的推理折叠区：读持久化 agent_reply.data.reasoning（推理模型
                         reasoning_content 全文，_stream_stats 落盘）。antd Collapse 默认收起，
-                        用户点「思考过程」展开看模型怎么想的。非推理模型无 reasoning key → 不渲染。 */}
+                        用户点「思考过程」展开看模型怎么想的。非推理模型无 reasoning key → 不渲染。
+                        标题「思考过程（N tokens）」用落盘的 reasoning_tokens（与状态行同单位，不用字符数）。 */}
                     {(() => {
                       const reasoning = extractCoordReasoning(msg.data)
                       if (!reasoning) return null
+                      const rt = extractCoordStats(msg.data)?.reasoning_tokens
+                      const reasoningTokenLabel = rt && rt > 0 ? rt : Math.max(1, Math.ceil(reasoning.length / 3))
                       return (
                         <div style={{ marginBottom: 6 }}>
                           <Collapse
@@ -792,7 +795,7 @@ export default function ChatPanel({
                               label: (
                                 <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
                                   <BulbOutlined style={{ fontSize: 12 }} />
-                                  思考过程（{reasoning.length} 字）
+                                  思考过程（{reasoningTokenLabel} tokens）
                                 </span>
                               ),
                               children: (
@@ -904,6 +907,7 @@ export default function ChatPanel({
               }
               content={b.content}
               reasoning={b.reasoning || undefined}
+              reasoningTokens={reasoningTokens}
               timestamp={new Date().toISOString()}
               isStreaming={stats?.phase !== 'done'}
               statusLine={
