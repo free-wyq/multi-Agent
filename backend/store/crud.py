@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from sqlalchemy import delete, func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models import (
     AgentDefinition,
@@ -1227,7 +1227,7 @@ def _provider_to_model(p: LlmProviderEntity) -> LlmProvider:
     )
 
 
-def _provider_to_cache_dict(p: LlmProviderEntity) -> dict:
+def _provider_to_cache_dict(p: LlmProviderEntity) -> dict[str, Any]:
     """Build the raw config dict (with raw api_key) for ``config.set_active_cache``.
 
     INTERNAL only — never returned over HTTP. The raw key is needed so the
@@ -1375,7 +1375,7 @@ async def get_active_provider_entity() -> LlmProviderEntity | None:
         return row
 
 
-async def _deactivate_all(db) -> None:
+async def _deactivate_all(db: AsyncSession) -> None:
     """Set is_active=0 on all provider rows (single-active invariant)."""
     rows = (
         await db.execute(select(LlmProviderEntity).where(LlmProviderEntity.is_active == 1))
