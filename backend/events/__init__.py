@@ -5,6 +5,7 @@ from .bus import (
     bus_manager,
     emit_agent_status,
     emit_coordinator_plan,
+    emit_coordinator_reasoning,
     emit_coordinator_stats,
     emit_coordinator_think,
     emit_coordinator_token,
@@ -30,5 +31,6 @@ __all__ = [
     "emit_coordinator_plan",
     "emit_coordinator_think",
     "emit_coordinator_token",
+    "emit_coordinator_reasoning",
     "emit_coordinator_stats",
 ]

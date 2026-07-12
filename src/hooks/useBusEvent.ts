@@ -97,6 +97,7 @@ export function useBusEvent(groupId: string | null) {
       plan: ctx.plan,
       streaming: ctx.streaming,
       coordStreaming: ctx.coordStreaming,
+      coordReasoning: ctx.coordReasoning,
       coordStats: ctx.coordStats,
       refreshPlan: ctx.refreshPlan,
     }
@@ -109,12 +110,16 @@ export function useBusEvent(groupId: string | null) {
   const [plan, setPlan] = useState<PlanStep[] | null>(null)
   const [streaming, setStreaming] = useState<Record<string, string>>({})
   // 协调者流式回复（与 worker task_token 同构，但按 reply_id 而非 task_id 归并）：
-  //  - coordStreaming[reply_id] = 累积的 content delta（逐字拼接）
-  //  - coordStats[reply_id] = 最新 { elapsed_ms, tokens, phase }（~200ms 节流 + done 终态）
+  //  - coordStreaming[reply_id] = 累积的 content delta（逐字拼接，可见回复）
+  //  - coordReasoning[reply_id] = 累积的 reasoning_content delta（模型内部推理链，
+  //    DeepSeek/o1 类推理模型在可见 content 之前流出；非推理模型不流，map 不存在）
+  //  - coordStats[reply_id] = 最新 { elapsed_ms, tokens, phase, model, reasoning_tokens }
+  //    （~200ms 节流 + done 终态）
   // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
   const [coordStreaming, setCoordStreaming] = useState<Record<string, string>>({})
+  const [coordReasoning, setCoordReasoning] = useState<Record<string, string>>({})
   const [coordStats, setCoordStats] = useState<
-    Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string }>
+    Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string; reasoning_tokens?: number }>
   >({})
 
   // 播种 agent status
@@ -323,12 +328,14 @@ export function useBusEvent(groupId: string | null) {
       }
 
       // → coordinator 流式回复（与 worker task_token 同构，按 reply_id 归并）
-      // coordinator_token：逐字 delta 累加到 coordStreaming[reply_id]。
-      // coordinator_stats：更新 coordStats[reply_id] 的运行统计（耗时/token 数/phase）。
-      // phase="done" 时清空 coordStreaming[reply_id] —— 流式气泡退场，让随后落地
-      // 的持久化 agent_reply 接管（同 worker 的 streaming→finalized 模式）。
-      // coordStats[reply_id] 也一并清空，避免陈旧统计行残留误导用户（下一轮新
-      // reply_id 会创建新条目，旧 reply_id 不再写入，清掉最干净）。
+      // coordinator_token：逐字可见 content delta 累加到 coordStreaming[reply_id]。
+      // coordinator_reasoning：推理模型在可见内容前流出的 reasoning_content delta，
+      //   累加到 coordReasoning[reply_id]（前端折叠区展示，默认收起）。
+      // coordinator_stats：更新 coordStats[reply_id] 的运行统计（耗时/token 数/phase/model/reasoning_tokens）。
+      // phase="done" 时清空 coordStreaming + coordReasoning + coordStats[reply_id]
+      //   —— 流式气泡退场，让随后落地的持久化 agent_reply 接管（同 worker streaming→finalized）。
+      //   coordStats[reply_id] 也一并清空，避免陈旧统计行残留误导用户（下一轮新
+      //   reply_id 会创建新条目，旧 reply_id 不再写入，清掉最干净）。
       if (d.type === 'coordinator_token') {
         const replyId =
           d.data && typeof d.data === 'object'
@@ -337,6 +344,18 @@ export function useBusEvent(groupId: string | null) {
         if (d.content && typeof replyId === 'string') {
           const rid = replyId
           setCoordStreaming((prev) => ({
+            ...prev,
+            [rid]: (prev[rid] || '') + d.content,
+          }))
+        }
+      } else if (d.type === 'coordinator_reasoning') {
+        const replyId =
+          d.data && typeof d.data === 'object'
+            ? (d.data as Record<string, unknown>).reply_id
+            : null
+        if (d.content && typeof replyId === 'string') {
+          const rid = replyId
+          setCoordReasoning((prev) => ({
             ...prev,
             [rid]: (prev[rid] || '') + d.content,
           }))
@@ -352,10 +371,16 @@ export function useBusEvent(groupId: string | null) {
           const elapsedMs = Number(dd['elapsed_ms'] || 0)
           const tokens = Number(dd['tokens'] || 0)
           if (phase === 'done') {
-            // 流式完成：清空流式缓冲 + 统计，让持久化 agent_reply 接管气泡。
+            // 流式完成：清空流式缓冲 + 推理缓冲 + 统计，让持久化 agent_reply 接管气泡。
             // （agent_reply 由 _unified_reply → emit_message_added 落地，毫秒级。）
             const rid = replyId
             setCoordStreaming((prev) => {
+              if (!(rid in prev)) return prev
+              const next = { ...prev }
+              delete next[rid]
+              return next
+            })
+            setCoordReasoning((prev) => {
               if (!(rid in prev)) return prev
               const next = { ...prev }
               delete next[rid]
@@ -370,9 +395,13 @@ export function useBusEvent(groupId: string | null) {
           } else {
             const model =
               typeof dd['model'] === 'string' ? (dd['model'] as string) : undefined
+            const reasoningTokensNum = Number(dd['reasoning_tokens'] || 0)
+            const reasoning_tokens = Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0
+              ? reasoningTokensNum
+              : undefined
             setCoordStats((prev) => ({
               ...prev,
-              [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model },
+              [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model, reasoning_tokens },
             }))
           }
         }
@@ -391,5 +420,5 @@ export function useBusEvent(groupId: string | null) {
     }
   }, [groupId, handleReconnect, refreshPlan])
 
-  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordStats, refreshPlan }
+  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, refreshPlan }
 }

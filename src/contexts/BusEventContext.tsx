@@ -37,10 +37,13 @@ export interface BusEventContextValue {
   agentStatuses: Record<string, AgentStatusInfo>
   plan: PlanStep[] | null
   streaming: Record<string, string>
-  /** 协调者流式回复：reply_id → 累积的 content delta（coordinator_token 逐字拼接）。 */
+  /** 协调者流式回复：reply_id → 累积的可见 content delta（coordinator_token 逐字拼接）。 */
   coordStreaming: Record<string, string>
-  /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase, model }（coordinator_stats 节流更新）。 */
-  coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string }>
+  /** 协调者流式推理：reply_id → 累积的 reasoning_content delta（coordinator_reasoning 逐字拼接）。
+   *  推理模型（DeepSeek/o1 类）在可见 content 之前流出内部思维链；非推理模型不流，条目不存在。 */
+  coordReasoning: Record<string, string>
+  /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase, model, reasoning_tokens }（coordinator_stats 节流更新）。 */
+  coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string; reasoning_tokens?: number }>
   /** 主动从真源拉取驻留计划（对齐后端 _dispatch_plan）。PlanConfirmCard 409 静默刷新、切群首拉复用。 */
   refreshPlan: () => Promise<void>
 }
@@ -82,6 +85,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       plan: bus.plan,
       streaming: bus.streaming,
       coordStreaming: bus.coordStreaming,
+      coordReasoning: bus.coordReasoning,
       coordStats: bus.coordStats,
       refreshPlan: bus.refreshPlan,
     }),
@@ -95,6 +99,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       bus.plan,
       bus.streaming,
       bus.coordStreaming,
+      bus.coordReasoning,
       bus.coordStats,
       bus.refreshPlan,
     ],

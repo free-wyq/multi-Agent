@@ -95,17 +95,25 @@ async def chat_completion(config: dict[str, Any], messages: list[dict[str, str]]
 
 async def chat_completion_stream(
     config: dict[str, Any], messages: list[dict[str, str]]
-) -> AsyncIterator[tuple[str, int | None]]:
+) -> AsyncIterator[tuple[str, str, int | None, int | None]]:
     """Stream an OpenAI-compatible ``/chat/completions`` response (SSE ``stream: true``).
 
-    Yields ``(content_delta, completion_tokens)`` tuples per SSE chunk:
+    Yields ``(content_delta, reasoning_delta, completion_tokens, reasoning_tokens)``
+    tuples per SSE chunk:
 
-    - ``content_delta`` is the incremental text of ``choices[0].delta.content``
-      (may be ``""`` for chunks that carry only tool/role/usage data).
-    - ``completion_tokens`` is ``None`` for every chunk except the final usage
+    - ``content_delta`` — incremental ``choices[0].delta.content`` (the visible
+      reply text; ``""`` on chunks that carry only reasoning/role/usage data).
+    - ``reasoning_delta`` — incremental ``choices[0].delta.reasoning_content``
+      (the model's internal reasoning chain; ``""`` for non-reasoning models
+      or chunks without reasoning). DeepSeek/GPT-o1-style models stream this
+      *before* the visible content; non-reasoning providers simply never set it.
+    - ``completion_tokens`` — ``None`` for every chunk except the final usage
       chunk (emitted once ``stream_options.include_usage`` is set): the real
-      ``usage.completion_tokens`` for the whole completion. Callers forward it
-      as the terminal ``phase="done"`` statistic.
+      ``usage.completion_tokens`` for the whole completion.
+    - ``reasoning_tokens`` — ``None`` except on the final usage chunk: the real
+      ``usage.completion_tokens_details.reasoning_tokens`` (how many of the
+      completion tokens were reasoning vs visible). Absent for providers that
+      don't break tokens down → caller treats as 0.
 
     The async generator closes the response on early ``break`` by the consumer
     (httpx ``stream()`` context manager tears down the underlying connection).
@@ -176,8 +184,20 @@ async def chat_completion_stream(
                 completion_tokens = (
                     usage.get("completion_tokens") if isinstance(usage, dict) else None
                 )
+                # reasoning_tokens lives under completion_tokens_details on the
+                # final usage chunk (None mid-stream — only the final chunk has it).
+                reasoning_tokens: int | None = None
+                if isinstance(usage, dict):
+                    details = usage.get("completion_tokens_details") or {}
+                    if isinstance(details, dict):
+                        rt = details.get("reasoning_tokens")
+                        if isinstance(rt, int):
+                            reasoning_tokens = rt
                 choices = chunk.get("choices") or []
-                delta = ""
+                content_delta = ""
+                reasoning_delta = ""
                 if choices:
-                    delta = (choices[0].get("delta") or {}).get("content") or ""
-                yield delta, completion_tokens
+                    delta = choices[0].get("delta") or {}
+                    content_delta = delta.get("content") or ""
+                    reasoning_delta = delta.get("reasoning_content") or ""
+                yield content_delta, reasoning_delta, completion_tokens, reasoning_tokens

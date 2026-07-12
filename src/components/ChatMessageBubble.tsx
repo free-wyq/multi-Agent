@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import { Tag } from 'antd'
-import { CaretRightOutlined, ToolOutlined } from '@ant-design/icons'
+import { CaretRightOutlined, ToolOutlined, BulbOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import './ChatMessageBubble.css'
 
@@ -16,6 +16,11 @@ interface ChatMessageBubbleProps {
    *  - 流式生成中：当前累积的文本（来自 streaming[task_id] 增量拼接），isStreaming=true 时尾部追加闪烁光标。
    */
   content: string
+  /** 推理模型的内部思维链（reasoning_content 流式拼接，可见回复 content 之前流出）。
+   *  仅协调者流式气泡可能携带（推理模型 + 协调者走 LLM 直调流式）。非推理模型 / 已定稿气泡
+   *  不传（undefined → 不渲染折叠区）。用户可点击展开/收起——默认收起，想看模型「怎么想的」
+   *  再展开，不干扰正常阅读回复正文。 */
+  reasoning?: string
   /** ISO 时间戳（消息或事件时间），渲染为气泡下时间。 */
   timestamp: string
   /** 该消息关联的任务的工具调用事件（kind==='tool'，已由父组件按 agent+task 过滤）。
@@ -102,6 +107,7 @@ export default function ChatMessageBubble({
   senderName,
   avatar,
   content,
+  reasoning,
   timestamp,
   toolEvents = [],
   isStreaming = false,
@@ -112,6 +118,8 @@ export default function ChatMessageBubble({
 }: ChatMessageBubbleProps) {
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // 推理过程折叠：默认收起（用户自行选择展开看模型思维链）。
+  const [reasoningOpen, setReasoningOpen] = useState(false)
 
   // toolEvents → 按时间序的摘要行（每条 task_tool 一行）。
   // 先按时间序排，再按工具名 LIFO 配对 start/end 算耗时：end 弹出最近同名未配对 start，
@@ -156,8 +164,9 @@ export default function ChatMessageBubble({
 
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
-  // 既无工具也无内容且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
-  if (!hasTools && !hasContent && !isStreaming) return null
+  const hasReasoning = !!(reasoning && reasoning.length > 0)
+  // 既无工具也无内容也无推理且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
+  if (!hasTools && !hasContent && !hasReasoning && !isStreaming) return null
 
   return (
     <div
@@ -180,6 +189,36 @@ export default function ChatMessageBubble({
             .filter(Boolean)
             .join(' ')}
         >
+          {/* 推理过程折叠区（气泡顶部，工具摘要之上）—— 推理模型在可见 content 前流出的内部思维链。
+              默认收起：用户点「思考过程」展开看模型怎么想的，不看就一行不占空间。
+              流式中也能展开（reasoning 实时累加），收起时仅显示标题行 + 当前推理字数。 */}
+          {hasReasoning && (
+            <div className="chat-reasoning-block">
+              <div
+                className="chat-reasoning-toggle"
+                onClick={() => setReasoningOpen((o) => !o)}
+                title={reasoningOpen ? '点击收起思考过程' : '点击展开思考过程'}
+              >
+                <BulbOutlined style={{ fontSize: 12, color: '#faad14' }} />
+                <span className="chat-reasoning-label">
+                  思考过程
+                  <span className="chat-reasoning-count">（{reasoning!.length} 字）</span>
+                </span>
+                <CaretRightOutlined
+                  style={{
+                    fontSize: 10,
+                    transition: 'transform 0.2s',
+                    transform: reasoningOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+                    marginLeft: 'auto',
+                  }}
+                />
+              </div>
+              {reasoningOpen && (
+                <pre className="chat-reasoning-content">{reasoning}</pre>
+              )}
+            </div>
+          )}
+
           {/* 工具调用摘要区（气泡顶部） */}
           {hasTools && (
             <div className="chat-tool-block">

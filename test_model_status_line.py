@@ -1,15 +1,17 @@
-"""自测：协调者流式回复状态行应携带 model 字段。
+"""自测：协调者流式回复状态行应携带 model + reasoning_tokens + 推理事件。
 
-验证本轮改动：backend 把 LLM model 透传到 coordinator_stats WS 事件 +
-持久化 agent_reply.data，前端据此渲染「model · Ns · ↓ N tokens」状态行。
+验证本轮改动：backend 把 LLM model + reasoning 透传到 coordinator_stats /
+coordinator_reasoning WS 事件 + 持久化 agent_reply.data，前端据此渲染
+「model · Ns · ↓ N tokens（含 N 推理）」状态行 + 折叠推理区。
 
 校验点（确定性，不判语义）：
-  1. coordinator_stats 事件 data 含 model 字段，值 == 当前活跃 config 的 model
-  2. coordinator_stats 事件 data 含 elapsed_ms / tokens / phase（既有契约不破）
-  3. 持久化 agent_reply（task 无关的 chat 回复）data 含 model 字段
-     —— 定稿气泡「完成后保留可见」的关键：model 落盘了
-  4. model 随热切换变化（若切了模型，新一轮回复的 model 跟着变）——
-     这里只验证「与 GET /api/config 的 model 一致」，热切换的端到端留给手动测
+  1. coordinator_stats 事件 data 含 model / elapsed_ms / tokens / phase（既有契约不破）
+  2. coordinator_stats 的 model == 当前活跃 config 的 model
+  3. coordinator_stats 事件 data 含 reasoning_tokens 字段（int，≥0）
+     —— DeepSeek 推理模型 reasoning_tokens > 0；非推理模型 = 0（字段仍在，不缺）
+  4. coordinator_reasoning 事件存在且逐字 delta 非空（推理模型流 reasoning_content）
+     —— 非推理模型不流，此条跳过（不视为 fail）
+  5. 持久化 agent_reply.data 含 model + reasoning_tokens（定稿气泡保留可见）
 
 直接 asyncio + websockets，不依赖 pytest。
 """
@@ -29,7 +31,8 @@ GROUP_ID = "group_demo_1"
 COORD_ID = "agent_coord_1"
 
 # 一句无需派工的纯闲聊——协调者应走 action=chat，触发 _stream_coordinator_decision
-# → emit coordinator_token + coordinator_stats(含 model) + node_chat 落盘 data。
+# → emit coordinator_token + coordinator_reasoning(推理模型) + coordinator_stats(含 model/reasoning_tokens)
+# + node_chat 落盘 data。
 CHAT_CONTENT = "你好，用一句话介绍下你自己"
 
 
@@ -120,7 +123,7 @@ async def fetch_persisted_reply(reply_id: str) -> dict | None:
 
 
 async def main() -> int:
-    print("=== 自测：协调者状态行 model 字段 ===")
+    print("=== 自测：协调者状态行 model + reasoning ===")
     if not await health_ok():
         print("[fatal] backend 不在线"); return 2
     print("[health] ok")
@@ -169,11 +172,6 @@ async def main() -> int:
     if not stats_events:
         errs.append("未收到任何 coordinator_stats 事件（_stream_coordinator_decision 未流转）")
     else:
-        # 至少 done 终态那条该带 model
-        done_stats = [s for s in stats_events if (s.get("data") or {}).get("phase") == "done"]
-        if not done_stats:
-            # 闲聊可能 done 还没到就被 reply_ev 截断；放宽：只要有任意 stats 带 model
-            pass
         for s in stats_events:
             data = s.get("data") or {}
             m = data.get("model")
@@ -186,7 +184,36 @@ async def main() -> int:
                 )
                 break
 
-    # ---- 校验 3：持久化 agent_reply.data.model 落盘 ----
+    # ---- 校验 3：coordinator_stats 事件携带 reasoning_tokens（int ≥0）----
+    reasoning_tokens_values: list[int] = []
+    if stats_events:
+        for s in stats_events:
+            data = s.get("data") or {}
+            rt = data.get("reasoning_tokens")
+            if not isinstance(rt, int) or rt < 0:
+                errs.append(
+                    f"coordinator_stats 缺/非法 reasoning_tokens（phase={data.get('phase')} val={rt!r}）"
+                )
+                break
+            reasoning_tokens_values.append(rt)
+        if reasoning_tokens_values:
+            final_rt = reasoning_tokens_values[-1]
+            print(f"[stats] reasoning_tokens 序列末值={final_rt}（推理模型应 >0）")
+
+    # ---- 校验 4：coordinator_reasoning 事件（推理模型逐字流 reasoning_content）----
+    reasoning_events = [e for e in events if e.get("type") == "coordinator_reasoning"]
+    reasoning_full = "".join(str(e.get("content") or "") for e in reasoning_events)
+    print(f"[reasoning] coordinator_reasoning 事件数={len(reasoning_events)} 拼接长度={len(reasoning_full)}")
+    if reasoning_tokens_values and reasoning_tokens_values[-1] > 0:
+        # 推理模型：reasoning 事件该有内容
+        if not reasoning_events or not reasoning_full:
+            errs.append("推理模型 reasoning_tokens>0 却无 coordinator_reasoning 事件（reasoning_content 未流转）")
+        else:
+            print(f"[reasoning] 样本(前80字): {reasoning_full[:80]!r}")
+    else:
+        print("[reasoning] 非推理模型（reasoning_tokens=0）→ coordinator_reasoning 事件可有可无，跳过")
+
+    # ---- 校验 5：持久化 agent_reply.data.model + reasoning_tokens 落盘 ----
     reply_id = None
     if reply_ev:
         rd = reply_ev.get("data") or {}
@@ -196,8 +223,9 @@ async def main() -> int:
             errs.append("agent_reply 事件 data 缺 model（未透传到 emit）")
         elif str(rd["model"]) != expected_model:
             errs.append(f"agent_reply.data.model={rd['model']!r} ≠ 活跃 config {expected_model!r}")
+        if "reasoning_tokens" not in rd:
+            errs.append("agent_reply 事件 data 缺 reasoning_tokens（定稿气泡无法显示推理 token）")
     else:
-        # 闲聊回复合规情况：agent_reply 落地（前端 _unified_reply → emit_message_added）
         errs.append("未收到协调者 agent_reply 事件（chat 回复未落地）")
 
     if reply_id:
@@ -205,11 +233,13 @@ async def main() -> int:
         persisted = await fetch_persisted_reply(reply_id)
         if persisted:
             pd = persisted.get("data") or {}
-            print(f"[persist] 落盘 agent_reply.data.keys={list(pd.keys())} model={pd.get('model')!r}")
+            print(f"[persist] 落盘 agent_reply.data.keys={list(pd.keys())} model={pd.get('model')!r} reasoning_tokens={pd.get('reasoning_tokens')!r}")
             if "model" not in pd:
                 errs.append("落盘 agent_reply.data 缺 model（定稿气泡无法显示模型）")
             elif str(pd["model"]) != expected_model:
                 errs.append(f"落盘 data.model={pd['model']!r} ≠ 活跃 config {expected_model!r}")
+            if "reasoning_tokens" not in pd:
+                errs.append("落盘 agent_reply.data 缺 reasoning_tokens（定稿气泡无法显示推理 token）")
         else:
             errs.append(f"未在 /api/messages 找到 reply_id={reply_id} 的持久化回复")
 
@@ -221,9 +251,12 @@ async def main() -> int:
         print("\n=== 结果: FAIL ===")
         return 1
 
+    rt_final = reasoning_tokens_values[-1] if reasoning_tokens_values else 0
     print("\n=== 结果: PASS ===")
     print(f"coordinator_stats({len(stats_events)} 条) + 持久化 agent_reply.data 均携带 "
-          f"model={expected_model!r}，状态行 model 透传链路（后端 stats→WS→落盘→前端）正确。")
+          f"model={expected_model!r} + reasoning_tokens={rt_final}；"
+          f"coordinator_reasoning 事件 {len(reasoning_events)} 条（拼接 {len(reasoning_full)} 字）。"
+          f"状态行 model + 推理透传链路（后端 stream→stats/reasoning→WS→落盘→前端）正确。")
     return 0
 
 

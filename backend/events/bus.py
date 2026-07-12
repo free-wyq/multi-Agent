@@ -333,6 +333,41 @@ async def emit_coordinator_token(
     )
 
 
+async def emit_coordinator_reasoning(
+    group_id: str,
+    coordinator_id: str,
+    reply_id: str,
+    delta: str,
+) -> None:
+    """Per-token streaming delta of the model's *reasoning* chain (推理流式).
+
+    Reasoning models (DeepSeek-R1/o1-style) stream ``reasoning_content`` — the
+    model's internal chain-of-thought — *before* the visible ``content``. This
+    is projected as a ``coordinator_reasoning`` WS event keyed by the same
+    ``reply_id`` as the reply's ``coordinator_token`` stream, so the frontend
+    can accumulate it into a collapsed-by-default "思考过程" panel on the
+    streaming bubble — users who care can expand it, others see only the reply.
+
+    Non-reasoning providers never emit reasoning_content → this is never called
+    → no event → the panel simply doesn't render. Zero-cost for non-reasoning
+    models, opt-in visibility for reasoning ones.
+    """
+    await bus_manager.emit(
+        group_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": group_id,
+            "task_id": None,
+            "sender_id": coordinator_id,
+            "receiver_id": "broadcast",
+            "type": "coordinator_reasoning",
+            "content": delta,
+            "data": {"reply_id": reply_id, "phase": "streaming"},
+            "timestamp": _ts(),
+        },
+    )
+
+
 async def emit_coordinator_stats(
     group_id: str,
     coordinator_id: str,
@@ -341,6 +376,7 @@ async def emit_coordinator_stats(
     tokens: int,
     phase: str,
     model: str = "",
+    reasoning_tokens: int = 0,
 ) -> None:
     """Live run-statistics for a coordinator reply (elapsed time + token count).
 
@@ -354,6 +390,12 @@ async def emit_coordinator_stats(
     surfaced so the bubble can show *which* model answered — useful when the
     user hot-switches models via the provider catalog. Empty string = unknown
     (legacy callers); the frontend falls back to omitting the model segment.
+
+    ``reasoning_tokens`` is how many of ``tokens`` were the model's internal
+    reasoning chain (from ``usage.completion_tokens_details.reasoning_tokens``),
+    as opposed to visible reply text. 0 for non-reasoning models. Surfaced so
+    the status line can show "↓ 148 tokens（含 133 推理）" — otherwise a 5-word
+    reply showing 148 tokens looks fake when 133 were invisible reasoning.
     """
     await bus_manager.emit(
         group_id,
@@ -371,6 +413,7 @@ async def emit_coordinator_stats(
                 "tokens": tokens,
                 "phase": phase,
                 "model": model,
+                "reasoning_tokens": reasoning_tokens,
             },
             "timestamp": _ts(),
         },

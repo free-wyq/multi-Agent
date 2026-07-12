@@ -21,6 +21,7 @@ from engine.dispatcher import dispatch_ready_steps
 from engine.state import CoordinatorState
 from events import (
     emit_coordinator_plan,
+    emit_coordinator_reasoning,
     emit_coordinator_stats,
     emit_coordinator_think,
     emit_coordinator_token,
@@ -604,7 +605,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
 
     config = get_llm_config()
     try:
-        reply_id, raw, tokens, elapsed_ms, model = await _stream_coordinator_decision(
+        reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens = await _stream_coordinator_decision(
             config,
             [
                 {"role": "system", "content": COORDINATOR_SYSTEM},
@@ -621,12 +622,12 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "content": "抱歉，我这边理解有点困难，能再说一次吗？",
             "plan": [],
         }
-        reply_id, tokens, elapsed_ms, model = "", 0, 0, ""
+        reply_id, tokens, elapsed_ms, model, reasoning_tokens = "", 0, 0, "", 0
 
     # Stamp the streaming run-stats onto the chat/ask/continue action so node_chat
     # persists them onto the agent_reply's data — the finalized bubble then keeps
-    # rendering "model · Ns · ↓ N tokens" after the streaming bubble retires
-    # (stats stay visible, don't vanish on completion).
+    # rendering "model · Ns · ↓ N tokens（含 N 推理）" after the streaming bubble
+    # retires (stats stay visible, don't vanish on completion).
     #
     # Which actions carry stats: any action whose reply_content IS the streamed
     # LLM text and routes to node_chat. chat/ask/continue all reuse decision
@@ -635,6 +636,12 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
     # status line. dispatch is excluded — its reply is a templated "📋 已制定
     # 协作计划..." announce built in node_dispatch, NOT the streamed decision
     # text, so the stream's tokens/elapsed wouldn't match the persisted content.
+    #
+    # reasoning_tokens is persisted so the finalized bubble can keep showing
+    # "含 N 推理" + offer the reasoning panel even after the streaming bubble
+    # retires (the reasoning text itself is NOT persisted here — it was streamed
+    # live via coordinator_reasoning events; the finalized bubble shows stats
+    # only, the reasoning panel is a streaming-only affordance).
     #
     # Pre-fix this only stamped "chat", so ask/continue replies (clarifying
     # questions, continuations) lost their status line on finalization — the
@@ -647,6 +654,7 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
             "elapsed_ms": elapsed_ms,
             "tokens": tokens,
             "model": model,
+            "reasoning_tokens": reasoning_tokens,
         }
 
     await emit_coordinator_think(
@@ -1065,53 +1073,75 @@ async def _stream_coordinator_decision(
     messages: list[dict[str, str]],
     group_id: str,
     coordinator_id: str,
-) -> tuple[str, str, int, int, str]:
+) -> tuple[str, str, int, int, str, int]:
     """Stream the coordinator LLM, emitting per-token + live-stats events.
 
-    Consumes ``chat_completion_stream``: each ``(delta, completion_tokens)``
-    chunk feeds the ``_ContentExtractor`` (only the decoded ``content`` field
-    value is pushed to the frontend via ``emit_coordinator_token`` — the JSON
-    skeleton/keys are never rendered as reply text). Live statistics
-    (``emit_coordinator_stats``) are emitted ~every 200ms during the stream and
-    once more at the end with ``phase="done"`` and the real
-    ``completion_tokens``.
+    Consumes ``chat_completion_stream``: each ``(content_delta, reasoning_delta,
+    completion_tokens, reasoning_tokens)`` chunk feeds the ``_ContentExtractor``
+    (only the decoded ``content`` field value is pushed to the frontend via
+    ``emit_coordinator_token`` — the JSON skeleton/keys are never rendered as
+    reply text). Reasoning-model ``reasoning_content`` deltas are pushed
+    separately via ``emit_coordinator_reasoning`` so the frontend can render a
+    collapsed "思考过程" panel. Live statistics (``emit_coordinator_stats``) are
+    emitted ~every 200ms during the stream and once more at the end with
+    ``phase="done"`` and the real ``completion_tokens`` / ``reasoning_tokens``.
 
-    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model)``:
+    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens)``:
 
     - ``reply_id`` — the UUID per-turn streaming key (so the caller can stamp
       it onto the persisted agent_reply's ``data`` and the frontend can keep the
       stats line alive after the streaming bubble retires).
-    - ``raw_full`` — the assembled raw LLM output for ``extract_json`` to parse
-      action/plan (unchanged from the non-streaming path).
+    - ``raw_full`` — the assembled raw LLM output (visible ``content`` only) for
+      ``extract_json`` to parse action/plan (unchanged from the non-streaming
+      path; reasoning_content is NOT part of raw_full — it's not the reply).
     - ``tokens`` — the final token count (real ``completion_tokens`` if the
       provider sent usage, else the coarse char-based estimate).
     - ``elapsed_ms`` — total wall-clock from stream start to finish.
     - ``model`` — the LLM model id that produced this reply (``config["model"]``),
       surfaced through stats + persisted data so the bubble can show *which*
       model answered (the user can hot-switch models via the provider catalog).
+    - ``reasoning_tokens`` — how many of ``tokens`` were the model's internal
+      reasoning chain (0 for non-reasoning models). Surfaced through stats +
+      persisted data so the status line can show "含 N 推理" and the bubble
+      can render a reasoning panel — otherwise a 5-word reply showing 148
+      tokens looks fake when 133 were invisible reasoning.
     """
     reply_id = uuid.uuid4().hex
     model = str(config.get("model") or "")
     extractor = _ContentExtractor()
     raw_parts: list[str] = []
     final_tokens = 0
+    final_reasoning_tokens = 0
     # throttle stats emits to ~200ms; Date.now()/time is fine here (engine side)
     start = time.monotonic()
     last_stats_ts = 0.0
     # running estimate of emitted content chars → a coarse token estimate for
     # the live counter before the authoritative usage chunk arrives
     live_tokens = 0
+    # running estimate of emitted reasoning chars → a coarse token estimate for
+    # the live reasoning counter (reasoning_tokens only lands on the final chunk)
+    live_reasoning_tokens = 0
 
-    async for delta, usage in chat_completion_stream(config, messages):
-        if delta:
-            raw_parts.append(delta)
-            extractor.feed(delta)
+    async for content_delta, reasoning_delta, usage, reasoning_usage in chat_completion_stream(config, messages):
+        if reasoning_delta:
+            live_reasoning_tokens += max(1, len(reasoning_delta) // 3)
+            try:
+                await emit_coordinator_reasoning(
+                    group_id, coordinator_id, reply_id, reasoning_delta
+                )
+            except Exception:
+                logger.exception("[coordinator] failed to emit reasoning delta")
+        if content_delta:
+            raw_parts.append(content_delta)
+            extractor.feed(content_delta)
             piece = extractor.take()
             if piece:
                 live_tokens += max(1, len(piece) // 3)
                 await emit_coordinator_token(group_id, coordinator_id, reply_id, piece)
         if usage is not None:
             final_tokens = usage
+        if reasoning_usage is not None:
+            final_reasoning_tokens = reasoning_usage
         # throttled stats: at most every 200ms, + a final emit after the loop
         now = time.monotonic()
         if now - last_stats_ts >= 0.2:
@@ -1125,6 +1155,7 @@ async def _stream_coordinator_decision(
                     live_tokens,
                     "streaming",
                     model,
+                    live_reasoning_tokens,
                 )
             except Exception:
                 logger.exception("[coordinator] failed to emit streaming stats")
@@ -1133,6 +1164,9 @@ async def _stream_coordinator_decision(
     raw_full = "".join(raw_parts)
     elapsed_ms = int((time.monotonic() - start) * 1000)
     real_tokens = final_tokens if final_tokens else live_tokens
+    real_reasoning_tokens = (
+        final_reasoning_tokens if final_reasoning_tokens else live_reasoning_tokens
+    )
     try:
         await emit_coordinator_stats(
             group_id,
@@ -1142,10 +1176,11 @@ async def _stream_coordinator_decision(
             real_tokens,
             "done",
             model,
+            real_reasoning_tokens,
         )
     except Exception:
         logger.exception("[coordinator] failed to emit final stats")
-    return reply_id, raw_full, real_tokens, elapsed_ms, model
+    return reply_id, raw_full, real_tokens, elapsed_ms, model, real_reasoning_tokens
 
 
 def _parse_coordinator_decision(raw: str) -> dict:

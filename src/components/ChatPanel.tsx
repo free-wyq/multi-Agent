@@ -72,19 +72,25 @@ function formatElapsed(ms: number): string {
 }
 
 /** 从持久化 agent_reply 的 data 字段提取协调者流式统计。
- *  node_chat 经 _unified_reply 把 {reply_id, elapsed_ms, tokens, model} 落盘到 message.data，
- *  定稿气泡据此渲染「model · Ns · ↓ N tokens · 完成」状态行——流式期间的统计在完成后保留可见，
- *  不随流式气泡退场消失。非协调者 chat 回复（dispatch/summarize announce、user_input、
- *  task_log、slash_card）data 无 elapsed_ms → null，不渲染状态行。 */
+ *  node_chat 经 _unified_reply 把 {reply_id, elapsed_ms, tokens, model, reasoning_tokens}
+ *  落盘到 message.data，定稿气泡据此渲染「model · Ns · ↓ N tokens（含 N 推理）· 完成」状态行
+ *  ——流式期间的统计在完成后保留可见，不随流式气泡退场消失。
+ *  reasoning_tokens > 0 时追加「（含 N 推理）」——否则 5 字回复显示 148 tokens 显得假，
+ *  其实 133 个是模型内部推理（用户看不见），点明后数字才可解释。
+ *  非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
+ *  data 无 elapsed_ms → null，不渲染状态行。 */
 function extractCoordStats(
   data: Record<string, unknown> | null,
-): { elapsed_ms: number; tokens: number; model?: string } | null {
+): { elapsed_ms: number; tokens: number; model?: string; reasoning_tokens?: number } | null {
   if (!data) return null
   const elapsed = Number(data.elapsed_ms)
   if (!Number.isFinite(elapsed) || elapsed <= 0) return null
   const tokens = Number(data.tokens)
   const model = typeof data.model === 'string' && data.model ? data.model : undefined
-  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0, model }
+  const reasoningTokensNum = Number(data.reasoning_tokens)
+  const reasoning_tokens =
+    Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0 ? reasoningTokensNum : undefined
+  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0, model, reasoning_tokens }
 }
 
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
@@ -212,7 +218,7 @@ export default function ChatPanel({
   onOpenInfo,
   hideHeader,
 }: ChatPanelProps) {
-  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordStats, refreshPlan } = useBusEventContext()
+  const { groupId: chatGroupId, logs, plan, agentStatuses, streaming, events, coordStreaming, coordReasoning, coordStats, refreshPlan } = useBusEventContext()
   const [chatMessages, setChatMessages] = useState<Message[]>([])
   const [chatLoading, setChatLoading] = useState(false)
   const [sending, setSending] = useState(false)
@@ -286,15 +292,18 @@ export default function ChatPanel({
     : []
 
   // 协调者流式气泡：coordinator_token 按 reply_id 累积的 delta，配合 coordinator_stats
-  // 渲染 Claude-Code 风格状态行（"Ns · ↓ N tokens · thinking"）。
+  // 渲染 Claude-Code 风格状态行（"model · Ns · ↓ N tokens（含 N 推理）· thinking"）。
   // 与 worker 流式气泡区别：协调者无 task_id（不经 create_react_agent），按 reply_id 归并；
   // sender 是 group.coordinator_id（真实 agent_id，ChatAvatar/SenderName 据此解析角色色/名）。
   // phase="done" 时 useBusEvent 清空 coordStreaming[reply_id] → 气泡自然退场，
   // 由随后落地的持久化 agent_reply 接管（同 worker streaming→finalized 模式）。
+  // reasoning 取 coordReasoning[reply_id]——推理模型在可见 content 前流出的内部思维链，
+  // 传给 ChatMessageBubble 渲染默认折叠的「思考过程」区，用户可自行展开/收起。
   const coordinatorStreamingBubbles = chatGroupId
     ? Object.entries(coordStreaming).map(([replyId, content]) => ({
         replyId,
         content,
+        reasoning: coordReasoning[replyId] || '',
         stats: coordStats[replyId],
       }))
     : []
@@ -769,9 +778,11 @@ export default function ChatPanel({
                     {new Date(msg.created_at).toLocaleTimeString()}
                   </div>
                   {/* 定稿协调者回复的状态行：从持久化 agent_reply.data 取流式统计
-                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens, model}），渲染
-                      「model · Ns · ↓ N tokens · 完成」状态行。model 在最前——用户能直观看到
-                      这条回复是哪个模型生成的（热切换模型后历史气泡保留当时的模型名）。
+                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens, model, reasoning_tokens}），
+                      渲染「model · Ns · ↓ N tokens（含 N 推理）· 完成」状态行。model 在最前——
+                      用户能直观看到这条回复是哪个模型生成的（热切换模型后历史气泡保留当时的模型名）。
+                      reasoning_tokens > 0 时追加「（含 N 推理）」——推理模型的 token 多为内部思维链，
+                      点明后「5 字回复却 148 tokens」才可解释（其中 133 是看不见的推理）。
                       流式期间的统计在完成后保留可见——不随流式气泡退场消失。
                       非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
                       data 无 elapsed_ms → extractCoordStats 返回 null → 不渲染状态行。 */}
@@ -784,7 +795,13 @@ export default function ChatPanel({
                           <span className="chat-status-model">{stats.model}</span>
                         )}
                         {stats.model && ' · '}
-                        {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens · 完成`}
+                        {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens`}
+                        {stats.reasoning_tokens && (
+                          <span className="chat-status-reasoning">
+                            {' '}（含 {stats.reasoning_tokens} 推理）
+                          </span>
+                        )}
+                        {' · 完成'}
                       </div>
                     )
                   })()}
@@ -822,6 +839,7 @@ export default function ChatPanel({
               : `${(stats.elapsed_ms / 1000).toFixed(1)}s`
             : '0s'
           const tokens = stats?.tokens ?? 0
+          const reasoningTokens = stats?.reasoning_tokens
           const phaseLabel =
             stats?.phase === 'done' ? '完成' : '思考中'
           const model = stats?.model
@@ -834,13 +852,20 @@ export default function ChatPanel({
                 <ChatAvatar id={group?.coordinator_id ?? 'coordinator'} agents={agents} />
               }
               content={b.content}
+              reasoning={b.reasoning || undefined}
               timestamp={new Date().toISOString()}
               isStreaming={stats?.phase !== 'done'}
               statusLine={
                 <>
                   {model && <span className="chat-status-model">{model}</span>}
                   {model && ' · '}
-                  {`${elapsedStr} · ↓ ${tokens} tokens · ${phaseLabel}`}
+                  {`${elapsedStr} · ↓ ${tokens} tokens`}
+                  {reasoningTokens && (
+                    <span className="chat-status-reasoning">
+                      {' '}（含 {reasoningTokens} 推理）
+                    </span>
+                  )}
+                  {` · ${phaseLabel}`}
                 </>
               }
             />
