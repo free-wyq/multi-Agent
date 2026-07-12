@@ -29,6 +29,7 @@ from engine.agent_executor import execute_agent_task
 from engine.mention import clear_group_routes, route_mentions
 from engine.worker import build_worker_graph
 from engine.workspace import scan_workspace_artifacts
+from langgraph.types import Command
 from events import (
     emit_agent_status,
     emit_message_added,
@@ -546,7 +547,17 @@ class AgentEngine:
     # ── notify handling ──────────────────────────────────────────────
 
     async def _handle_notify(self, notify: dict[str, Any]) -> None:
-        """Process a notify item via the LangGraph graph."""
+        """Process a notify item via the LangGraph graph.
+
+        A notify whose ``type`` is ``plan_resume`` carries a resume payload
+        (in ``data``) and is dispatched to the coordinator graph as
+        ``Command(resume=<payload>)`` rather than a fresh-input dict. This is
+        the plan-confirm entry point (PL-02/PL-03): ``node_dispatch`` paused
+        the thread via ``interrupt()`` and a later ``/plan/confirm|direct|modify``
+        API call pushes a ``plan_resume`` notify whose payload wakes the
+        dispatch node to fan out. All other notify kinds go through as
+        fresh-input dicts (the pre-existing path).
+        """
         if notify.get("sender_id") == self.agent_id:
             return
 
@@ -587,40 +598,72 @@ class AgentEngine:
                     # MT-03: leader_strategy via the shared safe accessor so the
                     # read path has one source of truth for the default + key name.
                     leader_strategy = get_leader_strategy(grp.config)
-                result = await self.graph.ainvoke(
-                    {
-                        "group_id": self.group_id,
-                        "agent_id": self.agent_id,
-                        "agent_name": self.name,
-                        # 群聊 Leader：system_prompt + COORDINATOR_SYSTEM 由 coordinator.py
-                        # 三处 system 消息拼接（_leader_system）。
-                        "system_prompt": self.system_prompt,
-                        "incoming_message": notify.get("content") or "",
-                        "incoming_sender": notify.get("sender_id") or "",
-                        "incoming_kind": notify.get("type") or "",
-                        "incoming_data": notify.get("data"),
-                        "memory": self._memory,
-                        "dispatch_plan": self._dispatch_plan,
-                        "recent_routes": self._recent_routes,
-                        "auto_confirm": auto_confirm,
-                        "leader_strategy": leader_strategy,
-                    },
-                    config={"configurable": {"thread_id": self.thread_id}},
-                )
+
+                # PL-02 resume entry: a plan_resume notify carries the resume
+                # payload (mode=confirm|direct|modify, optional amended_steps).
+                # Dispatch it as Command(resume=...) so node_dispatch's
+                # interrupt() returns the payload and the graph fans out — this
+                # is the LangGraph-native resume path (vs the legacy plan_confirm
+                # fresh-input path that re-enters classify). Only meaningful on a
+                # thread currently interrupted at the dispatch node; on an idle
+                # thread Command(resume=) is a harmless no-op resume that runs
+                # classify→llm with empty input (verified safe — see progress
+                # notes for task 5). The plan_resume marker is set by the
+                # plan-confirm API endpoints (api/plan.py) once they migrate to
+                # the resume channel (tasks 7-9); until then the legacy
+                # plan_confirm fresh-input path still works in parallel.
+                notify_type = notify.get("type") or ""
+                if notify_type == "plan_resume":
+                    resume_payload = notify.get("data") or {}
+                    result = await self.graph.ainvoke(
+                        Command(resume=resume_payload),
+                        config={"configurable": {"thread_id": self.thread_id}},
+                    )
+                else:
+                    result = await self.graph.ainvoke(
+                        {
+                            "group_id": self.group_id,
+                            "agent_id": self.agent_id,
+                            "agent_name": self.name,
+                            # 群聊 Leader：system_prompt + COORDINATOR_SYSTEM 由 coordinator.py
+                            # 三处 system 消息拼接（_leader_system）。
+                            "system_prompt": self.system_prompt,
+                            "incoming_message": notify.get("content") or "",
+                            "incoming_sender": notify.get("sender_id") or "",
+                            "incoming_kind": notify.get("type") or "",
+                            "incoming_data": notify.get("data"),
+                            "memory": self._memory,
+                            "dispatch_plan": self._dispatch_plan,
+                            "recent_routes": self._recent_routes,
+                            "auto_confirm": auto_confirm,
+                            "leader_strategy": leader_strategy,
+                        },
+                        config={"configurable": {"thread_id": self.thread_id}},
+                    )
             finally:
                 coord_mod.set_reply_callback(None)
-            # sync dispatch_plan back from graph result (nodes mutate it)
+            # sync dispatch_plan back from graph result (nodes mutate it).
+            # On a resume (Command) turn the plan is sourced from the checkpointer
+            # (node_dispatch already checkpointed it on the interrupt turn), so the
+            # mirror here stays consistent with the graph's truth. The checkpointer
+            # is the source of truth; self._dispatch_plan is a compatibility mirror
+            # retained so GET /plan (until task 10 migrates it to get_state) and
+            # reset_session (until task 6 migrates it) keep working unchanged.
             if result and isinstance(result, dict):
                 updated_plan = result.get("dispatch_plan")
                 if updated_plan is not None:
                     self._dispatch_plan = list(updated_plan)
-            # record memory (user side)
-            self._memory.append(
-                {
-                    "role": "user",
-                    "content": f"[{notify.get('sender_id')}] {notify.get('content')}",
-                }
-            )
+            # record memory (user side). A resume turn has no user message content
+            # (the notify is a control signal), so skip memory append for plan_resume
+            # — appending an empty "[user] " entry would pollute the coordinator's
+            # conversation context with a noise turn.
+            if notify_type != "plan_resume":
+                self._memory.append(
+                    {
+                        "role": "user",
+                        "content": f"[{notify.get('sender_id')}] {notify.get('content')}",
+                    }
+                )
         else:
             worker_mod.set_reply_callback(reply_cb)
             try:
