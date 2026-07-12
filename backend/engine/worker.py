@@ -20,7 +20,7 @@ from langgraph.graph import END, START, StateGraph
 from engine.coordinator import _ContentExtractor
 from engine.inbox import push_task
 from engine.state import WorkerState
-from events import emit_message_added, emit_task_token
+from events import emit_coordinator_reasoning, emit_message_added, emit_task_token
 from llm.client import chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.prompts import build_brain_prompt
@@ -229,6 +229,25 @@ async def node_brain_decide(state: WorkerState) -> dict:
                         )
             if reasoning_delta:
                 reasoning_parts.append(reasoning_delta)
+                # 推推理链逐字增量（task-思考流式）：与协调者 _stream_coordinator_decision
+                # 同款 emit_coordinator_reasoning，按 reply_id 归并。前端 coordReasoning[reply_id]
+                # 实时累加 → 流式气泡的「思考过程」折叠区逐字流式 + 自动展开（思考结束自动收起，
+                # 然后流式输出正文）。复用 coordinator_reasoning 通道而非新造 task_reasoning——单聊
+                # worker 的可见正文已用同一 reply_id 归并进 coordStreaming[reply_id]（task_token 分支），
+                # 思考与正文同 reply_id，前端同一流式气泡天然同时接收两者，零新增归并逻辑。
+                # best-effort：emit 失败不阻断 brain 决策（WS 推送是 fire-and-forget）。
+                try:
+                    await emit_coordinator_reasoning(
+                        state.get("group_id", ""),
+                        state.get("agent_id", ""),
+                        reply_id,
+                        reasoning_delta,
+                    )
+                except Exception:
+                    logger.exception(
+                        "[worker %s] failed to emit reasoning delta",
+                        state.get("agent_name"),
+                    )
             if usage is not None:
                 final_tokens = usage
             if reasoning_usage is not None:

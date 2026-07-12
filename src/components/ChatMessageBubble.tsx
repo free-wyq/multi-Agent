@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { Collapse, Tag, Tooltip, Button, message } from 'antd'
 import { CaretRightOutlined, ToolOutlined, BulbOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
@@ -235,6 +235,37 @@ export default function ChatMessageBubble({
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
   const hasReasoning = !!(reasoning && reasoning.length > 0)
+
+  // 思考折叠区主动展开/收起态：用户要求「思考开始时持续流式，思考结束时主动关闭，然后
+  // 流式输出正文」——有呼吸有交互才真实。
+  //  · 思考活跃期（isStreaming 且有 reasoning 且正文尚未开始流出）→ 自动展开，让用户看见
+  //    思考逐字流出（coordinator_reasoning / worker reasoning_delta 实时累加进 reasoning prop）。
+  //  · 思考结束（正文 content 开始流出 / 流式结束 isStreaming=false）→ 主动收起，让位给正文。
+  //
+  // 「思考结束」的精确信号 = 正文开始流（hasContent）。推理模型（DeepSeek/o1 类）先流
+  // reasoning_content、再流可见 content——reasoning 阶段 content 为空（思考中），content 一旦
+  // 非空即标志思考结束、正文开始 → 收起。reasoning 本身不清空（落盘用），故不能靠「reasoning
+  // 是否存在」判定，要靠「正文是否已开始」。非推理模型无 reasoning → reasoningActive 恒 false →
+  // 从不展开思考区（无思考可展，正确）。
+  // 用户手动展开/收起（点标题）优先——手动操作后 5s 内不自动覆盖（尊重用户意图）；5s 后若
+  // 思考仍在流（新 delta 到达触发 effect 重跑），恢复自动展开。
+  const reasoningActive = isStreaming && hasReasoning && !hasContent
+  const [reasoningExpanded, setReasoningExpanded] = useState(false)
+  const [userToggledAt, setUserToggledAt] = useState(0)
+  useEffect(() => {
+    // reasoningActive 变化或新 reasoning delta 到达时重算展开态。
+    if (!reasoningActive) {
+      setReasoningExpanded(false)
+      return
+    }
+    // 用户在最近 5s 内手动 toggle 过 → 尊重用户意图，不自动覆盖
+    if (Date.now() - userToggledAt < 5000) return
+    setReasoningExpanded(true)
+  }, [reasoning, reasoningActive, userToggledAt])
+  const toggleReasoning = () => {
+    setUserToggledAt(Date.now())
+    setReasoningExpanded((v) => !v)
+  }
   // ST-06（task 21 数据管道）：worker 任务产物文件列表（task_complete data.artifact.files[]）。
   // 仅 finalizedBubbles 传入（task 21 从 task_complete 事件 data.artifact 提取）；流式/协调者
   // 气泡不传（默认空数组）。hasArtifacts 让「既无工具也无内容也无思考也无产物」的防御兜底放行，
@@ -298,14 +329,19 @@ export default function ChatMessageBubble({
             .join(' ')}
         >
           {/* 推理过程折叠区（气泡顶部，工具摘要之上）—— 推理模型在可见 content 前流出的内部思维链。
-              用 antd Collapse（项目约定：有现成开源组件就不手写），默认收起；展开后显示完整推理
-              文本（流式期来自 coordReasoning 实时累加，定稿后来自持久化 data.reasoning）。
-              Collapse 自管展开态，无需本地 state。 */}
+              用 antd Collapse（项目约定：有现成开源组件就不手写）。
+              主动展开/收起（有呼吸有交互才真实）：
+                · 流式思考期（reasoning 仍在逐字增长）→ 自动展开，让用户看见思考实时流出；
+                · 思考结束（正文开始流 / 流式结束）→ 自动收起，让位给正文。
+              用户手动点标题展开/收起优先——手动操作后 5s 内不自动覆盖（尊重用户意图）。
+              定稿气泡（isStreaming=false）默认收起，用户想看再展开。 */}
           {hasReasoning && (
             <div style={{ marginBottom: 6 }}>
               <Collapse
                 size="small"
                 ghost
+                activeKey={reasoningExpanded ? ['reasoning'] : []}
+                onChange={() => toggleReasoning()}
                 items={[{
                   key: 'reasoning',
                   label: (
