@@ -65,9 +65,11 @@ def check() -> int:
         print("[W1] OK  worker.py import emit_coordinator_reasoning（复用协调者同款通道）")
 
     # W2. reasoning_delta 分支调 emit_coordinator_reasoning(..., reply_id, reasoning_delta)
-    #     定位：if reasoning_delta: 块内含 emit_coordinator_reasoning 调用，含 reply_id + reasoning_delta 实参。
+    #     B3 抽出 _stream_brain_decision 后参数走 group_id/agent_id 形参（镜像协调者
+    #     _stream_coordinator_decision 用 group_id/coordinator_id），而非 state.get(...)。
+    #     两种写法都接受，核心契约「reasoning_delta → emit_coordinator_reasoning(reply_id)」不变。
     m_w = re.search(
-        r"if reasoning_delta:.*?await emit_coordinator_reasoning\(\s*state\.get\(.group_id.*?reply_id,.*?reasoning_delta",
+        r"if reasoning_delta:.*?await emit_coordinator_reasoning\(\s*(?:state\.get\(.group_id.*?|group_id).*?reply_id,.*?reasoning_delta",
         worker,
         re.S,
     )
@@ -78,8 +80,12 @@ def check() -> int:
 
     # W3. best-effort（try/except 包 emit，失败不阻断）
     #     reasoning_delta 块内含 try: ... except Exception: logger.exception
+    #     B3 抽出 _stream_brain_decision 后块缩进从 3 级变 2 级（类方法→模块级函数体），
+    #     块边界也不再以 `if usage is not None` 为后界（_stream_brain_decision 内顺序为
+    #     content/reasoning/usage，reasoning 块后界改用 `if usage is not None` 仍可，但缩进
+    #     改变故放宽到下一个同级 if）。两种缩进都接受。
     w_block = re.search(
-        r"if reasoning_delta:\s*\n(.*?)(?=\n            if usage is not None:)",
+        r"if reasoning_delta:\s*\n(.*?)(?=\n        if usage is not None:|\n            if usage is not None:)",
         worker,
         re.S,
     )

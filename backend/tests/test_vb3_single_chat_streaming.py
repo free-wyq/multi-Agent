@@ -247,8 +247,11 @@ def assert_contract() -> list[str]:
     else:
         # emit_task_token 调用块跨多行含嵌套括号，用「await emit_task_token(」到「piece,」整段校验
         # 第二个位置参数（task_id 槽位）应是 reply_id（裸标识，非 state.get(...) 等表达式）。
+        # B3 抽出 _stream_brain_decision 后第一参数从 state.get("group_id","") 改为 group_id 形参
+        # （镜像协调者 _stream_coordinator_decision 用 group_id 形参）。两种写法都接受，核心契约
+        # 「task_id 槽位是 reply_id（裸 hex）」不变。
         emit_block = re.search(
-            r"await emit_task_token\(\s*state\.get\(\"group_id\", \"\"\),\s*(\w+),",
+            r'await emit_task_token\(\s*(?:state\.get\("group_id", ""\)|group_id),\s*(\w+),',
             worker,
             re.S,
         )

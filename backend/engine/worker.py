@@ -140,8 +140,121 @@ def _format_display_msg(sender: str, content: str) -> str:
     return content
 
 
+async def _stream_brain_decision(
+    config: dict[str, Any],
+    messages: list[dict[str, str]],
+    group_id: str,
+    agent_id: str,
+) -> tuple[str, str, int, int, str, int, str]:
+    """Stream the worker brain LLM, emitting per-token + reasoning events.
+
+    镜像 ``coordinator._stream_coordinator_decision``：消费
+    ``chat_completion_stream`` 的四元组 (content_delta/reasoning_delta/usage/
+    reasoning_usage)，把可见 ``content`` 字段的解码增量经 ``emit_task_token`` 推
+    WS（跳过 JSON 骨架，只推可见回复），reasoning_content 增量经
+    ``emit_coordinator_reasoning`` 推 WS（复用协调者同款通道，思考与正文同
+    ``reply_id`` 归并到同一流式气泡）。两路 emit 均 best-effort（try/except），
+    WS 推送失败不阻断 brain 决策。采集 provider 真实 usage + 耗时 + model 交回
+    调用方盖 ``_stream_stats`` 落盘。
+
+    Returns ``(reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens,
+    reasoning_text)``：
+
+    - ``reply_id`` — 每轮一个 uuid4 hex，单聊回复流式 token 的归并键（与协调者
+      ``_stream_coordinator_decision`` 同构）。前端 ``coordStreaming[reply_id]`` 按
+      reply_id 拼接逐字增量；落盘到 ``agent_reply.data.reply_id`` 后退场流式气泡。
+    - ``raw_full`` — 组装的原始 LLM ``content``（strict JSON ``{"action","content",
+      "reasoning"}``），交 ``_parse_brain_decision`` 解析（reasoning_content 不属
+      raw_full——它不是回复正文）。
+    - ``tokens`` — 最终 token 数（provider 回 usage 用真实 completion_tokens，否则
+      退化为粗估 ``len(raw_full)//3``，与协调者 ``live_tokens`` 启发式一致，保证状态行
+      总有数）。
+    - ``elapsed_ms`` — 流式起止墙钟。
+    - ``model`` — 产出本回复的 LLM model id（``config["model"]``），经 stats 落盘让
+      气泡显示哪个模型答的（用户可经 provider 目录热切换）。
+    - ``reasoning_tokens`` — reasoning 链 token 数（非推理模型为 0；无 fallback 估值，
+      与协调者 ``live_reasoning_tokens`` 兜底不一致——B5 待统一）。
+    - ``reasoning_text`` — 组装完整的 ``reasoning_content``（落盘到
+      ``agent_reply.data["reasoning"]``，定稿气泡折叠区据此展开——流式期靠
+      ``coordinator_reasoning`` 事件，定稿后 phase=done 清 coordReasoning，靠持久化
+      文本才可再展开历史气泡推理）。
+    """
+    # reply_id（task 23）：每轮一个 uuid4 hex，作为单聊回复流式 token 的归并键。
+    # 与协调者 _stream_coordinator_decision 的 reply_id 同构——前端 coordStreaming[reply_id]
+    # 按 reply_id 拼接逐字增量。落盘到 agent_reply.data.reply_id 后，前端用「该 agent 在
+    # 收尾时间戳之后的消息」判定持久化回复已落地、退场流式气泡——与协调者 phase=done
+    # 清 coordStreaming 同模式。
+    reply_id = uuid.uuid4().hex
+    # worker brain 的 LLM 输出是 strict JSON（``{"action","content","reasoning"}``），
+    # 可见回复是 ``content`` 字段值——若把 raw_parts（含 JSON 骨架/action/reasoning）逐字
+    # 推给前端，流式气泡会渲染出 ``{"action":"chat","content":"...`` 这种骨架噪声。故复用
+    # 协调者的 ``_ContentExtractor``：feed 每个 content_delta，take() 出「content 字段的
+    # 解码增量」（跳过 JSON 骨架/转义解码/前导散文），只把真正的可见回复文本逐字推。
+    extractor = _ContentExtractor()
+    start = time.monotonic()
+    raw_parts: list[str] = []
+    # reasoning_content 全文累积——落盘到 agent_reply.data.reasoning，定稿气泡的折叠区据此
+    # 展开（流式期靠 coordinator_reasoning 事件，定稿后靠持久化文本）。
+    reasoning_parts: list[str] = []
+    final_tokens = 0
+    final_reasoning_tokens = 0
+    async for content_delta, reasoning_delta, usage, reasoning_usage in chat_completion_stream(
+        config, messages
+    ):
+        if content_delta:
+            raw_parts.append(content_delta)
+            # 推可见回复的解码增量（跳过 JSON 骨架），按 reply_id 归并。emit 失败
+            # 不阻断 brain 决策（WS 推送是 best-effort，前端断连等不应让 worker 回复挂）。
+            extractor.feed(content_delta)
+            piece = extractor.take()
+            if piece:
+                try:
+                    await emit_task_token(
+                        group_id, reply_id, agent_id, "streaming", piece
+                    )
+                except Exception:
+                    logger.exception(
+                        "[worker %s] failed to emit task_token delta", agent_id
+                    )
+        if reasoning_delta:
+            reasoning_parts.append(reasoning_delta)
+            # 推推理链逐字增量（task-思考流式）：与协调者 _stream_coordinator_decision
+            # 同款 emit_coordinator_reasoning，按 reply_id 归并。前端 coordReasoning[reply_id]
+            # 实时累加 → 流式气泡的「思考过程」折叠区逐字流式 + 自动展开（思考结束自动收起，
+            # 然后流式输出正文）。复用 coordinator_reasoning 通道而非新造 task_reasoning——单聊
+            # worker 的可见正文已用同一 reply_id 归并进 coordStreaming[reply_id]（task_token 分支），
+            # 思考与正文同 reply_id，前端同一流式气泡天然同时接收两者，零新增归并逻辑。
+            # best-effort：emit 失败不阻断 brain 决策（WS 推送是 fire-and-forget）。
+            try:
+                await emit_coordinator_reasoning(
+                    group_id, agent_id, reply_id, reasoning_delta
+                )
+            except Exception:
+                logger.exception(
+                    "[worker %s] failed to emit reasoning delta", agent_id
+                )
+        if usage is not None:
+            final_tokens = usage
+        if reasoning_usage is not None:
+            final_reasoning_tokens = reasoning_usage
+    raw_full = "".join(raw_parts)
+    reasoning_text = "".join(reasoning_parts)
+    elapsed_ms = int((time.monotonic() - start) * 1000)
+    model = str(config.get("model") or "")
+    # usage 未到（provider 不回 usage 或中断）→ 退化为粗估 len//3（与协调者
+    # _stream_coordinator_decision 的 live_tokens 启发式一致），保证状态行总有数。
+    tokens = final_tokens if final_tokens else max(1, len(raw_full) // 3)
+    reasoning_tokens = final_reasoning_tokens  # 0 for non-reasoning models
+    return reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text
+
+
 async def node_brain_decide(state: WorkerState) -> dict:
-    """Worker LLM three-state decision: chat/execute/ask (Rust handle_notify 389-422)."""
+    """Worker LLM three-state decision: chat/execute/ask (Rust handle_notify 389-422).
+
+    流式采集（reply_id/usage/耗时/model/reasoning）+ 逐字推 task_token/reasoning 抽到
+    ``_stream_brain_decision``（镜像 ``coordinator._stream_coordinator_decision``，单一
+    职责）；本函数只管 prompt 构建 + 决策解析 + stats 装配 + 异常兜底。
+    """
     # 上下文直接从 messages 表真源拉（带 sender 身份），不再用 self._memory——
     # 修两个 bug：(1) 时序（旧 append 在 ainvoke 之后，当前 incoming 没进 context）；
     # (2) 身份（旧 _build_context 把 peer 消息全渲染成「用户:」）。coordinator_id
@@ -160,107 +273,29 @@ async def node_brain_decide(state: WorkerState) -> dict:
         state.get("system_prompt", ""),
     )
     config = get_llm_config()
-    # reply_id（task 23）：每轮一个 uuid4 hex，作为单聊回复流式 token 的归并键。
-    # 与协调者 _stream_coordinator_decision 的 reply_id 同构——前端 coordStreaming[reply_id]
-    # 按 reply_id 拼接逐字增量（task 24 在下面 async for 循环里推 task_token，data.reply_id
-    # 即此值）。落盘到 agent_reply.data.reply_id 后，前端用「该 agent 在收尾时间戳之后的消息」
-    # 判定持久化回复已落地、退场流式气泡——与协调者 phase=done 清 coordStreaming 同模式。
-    # 此处先生成并塞进 _stream_stats（task 23），task 24 才真正在循环里 emit task_token。
-    reply_id = uuid.uuid4().hex
+    # system_prompt 作为独立 system 消息注入（空串时 LLM 以 brain prompt 内
+    # 的 {role} 兜底人设作答）。单聊 agent 用自己的 system_prompt 主导行为，
+    # 不再回「我可以调度团队成员来协助你」（那是 COORDINATOR_SYSTEM 的人设）。
+    messages = [
+        {"role": "system", "content": state.get("system_prompt", "") or ""},
+        {"role": "user", "content": prompt},
+    ]
     try:
-        # system_prompt 作为独立 system 消息注入（空串时 LLM 以 brain prompt 内
-        # 的 {role} 兜底人设作答）。单聊 agent 用自己的 system_prompt 主导行为，
-        # 不再回「我可以调度团队成员来协助你」（那是 COORDINATOR_SYSTEM 的人设）。
-        #
-        # 改用流式 chat_completion_stream：采集 provider 返回的真实 usage
-        # （completion_tokens / reasoning_tokens）+ 耗时 + model，塞进 _stream_stats，
-        # 经 node_chat/ask 落盘到 agent_reply.data —— 定稿气泡据此渲染
-        # 「model · Ns · ↓ N tokens（含 N 推理）」状态行（与协调者 node_chat 同形，
-        # 前端 extractCoordStats 不区分来源）。原非流式 chat_completion 丢弃 usage，
-        # worker 回复无状态行（只有协调者有）。
-        #
-        # task 23 给 worker 引入 reply_id（本函数生成 + 塞进 _stream_stats）；
-        # task 24 才在下面 async for 循环里 emit task_token 推逐字 delta（按 reply_id 归并）。
-        # 故本 task 仅把 reply_id 落进 stats——单聊回复仍一次性落地（流式气泡待 task 24/25 接通）。
-        # task 24：在 async for 循环里推 task_token，按 reply_id 归并。worker brain
-        # 的 LLM 输出是 strict JSON（``{"action","content","reasoning"}``），可见回复是
-        # ``content`` 字段值——若把 raw_parts（含 JSON 骨架/action/reasoning）逐字推给前端，
-        # 流式气泡会渲染出 ``{"action":"chat","content":"...`` 这种骨架噪声。故复用协调者
-        # 的 ``_ContentExtractor``：feed 每个 content_delta，take() 出「content 字段的解码
-        # 增量」（跳过 JSON 骨架/转义解码/前导散文），只把真正的可见回复文本逐字推。
-        # emit_task_token 的 task_id 形参此处传 reply_id——单聊 worker 无 task_id（非 create_react_agent
-        # 执行路径），前端 task 25 会改用 data.reply_id 归并（复用 coordStreaming 同款流式气泡）。
-        # 当前前端 useBusEvent 的 task_token 分支按 d.task_id 归并且「未带 task_id 丢弃」——
-        # 故 task 24 的事件此刻会被前端丢弃（不渲染流式气泡），task 25 接通 reply_id 归并后才真正
-        # 生效。这与 coordinator 当初推 coordinator_token 时前端尚未接通的状态一致——后端先行、
-        # 前端后接，分两 task 落地降低回归面。
-        extractor = _ContentExtractor()
-        start = time.monotonic()
-        raw_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        final_tokens = 0
-        final_reasoning_tokens = 0
-        async for content_delta, reasoning_delta, usage, reasoning_usage in chat_completion_stream(
-            config,
-            [
-                {"role": "system", "content": state.get("system_prompt", "") or ""},
-                {"role": "user", "content": prompt},
-            ],
-        ):
-            if content_delta:
-                raw_parts.append(content_delta)
-                # 推可见回复的解码增量（跳过 JSON 骨架），按 reply_id 归并。emit 失败
-                # 不阻断 brain 决策（WS 推送是 best-effort，前端断连等不应让 worker 回复挂）。
-                extractor.feed(content_delta)
-                piece = extractor.take()
-                if piece:
-                    try:
-                        await emit_task_token(
-                            state.get("group_id", ""),
-                            reply_id,
-                            state.get("agent_id", ""),
-                            "streaming",
-                            piece,
-                        )
-                    except Exception:
-                        logger.exception(
-                            "[worker %s] failed to emit task_token delta",
-                            state.get("agent_name"),
-                        )
-            if reasoning_delta:
-                reasoning_parts.append(reasoning_delta)
-                # 推推理链逐字增量（task-思考流式）：与协调者 _stream_coordinator_decision
-                # 同款 emit_coordinator_reasoning，按 reply_id 归并。前端 coordReasoning[reply_id]
-                # 实时累加 → 流式气泡的「思考过程」折叠区逐字流式 + 自动展开（思考结束自动收起，
-                # 然后流式输出正文）。复用 coordinator_reasoning 通道而非新造 task_reasoning——单聊
-                # worker 的可见正文已用同一 reply_id 归并进 coordStreaming[reply_id]（task_token 分支），
-                # 思考与正文同 reply_id，前端同一流式气泡天然同时接收两者，零新增归并逻辑。
-                # best-effort：emit 失败不阻断 brain 决策（WS 推送是 fire-and-forget）。
-                try:
-                    await emit_coordinator_reasoning(
-                        state.get("group_id", ""),
-                        state.get("agent_id", ""),
-                        reply_id,
-                        reasoning_delta,
-                    )
-                except Exception:
-                    logger.exception(
-                        "[worker %s] failed to emit reasoning delta",
-                        state.get("agent_name"),
-                    )
-            if usage is not None:
-                final_tokens = usage
-            if reasoning_usage is not None:
-                final_reasoning_tokens = reasoning_usage
-        raw = "".join(raw_parts)
-        elapsed_ms = int((time.monotonic() - start) * 1000)
-        model = str(config.get("model") or "")
+        # 流式采集真实 usage + 耗时 + model + reasoning，逐字推 task_token/reasoning（best-effort）。
+        # _stream_brain_decision 返七元组（与协调者 _stream_coordinator_decision 同形），
+        # 本函数据此装配 _stream_stats，经 node_chat/ask 落盘到 agent_reply.data —— 定稿气泡
+        # 据此渲染「model · Ns · ↓ N tokens（含 N 推理）」状态行（与协调者 node_chat 同形，
+        # 前端 extractCoordStats 不区分来源）。原非流式 chat_completion 丢弃 usage，worker 回复
+        # 无状态行（只有协调者有）。
+        reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = (
+            await _stream_brain_decision(
+                config,
+                messages,
+                state.get("group_id", ""),
+                state.get("agent_id", ""),
+            )
+        )
         decision = _parse_brain_decision(raw)
-        # usage 未到（provider 不回 usage 或中断）→ 退化为粗估 len//3（与协调者
-        # _stream_coordinator_decision 的 live_tokens 启发式一致），保证状态行总有数。
-        tokens = final_tokens if final_tokens else max(1, len(raw) // 3)
-        reasoning_tokens = final_reasoning_tokens  # 0 for non-reasoning models
-        reasoning_text = "".join(reasoning_parts)
         stats: dict[str, Any] = {
             "reply_id": reply_id,
             "elapsed_ms": elapsed_ms,

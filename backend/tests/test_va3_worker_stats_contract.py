@@ -115,7 +115,9 @@ def assert_contract() -> list[str]:
             print("[3] OK  reasoning 条件塞（非空才塞，与协调者必塞口径差异——前端 extractCoordReasoning 兼容 undefined）")
 
     # ── [4] usage 未到退粗估 len//3（与协调者 live_tokens 一致）──
-    m_fallback = re.search(r"tokens\s*=\s*final_tokens\s+if\s+final_tokens\s+else\s+max\(1,\s*len\(raw\)\s*//\s*3\)", worker)
+    # B3 抽出 _stream_brain_decision 后变量名 raw → raw_full（镜像协调者 raw_full），
+    # 两种写法都接受（兼容未来微调），核心契约「usage 未到退 len//3 粗估」不变。
+    m_fallback = re.search(r"tokens\s*=\s*final_tokens\s+if\s+final_tokens\s+else\s+max\(1,\s*len\(raw(?:_full)?\)\s*//\s*3\)", worker)
     if not m_stats:
         errs.append("[3] stats 块未找到（[4] 依赖同位置）")
     elif not m_fallback:
