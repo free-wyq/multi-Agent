@@ -44,6 +44,7 @@ function mapKind(type: string): string {
   switch (type) {
     case 'task_tool': return 'tool'
     case 'task_think': return 'think'
+    case 'task_token': return 'token'
     case 'task_log': return 'log'
     case 'task_dispatch': return 'dispatch'
     case 'task_complete': return 'complete'
@@ -243,7 +244,10 @@ export function useBusEvent(groupId: string | null) {
       // coordinator_token 例外：content 是逐字 delta（truthy），若进 logs 会把每个
       // token 都当一条日志灌进 LogPanel，且 coordinator_token 不在 CHAT_MESSAGE_TYPES
       // 白名单（本就不该成气泡）。从源头排除，避免流式 delta 污染日志流。
-      if (d.content && d.type !== 'coordinator_token') {
+      // task_token 同理（PL-08 create_react_agent 逐字 token + task 25 worker 单聊
+      // 流式 token）：content 是逐字 delta，进 logs 会把每个 token 当一条日志灌 LogPanel，
+      // 且 task_token 不在白名单（本就不该成独立气泡）。从源头排除。
+      if (d.content && d.type !== 'coordinator_token' && d.type !== 'task_token') {
         const entry: LogEntry = {
           id: d.id || `ipc-${ts}`,
           agentId: d.sender_id,
@@ -301,29 +305,55 @@ export function useBusEvent(groupId: string | null) {
       }
 
       // → streaming token 增量拼接（PL-08 逐字流式）
-      // 每个 task_token 事件按 task_id 累加 content delta；
-      // task_complete / task_failed / task_dispatch 收尾时清空对应 task 的缓冲，
-      // 避免「上一轮生成内容」残留到新一轮。未带 task_id 的 token 丢弃（无法归并）。
+      // 两条归并路径，按 task_id 是否「真任务 id」分流：
+      //  1. 真 task_token（task_id 形如 `task_xxx`，PL-08 create_react_agent 执行路径）：
+      //     按 task_id 累加进 streaming[task_id]，由 ChatPanel.streamingBubbles 渲染
+      //     （executing agent 的 current_task_id 取对应缓冲）。task_complete/failed/dispatch
+      //     收尾时清空对应 task 缓冲。
+      //  2. worker 单聊 task_token（task 24，task_id 是 reply_id hex，无 `task_` 前缀）：
+      //     单聊 worker 无 task_id，后端把 reply_id 塞进 task_id 槽位。归并进
+      //     coordStreaming[reply_id]——复用协调者流式气泡渲染（coordinatorStreamingBubbles
+      //     按 reply_id 取缓冲），单聊回复逐字流式可见。收尾靠持久化 agent_reply 落地触发
+      //     finalizedBubbles 退场（已有逻辑），不在此清缓冲（worker 无 done phase 事件）。
+      //     用 task_id 前缀判定路径：`task_` 前缀 → 真 task（PL-08）；否则 → worker 单聊 reply_id。
+      //     后端 task id 一律 `_next_id("task")` = `task_` + hex（crud._PREFIX_MAP），reply_id 是
+      //     裸 uuid4().hex（无前缀），故前缀判定可靠不混淆。
       if (d.type === 'task_token') {
         if (d.content && d.task_id) {
-          setStreaming((prev) => ({
-            ...prev,
-            [d.task_id as string]: (prev[d.task_id as string] || '') + d.content,
-          }))
+          const key = d.task_id as string
+          if (key.startsWith('task_')) {
+            // PL-08 真 task 执行流式 → streaming[task_id]
+            setStreaming((prev) => ({
+              ...prev,
+              [key]: (prev[key] || '') + d.content,
+            }))
+          } else {
+            // worker 单聊流式（reply_id）→ coordStreaming[reply_id]，复用协调者流式气泡渲染
+            setCoordStreaming((prev) => ({
+              ...prev,
+              [key]: (prev[key] || '') + d.content,
+            }))
+          }
         }
       } else if (
         d.type === 'task_complete' ||
         d.type === 'task_failed' ||
         d.type === 'task_dispatch'
       ) {
+        // 收尾清 PL-08 真 task 的流式缓冲（task_id 前缀）。worker 单聊 reply_id 缓冲
+        // 不在此清——单聊回复无 task_complete 事件（非执行路径），靠持久化 agent_reply
+        // 落地触发 finalizedBubbles 退场（finalizedBubbles 的 replied 判定过滤掉定稿气泡，
+        // coordStreaming[reply_id] 残留也无害——下轮新 reply_id 覆盖，旧 key 不再写）。
         if (d.task_id) {
           const tid = d.task_id as string
-          setStreaming((prev) => {
-            if (!(tid in prev)) return prev
-            const next = { ...prev }
-            delete next[tid]
-            return next
-          })
+          if (tid.startsWith('task_')) {
+            setStreaming((prev) => {
+              if (!(tid in prev)) return prev
+              const next = { ...prev }
+              delete next[tid]
+              return next
+            })
+          }
         }
       }
 
