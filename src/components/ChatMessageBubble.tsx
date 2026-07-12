@@ -31,6 +31,12 @@ interface ChatMessageBubbleProps {
   /** 该消息关联的任务的工具调用事件（kind==='tool'，已由父组件按 agent+task 过滤）。
    *  空数组则不渲染工具摘要区。每条 task_tool 事件 data 含 {phase:'start'|'end', name, args?, output?}。 */
   toolEvents?: TraceEvent[]
+  /** 该消息关联的任务的深度思考事件（kind==='think'，已由父组件按 task_id 过滤）。
+   *  即 worker 在 ReAct 循环里 on_chat_model_end 流出的中间推理片段（registry.on_log
+   *  think→emit_task_think，data {phase:'thinking'|'final'}）。空数组则不渲染思考折叠区。
+   *  复用协调者 reasoning 折叠区视觉（task 19 渲染）——worker think 是 ReAct 中间步，与该
+   *  task 最终回复不重复，故可安全作为气泡内折叠块（区别于 coordinator_think 即回复正文）。 */
+  thinkEvents?: TraceEvent[]
   /** 是否正在流式生成（PL-08 逐字 token）。true → 气泡加 streaming 描边 + 正文尾追加闪烁光标。 */
   isStreaming?: boolean
   /** ST-04：是否失败定稿（task_failed 收尾）。true → 气泡加红描边标记失败语义。 */
@@ -119,6 +125,7 @@ export default function ChatMessageBubble({
   reasoningTokens,
   timestamp,
   toolEvents = [],
+  thinkEvents = [],
   isStreaming = false,
   isFailed = false,
   isUser = false,
@@ -173,6 +180,12 @@ export default function ChatMessageBubble({
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
   const hasReasoning = !!(reasoning && reasoning.length > 0)
+  // ST-05（task 18 归并 / task 19 渲染）：worker ReAct 中间思考事件（task_think，data.phase
+  // 'thinking'|'final'）。thinkEvents 由父组件（ChatPanel.thinkEventsByTask）按 task_id 过滤后
+  // 传入。task 18 完成归并管道（prop + 守卫）；渲染为气泡内折叠区的实现见 task 19。
+  // hasThinks 让「既无工具也无内容也无思考」的防御兜底放行，使纯思考气泡（content 为空但有
+  // think 事件）仍能渲染——流式 worker 可能在 task_token 到达前先流 task_think（thinking phase）。
+  const hasThinks = thinkEvents.length > 0
   // 折叠区标题「思考过程（N tokens）」的 token 数：优先用后端 stats 推的真实 reasoning_tokens；
   // 流式前 ~200ms 首个 stats 未到时用 reasoning.length//3 临时估算（与后端 live_reasoning_tokens
   // 同启发式）。用 token 不用字符数——与状态行「↓ N tokens」同单位。
@@ -180,8 +193,8 @@ export default function ChatMessageBubble({
     reasoningTokens && reasoningTokens > 0
       ? reasoningTokens
       : Math.max(1, Math.ceil((reasoning?.length || 0) / 3))
-  // 既无工具也无内容也无推理且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
-  if (!hasTools && !hasContent && !hasReasoning && !isStreaming) return null
+  // 既无工具也无内容也无推理也无思考且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
+  if (!hasTools && !hasContent && !hasReasoning && !hasThinks && !isStreaming) return null
 
   return (
     <div
