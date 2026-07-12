@@ -662,13 +662,24 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
     await emit_coordinator_think(
         state["group_id"], state["agent_id"], decision["action"], decision["content"]
     )
-    return {
+    result: dict[str, Any] = {
         "action_taken": decision["action"],
         "reply_content": decision["content"],
-        "dispatch_plan": decision.get("plan", []),
         # carry the per-turn streaming stats through the graph to node_chat
         "_stream_stats": decision.get("_stream_stats"),
     }
+    # Only replace the resident dispatch_plan on a dispatch action. A chat/ask/
+    # continue turn must NOT clobber a resident pending plan — the user may ask
+    # a side question while a plan awaits confirmation (PL-02). The dispatch_plan
+    # reducer is ``replace_value`` (last-write-wins, state.py), so returning
+    # ``dispatch_plan: []`` here (decision["plan"] is [] for non-dispatch
+    # actions) would wipe the pending plan: the PlanConfirmCard vanishes, the
+    # 确认/修改/直接干 buttons disappear, and a later /plan/confirm 409s with
+    # "no pending plan to confirm". Omitting the key leaves the resident plan
+    # untouched (LangGraph only runs the reducer when the node returns the key).
+    if decision["action"] == "dispatch":
+        result["dispatch_plan"] = decision.get("plan", [])
+    return result
 
 
 async def node_chat(state: CoordinatorState) -> dict:

@@ -75,6 +75,7 @@ mindmap
     协调调度
       意图分析与任务拆解
       DAG 依赖并行派发
+      计划确认 · 确认/修改/直接干
       计划可视化
       汇总汇报
     子智能体执行
@@ -105,6 +106,7 @@ mindmap
 | 智能体中心 | `api/agents.py` `models/agent.py` | `AgentPage.tsx` | M1/M2 |
 | 群组协作 | `api/groups.py` `engine/mention.py` | `GroupPage.tsx` | M3 |
 | 协调者调度 | `engine/coordinator.py` `dispatcher.py` | `LeaderPanel.tsx` | M3/M4 |
+| 计划确认 | `engine/coordinator.py` `api/plan.py` `engine/mention.py` | `PlanConfirmCard.tsx` | M12 |
 | 子智能体执行 | `engine/worker.py` `agent_loop.py` `tools.py` | `WorkerTrace.tsx` | M5/M10 |
 | 任务管理 | `api/tasks.py` | `TaskPage.tsx` | M4 |
 | 技能系统 | `api/skills.py` `agent_executor.py` | `SkillPage.tsx` | M7 |
@@ -137,9 +139,18 @@ sequenceDiagram
     REG-->>CO: asyncio.Queue 唤醒
     CO->>LLM: chat_completion 决策 action=dispatch
     CO->>BUS: emit_coordinator_think + emit_coordinator_plan
+    CO->>CO: 默认 wait_confirm → graph END，计划驻留引擎内存
+    BUS-->>F: WS 推送计划
+    F-->>U: 计划卡片（确认继续 / 修改 / 直接干）
+
+    U->>F: 点确认继续
+    F->>API: POST /api/groups/{id}/plan/confirm
+    API->>REG: route_plan_confirm → push_notify(plan_confirm)
+    REG-->>CO: asyncio.Queue 唤醒
+    CO->>CO: classify 识别 plan_confirm → 直跳 dispatch_next（绕过 LLM）
     CO->>REG: push_task → 第一个 worker
-    BUS-->>F: WS 推送计划+派工
-    F-->>U: 看到协作计划
+    BUS-->>F: WS 推送派工
+    F-->>U: 步骤徽标变「已派发」
 
     REG-->>WK: asyncio.Queue 唤醒 worker
     WK->>LLM: create_react_agent + astream_events
@@ -207,6 +218,18 @@ sequenceDiagram
 ### 7. @mention 智能路由 + 防循环
 
 群聊消息中的 @mention 自动路由到对应智能体。30 秒防循环机制，避免两个智能体互相 @ 死循环。
+
+### 8. 计划确认闭环（PL-02/PL-03）
+
+协调者拆解出协作计划后**默认不立即派发**——`node_dispatch` 广播计划后 graph END，计划驻留引擎内存态（`engine._dispatch_plan`，方案 B），等用户确认后再 resume，把「人审」补进自主规划流程：
+
+- **确认继续**：`POST /api/groups/{id}/plan/confirm` → `route_plan_confirm` 推 `plan_confirm` notify → `classify` 节点识别 → 直跳 `dispatch_next` fan-out，绕过 LLM 零成本恢复。
+- **直接干**：`POST /api/groups/{id}/plan/direct` → 置 `group.config.auto_confirm=True`，本群后续计划自动派发不再确认。
+- **修改**：`POST /api/groups/{id}/plan/modify` → patch 步骤指令/依赖后被改步复位 pending + 重广播 + 确认派发。
+
+前端 `PlanConfirmCard`（插在消息流顶部）展示步骤 + 状态徽标 + 三动作按钮，409 时静默从真源 `/api/groups/{id}/plan` 重拉驻留计划对齐。
+
+> 关键约束：非 dispatch 动作（chat/ask/continue）**不回写** `dispatch_plan`——否则 `replace_value` reducer 会用空 `[]` 抹掉驻留计划，确认卡片凭空消失、再点确认 409。`node_llm_decide` 只在 `action=dispatch` 时返回该 key，LangGraph 不跑 reducer 即保留驻留态。
 
 ## 技术栈
 
@@ -325,10 +348,10 @@ multi-Agent/
 - [x] MCP 外部工具集成（langchain-mcp-adapters，M9）
 - [x] 定时任务（APScheduler + 复用 push_task + 执行历史，M8）
 - [x] 黑盒透明化 UI（typed BusEventData + LeaderPanel + WorkerTrace 监控，M11）
+- [x] 计划确认闭环（PL-02 确认/修改 + PL-03 直接干，引擎内存态驻留 + classify 绕过 LLM resume）
 - [x] Apache License 2.0 开源协议
 - [ ] 执行可控：停止执行 / 超时降级 / 失败重派
 - [ ] 产物交付：交付物下载 / 文件浏览
-- [ ] 计划确认：用户确认协作计划后执行
 - [ ] 打包发布（PyInstaller + electron-builder）
 
 ## License
