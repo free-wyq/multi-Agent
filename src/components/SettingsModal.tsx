@@ -9,23 +9,11 @@
  *  - MCP、技能直接复用全屏路由页（McpPage/SkillPage），它们自带数据拉取与 height:100%+overflowY:auto
  *    根容器，放进右侧时外层已 overflowY auto，让其自然铺；
  *  - 记忆是占位（后端 /api/memory 端点待补）；
- *  - 模型服务商：多 provider 管理（providerApi CRUD + activate），新增/编辑共用一个 Modal 表单。
+ *  - 模型服务商：多 provider 管理（providerApi CRUD + activate），新增/编辑委托 ProviderEditor 组件
+ *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
  */
 import { useEffect, useState } from 'react'
-import {
-  Modal,
-  Input,
-  Button,
-  Form,
-  Spin,
-  Empty,
-  Tag,
-  message,
-  Select,
-  InputNumber,
-  Switch,
-  Popconfirm,
-} from 'antd'
+import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm } from 'antd'
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -35,11 +23,8 @@ import {
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
-import {
-  providerApi,
-  type LlmProvider,
-  type LlmProviderPayload,
-} from '../services/api'
+import ProviderEditor from './ProviderEditor'
+import { providerApi, type LlmProvider } from '../services/api'
 
 interface SettingsModalProps {
   open: boolean
@@ -63,38 +48,6 @@ const NAV_ITEMS: NavItem[] = [
 /** 品牌蓝：仅用于选中项左条 + 选中文字强调，主体保持浅灰白。 */
 const BRAND_BLUE = '#0A5ACF'
 
-/** 常见 provider 选项（Select 下拉，用户也可自定义输入）。 */
-const PROVIDER_OPTIONS = [
-  { label: 'OpenAI', value: 'openai' },
-  { label: 'DeepSeek', value: 'deepseek' },
-  { label: 'Anthropic', value: 'anthropic' },
-  { label: 'Kimi (Moonshot)', value: 'kimi' },
-  { label: '智谱 GLM', value: 'glm' },
-]
-
-/** 新增/编辑服务商表单内部 state。 */
-interface ProviderFormState {
-  name: string
-  provider: string
-  model: string
-  base_url: string
-  api_key: string
-  temperature: number
-  max_tokens: number
-  is_active: boolean
-}
-
-const EMPTY_FORM: ProviderFormState = {
-  name: '',
-  provider: 'openai',
-  model: '',
-  base_url: '',
-  api_key: '',
-  temperature: 0.0,
-  max_tokens: 4096,
-  is_active: true,
-}
-
 export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   // 选中项：默认 MCP。destroyOnClose 卸载后再次打开会重置为 'mcp'（符合「每次打开都从首项开始」预期）。
   const [activeKey, setActiveKey] = useState<NavItem['key']>('mcp')
@@ -106,11 +59,10 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
   const [providers, setProviders] = useState<LlmProvider[]>([])
   const [providersLoading, setProvidersLoading] = useState(false)
   const [providersLoaded, setProvidersLoaded] = useState(false)
-  // 编辑/新增 Modal
+  // 编辑/新增 Modal：editingProvider=null 走新增态，非 null 走编辑态（把整个 provider 对象传给
+  // ProviderEditor，由其 providerToFormState 灌入；destroyOnClose 下每次重开重新初始化，无需同步）。
   const [formOpen, setFormOpen] = useState(false)
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [formState, setFormState] = useState<ProviderFormState>(EMPTY_FORM)
-  const [formSaving, setFormSaving] = useState(false)
+  const [editingProvider, setEditingProvider] = useState<LlmProvider | null>(null)
   // 开关切换中态（按 provider id 防抖，避免连点）
   const [togglingId, setTogglingId] = useState<string | null>(null)
 
@@ -134,67 +86,31 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
       .finally(() => setProvidersLoading(false))
   }
 
-  // ── 服务商 CRUD handlers ──
+  // ── 服务商列表 handlers（CRUD 委托 ProviderEditor，本组件只管列表 + 开关 + 删除）──
 
-  /** 打开新增表单。 */
+  /** 打开新增表单：清空 editingProvider（新增态）后开 Modal。 */
   const handleAddProvider = () => {
-    setEditingId(null)
-    // 若当前无服务商，默认 is_active=true（第一个自然成为当前）
-    setFormState({ ...EMPTY_FORM, is_active: providers.length === 0 })
+    setEditingProvider(null)
     setFormOpen(true)
   }
 
-  /** 打开编辑表单：把 provider 数据灌入 formState（api_key 留空，placeholder 提示「留空则不修改」）。 */
+  /** 打开编辑表单：记下待编辑 provider 对象后开 Modal。 */
   const handleEditProvider = (p: LlmProvider) => {
-    setEditingId(p.id)
-    setFormState({
-      name: p.name,
-      provider: p.provider,
-      model: p.model,
-      base_url: p.base_url,
-      api_key: '',
-      temperature: p.temperature,
-      max_tokens: p.max_tokens,
-      is_active: p.is_active,
-    })
+    setEditingProvider(p)
     setFormOpen(true)
   }
 
-  /** 保存（新增 or 更新）。 */
-  const handleSaveProvider = async () => {
-    if (!formState.name.trim()) {
-      message.warning('服务商名称不能为空')
-      return
-    }
-    const payload: LlmProviderPayload = {
-      name: formState.name.trim(),
-      provider: formState.provider,
-      model: formState.model,
-      base_url: formState.base_url,
-      temperature: formState.temperature,
-      max_tokens: formState.max_tokens,
-      is_active: formState.is_active,
-    }
-    // api_key 仅在用户输入了值时才传（空串 = 留空不修改）
-    if (formState.api_key) {
-      payload.api_key = formState.api_key
-    }
-    setFormSaving(true)
-    try {
-      if (editingId) {
-        await providerApi.update(editingId, payload)
-        message.success('服务商已更新')
-      } else {
-        await providerApi.create(payload)
-        message.success('服务商已新增')
-      }
-      setFormOpen(false)
-      refreshProviders()
-    } catch (e) {
-      message.error(`保存服务商失败：${e instanceof Error ? e.message : String(e)}`)
-    } finally {
-      setFormSaving(false)
-    }
+  /** ProviderEditor 保存成功后回调：刷新列表 + 关闭 Modal。 */
+  const handleEditorSaved = () => {
+    refreshProviders()
+    setFormOpen(false)
+    setEditingProvider(null)
+  }
+
+  /** ProviderEditor 关闭回调（取消/点 X）：仅关 Modal，不刷新（无变更）。 */
+  const handleEditorClose = () => {
+    setFormOpen(false)
+    setEditingProvider(null)
   }
 
   /** 删除服务商。 */
@@ -450,84 +366,15 @@ export default function SettingsModal({ open, onClose }: SettingsModalProps) {
         </div>
       </div>
 
-      {/* 新增/编辑服务商 Modal（嵌套） */}
-      <Modal
+      {/* 新增/编辑服务商：委托 ProviderEditor（多模型目录 + 连接级配置）。
+        *  editingProvider=null 走新增态，传 undefined；非 null 走编辑态，传 provider 对象。
+        *  onSaved=刷新列表+关 Modal；onClose=仅关 Modal（取消）。 */}
+      <ProviderEditor
         open={formOpen}
-        title={editingId ? '编辑服务商' : '新增服务商'}
-        onCancel={() => setFormOpen(false)}
-        onOk={handleSaveProvider}
-        confirmLoading={formSaving}
-        okText="保存"
-        cancelText="取消"
-        destroyOnClose
-        width={520}
-      >
-        <Form layout="vertical" style={{ marginTop: 8 }}>
-          <Form.Item label="名称" required>
-            <Input
-              value={formState.name}
-              onChange={(e) => setFormState({ ...formState, name: e.target.value })}
-              placeholder="如 OpenAI 官方、DeepSeek"
-            />
-          </Form.Item>
-          <Form.Item label="Provider 类型">
-            <Select
-              value={formState.provider}
-              onChange={(v) => setFormState({ ...formState, provider: v })}
-              options={PROVIDER_OPTIONS}
-              showSearch
-              allowClear
-            />
-          </Form.Item>
-          <Form.Item label="模型">
-            <Input
-              value={formState.model}
-              onChange={(e) => setFormState({ ...formState, model: e.target.value })}
-              placeholder="如 glm-5.1"
-            />
-          </Form.Item>
-          <Form.Item label="Base URL">
-            <Input
-              value={formState.base_url}
-              onChange={(e) => setFormState({ ...formState, base_url: e.target.value })}
-              placeholder="https://api.openai.com/v1"
-            />
-          </Form.Item>
-          <Form.Item label="API Key">
-            <Input.Password
-              value={formState.api_key}
-              onChange={(e) => setFormState({ ...formState, api_key: e.target.value })}
-              placeholder={editingId ? '留空则不修改' : 'sk-...'}
-            />
-          </Form.Item>
-          <Form.Item label="Temperature">
-            <InputNumber
-              value={formState.temperature}
-              onChange={(v) =>
-                setFormState({ ...formState, temperature: v ?? 0.0 })
-              }
-              step={0.1}
-              style={{ width: '100%' }}
-            />
-          </Form.Item>
-          <Form.Item label="Max Tokens">
-            <InputNumber
-              value={formState.max_tokens}
-              onChange={(v) =>
-                setFormState({ ...formState, max_tokens: v ?? 4096 })
-              }
-              step={256}
-              style={{ width: '100%' }}
-            />
-          </Form.Item>
-          <Form.Item label="设为当前服务商">
-            <Switch
-              checked={formState.is_active}
-              onChange={(v) => setFormState({ ...formState, is_active: v })}
-            />
-          </Form.Item>
-        </Form>
-      </Modal>
+        provider={editingProvider ?? undefined}
+        onSaved={handleEditorSaved}
+        onClose={handleEditorClose}
+      />
     </Modal>
   )
 }
