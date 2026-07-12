@@ -107,7 +107,23 @@ async def emit_task_completed(
     success: bool,
     result: str,
     exit_code: int | None,
+    artifact: dict[str, Any] | None = None,
 ) -> None:
+    """Task completion (success → ``task_complete`` / failure → ``task_failed``).
+
+    ``artifact`` is the optional file-artifact manifest (PL-12
+    ``scan_workspace_artifacts`` output ``{"files": [{name, path, size,
+    modified_at}, ...]}``) produced during this task. Only forwarded on the
+    success path — a failed/cancelled/timed-out task leaves no useful artifacts
+    (the engine only scans on success, see ``registry._run_worker_task``).
+    Thread into ``data.artifact`` so the frontend finalized bubble can render a
+    download card (task 21) without an extra round-trip to the task row. Omitted
+    (absent key) when ``None`` so legacy consumers that ignore ``data`` are
+    unaffected.
+    """
+    data: dict[str, Any] = {"exit_code": exit_code}
+    if artifact:
+        data["artifact"] = artifact
     await bus_manager.emit(
         group_id,
         {
@@ -118,7 +134,7 @@ async def emit_task_completed(
             "receiver_id": "broadcast",
             "type": "task_complete" if success else "task_failed",
             "content": result,
-            "data": {"exit_code": exit_code},
+            "data": data,
             "timestamp": _ts(),
         },
     )

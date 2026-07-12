@@ -385,6 +385,7 @@ class AgentEngine:
             success,
             (result.get("output") or "")[:500],
             exit_code,
+            artifact,
         )
 
         await complete_task(
