@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
@@ -277,8 +277,50 @@ function SenderName({ id, agents }: { id: string; agents: AgentDefinition[] }) {
   return agent?.name ?? id.slice(0, 8) + '...'
 }
 
-/** 高亮 @mention 的消息内容 */
-function HighlightMessage({ content, members }: { content: string | null; members: GroupMember[] }) {
+/** 高亮 @mention 的消息内容
+ *
+ *  B29 重渲染优化：`memo` + `memberNames` 稳定集两道防线。
+ *
+ *  问题：`HighlightMessage` 在 `chatMessages.flatMap` 里每条非用户消息渲染一次。ChatPanel
+ *  是个大组件——`chatMessages`/`events`/`streaming`/`coordStreaming`/`agentStatuses` 任一
+ *  变化（高频：task_token 流式逐字推送、stats ~200ms 节流、reasoning delta 攒批 flush）都
+ *  触发整个 ChatPanel 重渲染，`flatMap` 重跑，**每条历史消息的 HighlightMessage 都重跑
+ *  `content.split(regex)` + `members.some()`**——N 条消息 × 每次 setState 全量重算。长会话
+ *  （几百条历史）+ 流式期高频重渲染，split+some 重复算 O(N×M) 是肉眼可见的卡顿源。
+ *
+ *  优化（两道防线，互补）：
+ *  1. **`memo` 包裹**：props `content`(string|null) + `members`(GroupMember[]) 浅比较。`content`
+ *     是消息正文（持久化后不变，除非编辑——本项目无编辑），`members` 是 ChatView state（切群时
+ *     整体替换，平时稳定）。故 memo 让「props 没变的历史气泡」直接跳过重渲染——流式期只有当前
+ *     正在流式的那条气泡（content 在变）+ stats 行重渲染，其余历史气泡 memo 命中零开销。
+ *  2. **`memberNames` 稳定集**：原 `members.some(m => m.agent_name===name || m.alias===name)`
+ *     每个候选 mention 都 O(M) 扫全部成员。改 `useMemo` 把 members 投影成 `Set<string>`（agent_name
+ *     + alias 去空），查 mention 成员身份从 O(M).some → O(1).has。`memberNames` deps=[members]——
+ *     members 引用变（切群）才重算 Set，平时稳定引用复用。
+ *
+ *  为何 memo 的 props 浅比较够用：`content` 是 string（值类型，=== 可靠）；`members` 是数组引用
+ *  （ChatView 切群才 setMembers 新数组，平时同引用）。memo 默认 `Object.is` 浅比较这两类 props
+ *  正确——不需自定义 areEqual。`members` 投影成 Set 后，HighlightMessage 内部不再依赖 members 数组
+ *  结构（只读 Set），故 members 引用即使每帧变（不会，但假设）也不破 memo——memo 比 props 早短路。
+ */
+const HighlightMessage = memo(function HighlightMessage({
+  content,
+  members,
+}: {
+  content: string | null
+  members: GroupMember[]
+}) {
+  // 成员名稳定集：agent_name + alias（去空）→ Set，mention 成员身份查 O(1)。
+  // deps=[members]：members 引用变（切群/加成员）才重算 Set，平时稳定复用。
+  const memberNames = useMemo(() => {
+    const s = new Set<string>()
+    for (const m of members) {
+      if (m.agent_name) s.add(m.agent_name)
+      if (m.alias) s.add(m.alias)
+    }
+    return s
+  }, [members])
+
   if (!content) return <Text type="secondary" italic>（空消息）</Text>
   const parts = content.split(/(@[^\s,，.。!！?？:：;；\n]+)/g)
   return (
@@ -286,8 +328,7 @@ function HighlightMessage({ content, members }: { content: string | null; member
       {parts.map((part, i) => {
         if (part.startsWith('@')) {
           const name = part.slice(1)
-          const isMember = members.some((m) => m.agent_name === name || m.alias === name)
-          if (isMember) {
+          if (memberNames.has(name)) {
             return <Tag key={i} color="blue" style={{ margin: 0, padding: '0 4px', lineHeight: '18px' }}>{part}</Tag>
           }
         }
@@ -295,7 +336,7 @@ function HighlightMessage({ content, members }: { content: string | null; member
       })}
     </span>
   )
-}
+})
 
 /** 获取成员显示名 */
 function getMemberDisplayName(member: GroupMember) {
