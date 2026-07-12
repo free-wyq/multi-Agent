@@ -218,6 +218,17 @@ export default function ChatPanel({
   const [chatInput, setChatInput] = useState('')
   const chatEndRef = useRef<HTMLDivElement>(null)
   const messagesContainerRef = useRef<HTMLDivElement>(null)
+  // 用户是否「贴底」——上滑读历史时置 false，新消息/流式增量不再自动滚到底，
+  // 避免用户正读着旧消息被一把拽回最底部。发送消息 / 切群 时重置为 true。
+  const stickToBottomRef = useRef(true)
+
+  const handleContainerScroll = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    // 80px 阈值：距底不足一个气泡高度即视为贴底，新消息继续自动跟随。
+    stickToBottomRef.current =
+      el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }, [])
 
   // ── @mention 自动补全 ──
   const [mentionOpen, setMentionOpen] = useState(false)
@@ -371,14 +382,24 @@ export default function ChatPanel({
   }, [logs, chatGroupId])
 
   // 滚动到底部（仅滚动消息列表容器内部，不触发页面级滚动）。
+  // 贴底跟随：仅在 stickToBottomRef 为 true（用户在底部附近）时自动滚，
+  // 用户上滑读历史时新消息/流式增量不强行拽回——微信/钉钉同款手感。
+  // 同步滚动放在 rAF 内：chatMessages 变化到 DOM 完成布局有间隙，
+  // 直接 scrollTo 时 scrollHeight 可能还是旧值 → 滚不到底。
   useEffect(() => {
+    if (!stickToBottomRef.current) return
     const el = messagesContainerRef.current
     if (!el) return
-    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
-  }, [chatMessages])
+    const raf = requestAnimationFrame(() => {
+      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+    })
+    return () => cancelAnimationFrame(raf)
+  }, [chatMessages, streamingBubbles, coordinatorStreamingBubbles, finalizedBubbles])
 
   // 切换群组时加载历史消息（chatGroupId 来自全局 active group）。
   useEffect(() => {
+    // 切群即贴底：新群历史消息加载后应展示最新一条，默认停在底部。
+    stickToBottomRef.current = true
     if (chatGroupId) {
       setChatLoading(true)
       messageApi
@@ -398,6 +419,8 @@ export default function ChatPanel({
     setChatInput('')
     setMentionOpen(false)
     setSlashOpen(false)
+    // 发送即跟到底：用户主动发消息必然想看回复，强制贴底，回复/流式自动滚入视野。
+    stickToBottomRef.current = true
 
     // SH-08 busy_input_mode：若有 agent 正在 executing，回车发送前先 interrupt 当前任务
     // （taskApi.stop）。语义：用户在智能体忙碌时回车输入 = 想打断它说新话，而非排队。
@@ -681,7 +704,11 @@ export default function ChatPanel({
           min-height:auto（不小于内容高），消息多了列表会撑高把输入框顶出可视区，
           表现为「输入框随消息一起漂浮滚动」。minHeight:0 解除该下限 → flex:1 收缩到
           父容器剩余高度，overflowY:auto 才真正在列表内部滚动，输入框（flexShrink:0）钉底。 */}
-      <div style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' }}>
+      <div
+        ref={messagesContainerRef}
+        onScroll={handleContainerScroll}
+        style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' }}
+      >
         {showPlanCard && plan && chatGroupId && (
           <PlanConfirmCard groupId={chatGroupId} plan={plan} refreshPlan={refreshPlan} />
         )}
