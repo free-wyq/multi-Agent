@@ -78,27 +78,6 @@ async def _unified_reply(
         await cb(content)
 
 
-def _build_context(memory: list[dict], agent_name: str) -> str:
-    """Render the recent memory into a context string (Rust build_context).
-
-    仅保留给旧路径/单聊兜底用——群聊成员的 brain 上下文现由
-    ``_build_context_from_db`` 直接从 messages 表真源拉取（见 ``node_brain_decide``），
-    不再依赖这套 self._memory + append 时序 + role 渲染。
-    """
-    recent = (memory or [])[-5:]
-    if not recent:
-        return "（无历史对话）"
-    lines = []
-    for m in recent:
-        role = m.get("role", "user")
-        content = m.get("content", "")
-        if role == "user":
-            lines.append(f"用户: {content}")
-        else:
-            lines.append(f"{agent_name}: {content}")
-    return "\n".join(lines)
-
-
 async def _build_context_from_db(group_id: str, coordinator_id: str) -> str:
     """从 messages 表真源拉最近若干条，拼成带发送者身份的上下文。
 
