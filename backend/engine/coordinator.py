@@ -826,11 +826,21 @@ async def node_dispatch(state: CoordinatorState, config: Optional[RunnableConfig
     on the resume turn it returns ``dispatch_next`` (the plan is unchanged, so
     the reducer no-ops).
 
+    Note: the ``wait_confirm`` value in the interrupt-turn return is inert.
+    Because ``interrupt()`` suspends the graph *inside* this node (before the
+    node returns), the ``route_after_dispatch`` conditional edge is never
+    evaluated on the interrupt turn -- the graph simply pauses. The sentinel
+    exists only so a future state inspection / defensive read sees a
+    recognizable action; it is never routed on. On the resume turn the node
+    returns ``dispatch_next`` and the edge routes to fan-out. This is why
+    ``route_after_dispatch`` has no ``wait_confirm -> END`` branch: the pause
+    is owned by ``interrupt()`` mid-node, not by the router.
+
     config / 3.10 workaround: the ``config`` kwarg is injected by LangGraph
-    (declared as ``RunnableConfig | None``) and fed to ``_runnable_config_ctx``
-    around ``interrupt`` so the contextvar ``var_child_runnable_config`` is
-    visible inside ``interrupt`` on Python 3.10 (see
-    ``_runnable_config_ctx``).
+    (declared as ``Optional[RunnableConfig]``) and fed to
+    ``_runnable_config_ctx`` around ``interrupt`` so the contextvar
+    ``var_child_runnable_config`` is visible inside ``interrupt`` on Python
+    3.10 (see ``_runnable_config_ctx``).
     """
     plan = list(state.get("dispatch_plan") or [])
     plan_summary = "\n".join(
@@ -866,8 +876,10 @@ async def node_dispatch(state: CoordinatorState, config: Optional[RunnableConfig
     # pause (interrupt itself does not write state). A later
     # ``Command(resume=...)`` re-runs this node — the second interrupt() call
     # returns the resume value immediately, and we fall through to fan-out.
-    # action_taken="wait_confirm" marks the interrupt turn so route_after_dispatch
-    # edges to END; on resume the node returns dispatch_next (see below).
+    # The interrupt turn's ``action_taken`` is left as ``wait_confirm`` (inert
+    # — the conditional edge after this node is never evaluated on the
+    # interrupt turn because ``interrupt()`` suspends mid-node before the
+    # return); on resume the node returns ``dispatch_next``.
     with _runnable_config_ctx(config):
         resume = interrupt({"plan": plan})
     # On resume: the plan is already checkpointed (returned on the interrupt
@@ -987,21 +999,25 @@ def route_after_llm_decide(state: CoordinatorState) -> str:
 
 
 def route_after_dispatch(state: CoordinatorState) -> str:
-    """PL-02/PL-03: after announcing the plan, either fan out or end (interrupt).
+    """PL-02/PL-03: after announcing the plan, either fan out or end.
 
     ``node_dispatch`` returns ``action_taken="dispatch_next"`` in two cases:
-    - ``auto_confirm`` / "直接干" mode (PL-03): the node skipped the interrupt
+    - ``auto_confirm`` / direct-run mode (PL-03): the node skipped the interrupt
       and wants immediate fan-out.
     - resume turn: the interrupt was resumed via ``Command(resume=...)``, the
       node fell through to ``dispatch_next`` to fan out the (possibly amended)
       plan.
 
-    Otherwise (``wait_confirm`` — the interrupt turn) the graph ends here: the
-    plan was returned on this turn so the ``replace_value`` reducer checkpointed
-    it before the pause, and a later ``Command(resume=...)`` re-enters
-    ``node_dispatch`` to complete the loop. No hand-written ``wait_confirm→END``
-    branch is needed beyond this default — interrupt naturally suspends, and the
-    interrupt turn's ``END`` is just "graph returned without routing on".
+    Otherwise the graph ends here. This covers BOTH the interrupt turn
+    (``node_dispatch`` called ``interrupt()`` which suspended the graph
+    mid-node -- the conditional edge is never evaluated because the node never
+    returned, so this function is not even called) AND a defensive fallback for
+    any future ``action_taken`` value that is not ``dispatch_next``. There is
+    deliberately no ``wait_confirm`` branch: the pause is realized by
+    ``interrupt()`` suspending inside ``node_dispatch``, not by routing to END
+    on a sentinel action. The plan is checkpointed via the ``replace_value``
+    reducer on the interrupt turn's partial return, and a later
+    ``Command(resume=...)`` re-enters ``node_dispatch`` to complete the loop.
     """
     action = state.get("action_taken", "")
     if action in ("dispatch_next", "confirm_dispatch", "direct_run"):
