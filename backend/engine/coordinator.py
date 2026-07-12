@@ -214,6 +214,10 @@ async def _detect_residual_interrupt(
         # Observability-only: never block classify routing on a state lookup.
         # ``extra.event`` tags the degradation so it is collectible (not silent)
         # when debug logging is enabled; ``exc_info`` keeps the traceback.
+        # B28 错误出口统一：本块是 coordinator 全文唯一不走 exception 级日志的
+        # ``except Exception``——是有意为之（observability-only state 探针，非 best-effort
+        # WS 推送）。其余 best-effort emit/reply 一律 exception 级日志非静默——见
+        # test_vh25 锁契约（debug 级 + exc_info 是 observability 降级的正确 level，不当 error 刷）。
         logger.debug(
             "[coordinator] residual-interrupt probe skipped",
             exc_info=True,
@@ -1383,7 +1387,16 @@ async def _stream_coordinator_decision(
             piece = extractor.take()
             if piece:
                 live_tokens += max(1, len(piece) // 3)
-                await emit_coordinator_token(group_id, coordinator_id, reply_id, piece)
+                # B28 错误出口统一：与 emit_coordinator_reasoning(1383) /
+                # emit_coordinator_stats(1411/1433) 同款 best-effort + logger.exception
+                # ——WS 推送失败只跳过当前 token delta 不中断流式。原裸 await 会把单次
+                # emit 异常冒泡出整个 _stream_coordinator_decision，被 node_llm_decide
+                # 粗兜底成 chat 兜底回复，丢失后续 token + stats + reasoning（一次 WS
+                # 抖动整条回复报废，与 reasoning/stats 的容忍度不对称）。
+                try:
+                    await emit_coordinator_token(group_id, coordinator_id, reply_id, piece)
+                except Exception:
+                    logger.exception("[coordinator] failed to emit token delta")
         if usage is not None:
             final_tokens = usage
         if reasoning_usage is not None:
