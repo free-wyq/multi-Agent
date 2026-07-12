@@ -177,6 +177,11 @@ async def _stream_brain_decision(
     reasoning_parts: list[str] = []
     final_tokens = 0
     final_reasoning_tokens = 0
+    # running estimate of emitted reasoning chars → a coarse token estimate for
+    # the live reasoning counter (reasoning_tokens only lands on the final chunk)
+    # ——与协调者 live_reasoning_tokens 同款，作 final_reasoning_tokens 的 fallback 估值
+    # （provider 不回 reasoning_usage 时退化，避免 reasoning 模型 stats 显示 0 推理）。
+    live_reasoning_tokens = 0
     async for content_delta, reasoning_delta, usage, reasoning_usage in chat_completion_stream(
         config, messages
     ):
@@ -196,6 +201,7 @@ async def _stream_brain_decision(
                         "[worker %s] failed to emit task_token delta", agent_id
                     )
         if reasoning_delta:
+            live_reasoning_tokens += max(1, len(reasoning_delta) // 3)
             reasoning_parts.append(reasoning_delta)
             # 推推理链逐字增量（task-思考流式）：与协调者 _stream_coordinator_decision
             # 同款 emit_coordinator_reasoning，按 reply_id 归并。前端 coordReasoning[reply_id]
@@ -223,7 +229,13 @@ async def _stream_brain_decision(
     # usage 未到（provider 不回 usage 或中断）→ 退化为粗估 len//3（与协调者
     # _stream_coordinator_decision 的 live_tokens 启发式一致），保证状态行总有数。
     tokens = final_tokens if final_tokens else max(1, len(raw_full) // 3)
-    reasoning_tokens = final_reasoning_tokens  # 0 for non-reasoning models
+    # reasoning_tokens fallback：provider 不回 reasoning_usage 时退化为 live_reasoning_tokens
+    # 粗估（与协调者 _stream_coordinator_decision 的 live_reasoning_tokens 兜底一致），避免
+    # reasoning 模型只回 content usage 不回 reasoning_usage 时 stats 显示 0 推理（与实际有推理链
+    # 不符）。非推理模型 reasoning_parts 空 → live_reasoning_tokens=0 → 仍如实显示 0。
+    reasoning_tokens = (
+        final_reasoning_tokens if final_reasoning_tokens else live_reasoning_tokens
+    )
     return reply_id, raw_full, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text
 
 
