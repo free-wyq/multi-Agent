@@ -8,8 +8,7 @@
  *  - 测试连通/拉取模型（PE-05）：仅编辑态（新增态无 id）；
  *  - 保存（PE-06）：构造 payload（恰好一个 is_default）→ create/update → onSaved。
  *
- * PE-01 当前为骨架：props + formState（models + 8 连接级字段）+ Modal 容器，
- * 组件可独立编译；SettingsModal 尚未接入（PE-07 改造）。
+ * SettingsModal 尚未接入（PE-07 改造）。
  */
 import { useState, useEffect } from 'react'
 import {
@@ -31,7 +30,12 @@ import {
 import type { TableProps } from 'antd'
 import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { providerApi } from '../services/api'
-import type { LlmProvider, LlmModel, ProviderPreset } from '../services/api'
+import type {
+  LlmProvider,
+  LlmModel,
+  LlmProviderPayload,
+  ProviderPreset,
+} from '../services/api'
 
 /** 服务商表单内部 state（PE-01：含 models 目录 + 8 连接级字段）。 */
 interface ProviderFormState {
@@ -273,13 +277,77 @@ export default function ProviderEditor({
     }
   }
 
-  // PE-06 将实现完整保存：name 必填校验 → 构造 LlmProviderPayload（api_key 仅非空传；
-  //  models 整体传并保证恰好一个 is_default，无 default 时把首个置 true）→
-  //  编辑态 update / 新增态 create → message.success + onSaved + 关闭。
-  // 骨架阶段不落库，仅占位触发回调关闭（SettingsModal 未接入，不会被触发）。
+  // ── PE-06 保存 ──
+  const [saving, setSaving] = useState(false)
+
+  /**
+   * 保存：name 必填 trim → 构造 LlmProviderPayload → create/update → onSaved + 关闭。
+   *
+   * payload 字段取舍：
+   *  - name：必填 trim（空串直接 warning 拦截，不进网络层）；
+   *  - api_key：仅 formState.api_key 非空时传（编辑态留空 = 不修改，与 placeholder
+   *    「留空则不修改」一语义；新增态空串本就无密钥可传）；
+   *  - models：整体传（即使空数组也传——显式 [] = 清空目录，undefined = 不动目录，
+   *    此处用户在编辑器内主动管理目录，传 [] 才能落库「删光」语义）。
+   *    单 default 不变量：保存前规整——若已有 default 则仅保留首个（防多选），
+   *    若无 default 且目录非空则把首个置 true（防「无 default」态）。
+   *  - 其余连接级字段全量传（Form 项即真源，与旧 SettingsModal 全量提交一语义）。
+   *
+   * extra_headers 处于 error 态时拦截保存（非法 JSON 不应落库）。
+   * 失败 message.error（不关闭 Modal，保留用户输入便于改后重试）。
+   */
   const handleSave = async () => {
-    onSaved?.()
-    onClose?.()
+    const name = formState.name.trim()
+    if (!name) {
+      message.warning('服务商名称不能为空')
+      return
+    }
+    if (extraHeadersError === 'error') {
+      message.warning('Extra Headers JSON 格式错误，请先修正')
+      return
+    }
+    // 单 default 规整：保留首个 default（防多选），无 default 且非空则置首个。
+    const defaultIdx = formState.models.findIndex((m) => m.is_default)
+    const models: LlmModel[] = formState.models.map((m, i) => ({
+      ...m,
+      is_default:
+        defaultIdx >= 0 ? i === defaultIdx : i === 0,
+    }))
+
+    const payload: LlmProviderPayload = {
+      name,
+      provider: formState.provider,
+      base_url: formState.base_url,
+      temperature: formState.temperature,
+      max_tokens: formState.max_tokens,
+      models,
+      api_version: formState.api_version,
+      organization: formState.organization,
+      extra_headers: formState.extra_headers,
+      request_timeout: formState.request_timeout,
+      max_retries: formState.max_retries,
+      proxy: formState.proxy,
+    }
+    if (formState.api_key) {
+      payload.api_key = formState.api_key
+    }
+
+    setSaving(true)
+    try {
+      if (isEdit && provider) {
+        await providerApi.update(provider.id, payload)
+        message.success('服务商已更新')
+      } else {
+        await providerApi.create(payload)
+        message.success('服务商已新增')
+      }
+      onSaved?.()
+      onClose?.()
+    } catch (e) {
+      message.error(`保存服务商失败：${e instanceof Error ? e.message : String(e)}`)
+    } finally {
+      setSaving(false)
+    }
   }
 
   // ── PE-04 模型目录 Table handlers ──
@@ -526,6 +594,7 @@ export default function ProviderEditor({
       destroyOnClose
       onCancel={onClose}
       onOk={handleSave}
+      confirmLoading={saving}
       okText="保存"
       cancelText="取消"
     >
