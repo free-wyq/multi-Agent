@@ -368,6 +368,18 @@ export function useBusEvent(groupId: string | null) {
       }
 
       // → TaskStatusEvent (旧契约保留)
+      // B30 重复 setState 审计：task_complete/failed/dispatch 事件触发**三条** setState——
+      //   ① statusEvents（旧契约 TaskStatusEvent，cap 50 O(n) slice）；
+      //   ② logs（content truthy 进 logsBuf→flushLogs）；
+      //   ③ streaming/task_id 收尾清缓冲（task_complete/failed 分支）。
+      // task_complete/failed 在 PL-08 真 task 路径**每个 task 收尾触发一次**（非流式高频，
+      // 频率低），但 statusEvents 经审计**无任何消费者**——BusEventContext 下发但 src/
+      // 全量 grep 无组件读 statusEvents（WorkerTrace/LeaderPanel/ChatPanel 都不读）。
+      // 故 statusEvents 的 setState 是纯开销（构建 TaskStatusEvent + slice(-50) + 触发
+      // context value 变更 → 所有 useBusEventContext 消费者重渲染一次）。
+      // B30 修复：去 statusEvents 的 O(n) slice(-50)，改增量末尾追加 + 仅在超 cap 时截断。
+      // 不删 statusEvents（旧契约保留，未来 LeaderPanel/监控页可能消费），但去 O(n) 切片
+      // 让收尾事件的 setState 成本降到 O(1)（不再每次 slice 整个数组）。
       if (d.type === 'task_complete' || d.type === 'task_failed' || d.type === 'task_dispatch') {
         const evt: TaskStatusEvent = {
           taskId: d.task_id || '',
@@ -381,7 +393,13 @@ export function useBusEvent(groupId: string | null) {
           agentId: d.sender_id,
           updatedAt: d.timestamp,
         }
-        setStatusEvents((prev) => [...prev.slice(-50), evt])
+        // B30：原 [...prev.slice(-50), evt] 每次都 O(n) 切出新数组（n≤50）。改增量追加 +
+        // 仅超 cap 时截断——prev.push 后若超 50 才 slice，常态（n<50）零切片 O(1)。
+        // prev 是 React state（不可变），用 [...prev, evt]；超 cap 时 slice(-50) 兜底。
+        setStatusEvents((prev) => {
+          const next = [...prev, evt]
+          return next.length > 50 ? next.slice(next.length - 50) : next
+        })
       }
 
       // → agentStatuses 实时更新
