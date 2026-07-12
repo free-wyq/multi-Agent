@@ -51,6 +51,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 WORKER = REPO / "backend" / "engine" / "worker.py"
 COORD = REPO / "backend" / "engine" / "coordinator.py"
+REPLY = REPO / "backend" / "engine" / "reply.py"
 PANEL = REPO / "src" / "components" / "ChatPanel.tsx"
 
 # worker stats 必塞的 5 key（reasoning 条件塞，非必塞——与协调者口径差异）。
@@ -189,19 +190,25 @@ def assert_contract() -> list[str]:
     else:
         print("[10] OK  node_execute → _unified_reply 不传 data（模板「收到，我来...」announce 无 stats）")
 
-    # ── [11] worker _unified_reply 同款落盘（crud.create_message + emit）──
+    # ── [11] worker _unified_reply 同款落盘（B10 后改调 persist_agent_reply 单一真源）──
     reply_body = _fn_body(worker, "_unified_reply")
     if not reply_body:
         errs.append("[11] worker _unified_reply 函数体未找到")
     else:
-        if '"data": data' not in reply_body:
-            errs.append('[11] worker _unified_reply 未透传 "data": data 到 crud.create_message')
+        if "persist_agent_reply" not in reply_body:
+            errs.append("[11] worker _unified_reply 未调 persist_agent_reply（B10 单一真源未接线）")
         else:
-            print('[11] OK  worker _unified_reply → crud.create_message({"data": data}) 持久化')
-        if "emit_message_added(msg.model_dump())" not in reply_body:
-            errs.append("[11] worker _unified_reply 未 emit_message_added(msg.model_dump())")
+            print("[11] OK  worker _unified_reply → persist_agent_reply（B10 单一真源）")
+        # persist_agent_reply 内部透传 data + emit（engine/reply.py 锁，与协调者同一真源）
+        reply_mod = REPLY.read_text(encoding="utf-8")
+        if '"data": data' not in reply_mod:
+            errs.append('[11] persist_agent_reply 未透传 "data": data 到 crud.create_message')
         else:
-            print("[11] OK  worker _unified_reply → emit_message_added(msg.model_dump())（emit 带 data）")
+            print('[11] OK  persist_agent_reply → crud.create_message({"data": data}) 持久化')
+        if "emit_message_added(msg.model_dump())" not in reply_mod:
+            errs.append("[11] persist_agent_reply 未 emit_message_added(msg.model_dump())")
+        else:
+            print("[11] OK  persist_agent_reply → emit_message_added(msg.model_dump())（emit 带 data）")
 
     # ── [12] 前端 extractCoordStats 不区分来源（worker/coordinator 同段代码渲染）──
     panel = PANEL.read_text(encoding="utf-8")

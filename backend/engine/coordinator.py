@@ -29,8 +29,8 @@ from events import (
     emit_coordinator_stats,
     emit_coordinator_think,
     emit_coordinator_token,
-    emit_message_added,
 )
+from engine.reply import persist_agent_reply
 from llm.client import chat_completion, chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.json_stream import ContentExtractor
@@ -134,11 +134,13 @@ async def _unified_reply(
     content: str,
     data: dict[str, Any] | None = None,
 ) -> None:
-    """Persist an agent_reply message + emit + mention route (Rust engine.reply).
+    """Persist an agent_reply + emit + mention route (Rust engine.reply).
 
-    Delegates persistence to crud.create_message and emission to emit_message_added.
-    Mention routing is performed by the engine's callback (set via
-    ``set_reply_callback``) so recent_routes anti-loop state is owned by the engine.
+    Persistence + emit delegated to ``persist_agent_reply`` (engine.reply, B10)
+    so the agent_reply shape is a single source shared with the registry's
+    execute-path announce and the worker graph's reply. Mention routing stays
+    here, performed by the engine's callback (set via ``set_reply_callback``)
+    so recent_routes anti-loop state is owned by the engine.
 
     ``data`` is written onto the persisted message so it survives reload /
     reconnect. The coordinator chat path passes the streaming run-stats
@@ -147,18 +149,7 @@ async def _unified_reply(
     retires (stats don't vanish on completion). Other callers (announce /
     summarize / recovery) leave ``data=None`` — no behavior change.
     """
-    msg = await crud.create_message(
-        {
-            "group_id": group_id,
-            "task_id": None,
-            "sender_id": agent_id,
-            "receiver_id": "broadcast",
-            "type": "agent_reply",
-            "content": content,
-            "data": data,
-        }
-    )
-    await emit_message_added(msg.model_dump())
+    await persist_agent_reply(group_id, agent_id, content, data)
     cb = _REPLY_CB.get()
     if cb is not None:
         await cb(content)

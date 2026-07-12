@@ -18,8 +18,9 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
 from engine.inbox import push_task
+from engine.reply import persist_agent_reply
 from engine.state import WorkerState
-from events import emit_coordinator_reasoning, emit_message_added, emit_task_token
+from events import emit_coordinator_reasoning, emit_task_token
 from llm.client import chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.json_stream import ContentExtractor
@@ -54,6 +55,11 @@ async def _unified_reply(
 ) -> None:
     """Persist an agent_reply + emit + mention route (Rust engine.reply).
 
+    Persistence + emit delegated to ``persist_agent_reply`` (engine.reply, B10)
+    so the agent_reply shape is a single source shared with the coordinator
+    graph's reply and the registry's execute-path announce. Mention routing
+    stays here, via the engine's reply callback (set per-invoke).
+
     ``data`` 写到持久化 message 上（存活重载/重连）。worker chat/ask 路径把
     brain 流式采集的 run-stats（``{elapsed_ms, tokens, model, reasoning_tokens,
     reasoning?}``）传进来，定稿气泡据此渲染「model · Ns · ↓ N tokens（含 N 推理）」
@@ -61,18 +67,7 @@ async def _unified_reply(
     不区分来源，按 data.elapsed_ms 是否存在判定渲染）。execute 路径回复是模板化
     announce（``收到，我来 {preview}...``），不匹配 brain token，不带 stats（传 None）。
     """
-    msg = await crud.create_message(
-        {
-            "group_id": group_id,
-            "task_id": None,
-            "sender_id": agent_id,
-            "receiver_id": "broadcast",
-            "type": "agent_reply",
-            "content": content,
-            "data": data,
-        }
-    )
-    await emit_message_added(msg.model_dump())
+    await persist_agent_reply(group_id, agent_id, content, data)
     cb = _REPLY_CB.get()
     if cb is not None:
         await cb(content)

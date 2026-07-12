@@ -67,14 +67,21 @@ def assert_contract() -> list[str]:
 
     # ── A. execute 路径 announce 无 stats ──
     # [1] registry._reply 恒 data=None + docstring 标注已知限制
+    #     B10 抽 persist_agent_reply 后，_reply 改调 persist_agent_reply(..., None)
+    #     传 None 锁「恒 data=None」。两种断言都接受：内联 "data": None（B10 前）
+    #     或 调 persist_agent_reply(...None)（B10 后）。核心契约「_reply 不传 stats」不变。
     reply_body = _fn_body(registry, "_reply")
     if not reply_body:
         errs.append("[1] registry._reply 函数体未找到")
     else:
-        if '"data": None' not in reply_body:
+        inline_data_none = '"data": None' in reply_body
+        delegates_none = "persist_agent_reply" in reply_body and re.search(
+            r"persist_agent_reply\([^)]*,\s*None\s*\)", reply_body, re.S
+        ) is not None
+        if not (inline_data_none or delegates_none):
             errs.append("[1] registry._reply 未恒 data=None（announce 不该带 stats）")
         else:
-            print("[1] OK  registry._reply 恒 data=None（execute announce 无 stats）")
+            print("[1] OK  registry._reply 恒 data=None（execute announce 无 stats，B10 调 persist_agent_reply(...None)）")
         if "已知限制" not in reply_body or "保守不改" not in reply_body:
             errs.append("[1] _reply docstring 未标注「已知限制/保守不改」（A6 评估结论未锁）")
         else:

@@ -43,6 +43,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 COORD = REPO / "backend" / "engine" / "coordinator.py"
+REPLY = REPO / "backend" / "engine" / "reply.py"
 BUS = REPO / "backend" / "events" / "bus.py"
 CRUD = REPO / "backend" / "store" / "crud.py"
 ENTITIES = REPO / "backend" / "store" / "entities.py"
@@ -164,7 +165,9 @@ def assert_contract() -> list[str]:
         print('[6] OK  node_chat → _unified_reply(data=state.get("_stream_stats"))')
 
     # ── [7] _unified_reply 持久化 data + emit 带 data ──
-    # 抽 _unified_reply 函数体（到下一个顶层 async/def）
+    # B10 抽 persist_agent_reply 到 engine/reply.py 后，_unified_reply 改调它（单一真源），
+    # 不再内联 crud.create_message + emit_message_added。改为锁「_unified_reply 调
+    # persist_agent_reply 透传 data」+「persist_agent_reply 内部透传 data + emit」（行为等价）。
     m_reply_fn = re.search(
         r"async def _unified_reply\([^)]*\)(.*?)(?=\nasync def |\ndef )",
         coord,
@@ -174,15 +177,21 @@ def assert_contract() -> list[str]:
     if not reply_body:
         errs.append("[7] _unified_reply 函数体未找到")
     else:
-        # crud.create_message 调用块里应含 "data": data
-        if '"data": data' not in reply_body:
-            errs.append('[7] _unified_reply 的 crud.create_message 调用未透传 "data": data')
+        # _unified_reply 调 persist_agent_reply 透传 data
+        if "persist_agent_reply" not in reply_body:
+            errs.append("[7] _unified_reply 未调 persist_agent_reply（B10 单一真源未接线）")
         else:
-            print('[7] OK  _unified_reply → crud.create_message({"data": data}) 持久化 data')
-        if "emit_message_added(msg.model_dump())" not in reply_body:
-            errs.append("[7] _unified_reply 未 emit_message_added(msg.model_dump())")
+            print("[7] OK  _unified_reply → persist_agent_reply（B10 单一真源）")
+        # persist_agent_reply 内部透传 data + emit（engine/reply.py 锁）
+        reply_mod = REPLY.read_text(encoding="utf-8")
+        if '"data": data' not in reply_mod:
+            errs.append('[7] persist_agent_reply 未透传 "data": data 到 crud.create_message')
         else:
-            print("[7] OK  _unified_reply → emit_message_added(msg.model_dump())（emit 事件带 data）")
+            print('[7] OK  persist_agent_reply → crud.create_message({"data": data}) 持久化 data')
+        if "emit_message_added(msg.model_dump())" not in reply_mod:
+            errs.append("[7] persist_agent_reply 未 emit_message_added(msg.model_dump())")
+        else:
+            print("[7] OK  persist_agent_reply → emit_message_added(msg.model_dump())（emit 事件带 data）")
 
     # ── [8] create_message 透传 data 到 MessageEntity.data（JSON 列）──
     crud = CRUD.read_text(encoding="utf-8")

@@ -27,6 +27,7 @@ from engine.inbox import (
 )
 from engine.agent_executor import execute_agent_task
 from engine.mention import clear_group_routes, route_mentions
+from engine.reply import persist_agent_reply
 from engine.worker import build_worker_graph
 from engine.workspace import scan_workspace_artifacts
 from langgraph.graph import END
@@ -715,6 +716,12 @@ class AgentEngine:
     async def _reply(self, content: str) -> None:
         """Persist an agent_reply message + emit + mention route (Rust engine.reply).
 
+        Persistence + emit delegated to ``persist_agent_reply`` (engine.reply, B10)
+        so the agent_reply shape is a single source shared with the coordinator /
+        worker graphs' reply paths. Mention routing stays here — the engine owns
+        its context and calls ``route_mentions`` directly (not via a callback,
+        which is the graph-node mechanism).
+
         ``data`` 恒为 None：execute 路径的收尾 announce（``任务完成 🎉`` /
         ``执行出错了`` / ``⏹ 任务已停止`` / ``⏱ 超时``）是模板化文本，非 brain
         流式 LLM 输出，不携带 model/elapsed_ms/tokens 等 stats —— 前端
@@ -736,18 +743,7 @@ class AgentEngine:
         execute 路径只服务真工程任务（写代码/改配置/运行命令/调工具），其 announce
         不带 stats 是设计取舍而非 bug。若未来要修，见上述三步改造路径。
         """
-        msg = await crud.create_message(
-            {
-                "group_id": self.group_id,
-                "task_id": None,
-                "sender_id": self.agent_id,
-                "receiver_id": "broadcast",
-                "type": "agent_reply",
-                "content": content,
-                "data": None,
-            }
-        )
-        await emit_message_added(msg.model_dump())
+        await persist_agent_reply(self.group_id, self.agent_id, content, None)
         # 防循环用群级共享 dict（见 mention._get_recent_routes）——原 self._recent_routes
         # 是 per-engine，反向清键打不中对方 dict 导致接龙 4 轮断。传 None 让 route_mentions
         # 自动取群级共享视图。
