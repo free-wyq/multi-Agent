@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
-import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined } from '@ant-design/icons'
+import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
   taskApi,
@@ -26,6 +26,7 @@ import StopTaskButton from './StopTaskButton'
 import SlashAutocomplete from './SlashAutocomplete'
 import ChatMessageBubble from './ChatMessageBubble'
 import BubbleSpeakButton from './BubbleSpeakButton'
+import BubbleCopyButton from './BubbleCopyButton'
 import './ChatPanel.css'
 
 const { Text } = Typography
@@ -72,6 +73,48 @@ function getAgentColor(id: string, agents: AgentDefinition[]): string {
 function formatElapsed(ms: number): string {
   if (ms < 1000) return `${ms}ms`
   return `${(ms / 1000).toFixed(1)}s`
+}
+
+/** 取 ISO 时间戳的「年-月-日」本地日期 key（用于判断两条消息是否同一天）。 */
+function dateKey(iso: string): string {
+  const d = new Date(iso)
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+}
+
+/** 日期分隔条标签：今天/昨天/更早完整日期。与微信/钉钉同款口语化。 */
+function dateLabel(iso: string): string {
+  const d = new Date(iso)
+  const now = new Date()
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const that = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const diffDays = Math.round((today.getTime() - that.getTime()) / 86400000)
+  if (diffDays === 0) return '今天'
+  if (diffDays === 1) return '昨天'
+  // 同年省年份，跨年带年份
+  return d.getFullYear() === now.getFullYear()
+    ? `${d.getMonth() + 1}月${d.getDate()}日`
+    : `${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日`
+}
+
+/**
+ * 日期分组分隔条：本条与上一条不在同一天时返回分隔条节点，否则返回 null。
+ * 调用方在 flatMap 里把返回值（可能 null）与消息一起铺平；null 会被 React 忽略。
+ *
+ * 用法（在 chatMessages.flatMap 回调里）：
+ *   const dateDivider = renderDateDivider(msg.created_at, lastDateRef.current)
+ *   if (dateDivider) lastDateRef.current = msg.created_at
+ *   return [dateDivider, <MsgBubble .../>]
+ *
+ * lastDateRef 跨渲染保持上一条日期——切群时由切群 effect 重置为 null，
+ * 避免新群首条消息被误判与旧群末条同天而漏渲染分隔条。
+ */
+function renderDateDivider(iso: string, prevIso: string | null): React.ReactNode {
+  if (prevIso !== null && dateKey(prevIso) === dateKey(iso)) return null
+  return (
+    <div key={`date-${iso}`} className="chat-date-divider">
+      <span className="chat-date-label">{dateLabel(iso)}</span>
+    </div>
+  )
 }
 
 /** 从持久化 agent_reply 的 data 字段提取协调者流式统计。
@@ -250,13 +293,31 @@ export default function ChatPanel({
   // 不依赖前后端时钟同步（WSL2 后端时钟与 Windows 浏览器时钟常偏差秒级，时间戳比较会误判）。
   // 新到的 WS agent_reply 是全新 id，不在集合中 → 朗读 + 记入集合。
   const spokenIdsRef = useRef<Set<string>>(new Set())
+  // 日期分组：上一条消息的 created_at，用于判断本条是否跨天（跨天则插日期分隔条）。
+  // 切群时重置为 null，让新群首条消息渲染分隔条（否则可能误判与旧群末条同天）。
+  const lastDateRef = useRef<string | null>(null)
+
+  // 是否展示「回到底部」浮动按钮：上滑离底部一段距离（>120px）时显示。
+  // 距底 80px 内视为贴底（与 stickToBottomRef 同阈值，但浮动按钮用更宽的 120px 门槛，
+  // 让用户上滑一点点就能看到回底入口，不必滑到顶才有）。
+  const [showScrollBottom, setShowScrollBottom] = useState(false)
 
   const handleContainerScroll = useCallback(() => {
     const el = messagesContainerRef.current
     if (!el) return
+    const distToBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     // 80px 阈值：距底不足一个气泡高度即视为贴底，新消息继续自动跟随。
-    stickToBottomRef.current =
-      el.scrollHeight - el.scrollTop - el.clientHeight < 80
+    stickToBottomRef.current = distToBottom < 80
+    // 120px 阈值：离底超过一个多气泡高度就显示「回到底部」浮动按钮。
+    setShowScrollBottom(distToBottom > 120)
+  }, [])
+
+  // 点击「回到底部」：平滑滚到底 + 重置贴底态（后续新消息自动跟随）。
+  const scrollToBottom = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    stickToBottomRef.current = true
+    el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [])
 
   // ── @mention 自动补全 ──
@@ -452,6 +513,8 @@ export default function ChatPanel({
     // 清空已朗读 id 集合：新群的 WS 消息都是新 id，旧集合的 id 与新群无关，
     // 保留会误把「旧群某条 id 恰好与新群新消息前缀撞上」的概率（虽极低）清掉。
     spokenIdsRef.current = new Set()
+    // 重置日期分组游标：新群首条消息应渲染日期分隔条（与旧群末条无关联）。
+    lastDateRef.current = null
     if (chatGroupId) {
       setChatLoading(true)
       messageApi
@@ -713,7 +776,7 @@ export default function ChatPanel({
   }
 
   return (
-    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden' }}>
+    <div style={{ flex: 1, minHeight: 0, display: 'flex', flexDirection: 'column', overflow: 'hidden', position: 'relative' }}>
       {/* 聊天头部 — 钉钉风格：标题 + 人数，右侧停止按钮 + 群信息按钮。
           hideHeader 时整段不渲染（左右布局由 ChatView 统一画标题区，避免双头部）。 */}
       {group && !hideHeader && (
@@ -776,8 +839,13 @@ export default function ChatPanel({
         ) : chatMessages.length === 0 ? (
           <Empty description="暂无消息，开始对话吧" />
         ) : (
-          chatMessages.map((msg) => {
+          chatMessages.flatMap((msg) => {
             const isUser = msg.sender_id === 'user'
+            // 日期分组：当本条与上一条不在同一天时，插一条日期分隔条。
+            // today/yesterday 用口语化标签，更早用完整日期；分隔条 sticky 顶部，
+            // 滚动时当前可见天的标签常驻顶，便于定位「这是哪天的对话」（微信/钉钉同款）。
+            const dateDivider = renderDateDivider(msg.created_at, lastDateRef.current)
+            if (dateDivider) lastDateRef.current = msg.created_at
             // SC-11：slash 命令卡片（type=slash_card）——handler 经 ctx.renderCard 推入，
             // content 存字符串（stub 占位），data.node 存富卡片 ReactNode（SC-03~10 实现）。
             // 渲染为系统消息（左对齐，头像 + 卡片 + 时间戳），不复用 HighlightMessage 的
@@ -788,7 +856,8 @@ export default function ChatPanel({
             // 挤变形（双层背景/双层圆角/padding 双挤/字段被压窄）。卡片直接裸露渲染，仅靠
             // chat-bubble-wrap 对齐头像与时间戳，宽度对系统卡片放宽到 90%（信息密集需舒展）。
             if (msg.type === 'slash_card') {
-              return (
+              return [
+                dateDivider,
                 <div key={msg.id} className="chat-msg" style={{ flexDirection: 'row' }}>
                   <ChatAvatar id="system" agents={agents} />
                   <div className="chat-bubble-wrap" style={{ flex: 1, minWidth: 0, maxWidth: 760 }}>
@@ -800,21 +869,28 @@ export default function ChatPanel({
                       {new Date(msg.created_at).toLocaleTimeString()}
                     </div>
                   </div>
-                </div>
-              )
+                </div>,
+              ]
             }
-            return (
+            return [
+              dateDivider,
               <div
                 key={msg.id}
                 className="chat-msg"
                 style={{ flexDirection: isUser ? 'row-reverse' : 'row' }}
               >
                 <ChatAvatar id={msg.sender_id} agents={agents} />
-                <div className="chat-bubble-wrap">
-                  {/* 单条气泡朗读按钮：hover 显隐，仅非用户消息且总开关开时渲染（用户自己的话不需朗读）。 */}
-                  {!isUser && tts.enabled && (
-                    <BubbleSpeakButton content={msg.content ?? ''} />
-                  )}
+                <div className={`chat-bubble-wrap${isUser ? ' chat-bubble-wrap--self' : ''}`}>
+                  {/* 单条气泡操作按钮组：hover 显隐。朗读仅非用户消息且总开关开时渲染；
+                      复制对所有消息可见（用户/agent 都可复制）。
+                      用户气泡右对齐——操作组改定位到左侧（.chat-bubble-wrap--self），
+                      否则贴在右边缘会被容器 overflow 裁切、看不到。 */}
+                  <div className="bubble-action-group">
+                    <BubbleCopyButton content={msg.content ?? ''} />
+                    {!isUser && tts.enabled && (
+                      <BubbleSpeakButton content={msg.content ?? ''} />
+                    )}
+                  </div>
                   <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
                     <SenderName id={msg.sender_id} agents={agents} />
                   </div>
@@ -903,8 +979,8 @@ export default function ChatPanel({
                     )
                   })()}
                 </div>
-              </div>
-            )
+              </div>,
+            ]
           })
         )}
         {/* ST-02：流式生成气泡——executing agent 的 streaming[task_id] 逐字渲染。
@@ -983,11 +1059,32 @@ export default function ChatPanel({
             timestamp={new Date(b.timestamp).toISOString()}
             toolEvents={toolEventsByTask[b.taskId] || []}
             isFailed={b.isFailed}
-            speakButton={tts.enabled ? <BubbleSpeakButton content={b.content} /> : undefined}
+            actionGroup={
+              <div className="bubble-action-group">
+                <BubbleCopyButton content={b.content} />
+                {tts.enabled && <BubbleSpeakButton content={b.content} />}
+              </div>
+            }
           />
         ))}
         <div ref={chatEndRef} />
       </div>
+
+      {/* 回到底部浮动按钮——用户上滑读历史时浮现，点击平滑滚回最新消息。
+          绝对定位在消息列表右下角（相对 ChatPanel 根容器），不随列表滚动（钉在可视区）。
+          showScrollBottom 由 onScroll 维护（距底 >120px 显示），微信/钉钉同款手感。 */}
+      {showScrollBottom && (
+        <Tooltip title="回到底部">
+          <Button
+            className="scroll-bottom-btn"
+            type="default"
+            shape="circle"
+            size="large"
+            icon={<VerticalAlignBottomOutlined />}
+            onClick={scrollToBottom}
+          />
+        </Tooltip>
+      )}
 
       {/* 计划确认卡——粘在输入框上方，不随消息列表滚动。
           原先卡片渲染在消息列表顶部（messagesContainerRef 内），出计划后用户一发问或协调者一回复，

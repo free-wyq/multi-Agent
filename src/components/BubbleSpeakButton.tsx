@@ -18,10 +18,13 @@ interface BubbleSpeakButtonProps {
 }
 
 export default function BubbleSpeakButton({ content }: BubbleSpeakButtonProps) {
-  const { speak, stop, speaking } = useTts()
+  const { speak, stop, speakingContent } = useTts()
+  // 仅「正在朗读且朗读的就是本条」时显示停止态——否则一条在朗读时所有气泡的按钮都变停止，
+  // 误以为每条都在读。用 speakingContent === content 精确归属。
+  const isThisSpeaking = speakingContent === content
 
   const handleClick = () => {
-    if (speaking) {
+    if (isThisSpeaking) {
       stop()
     } else {
       speak(content)
@@ -29,15 +32,15 @@ export default function BubbleSpeakButton({ content }: BubbleSpeakButtonProps) {
   }
 
   return (
-    <Tooltip title={speaking ? '停止朗读' : '朗读'}>
+    <Tooltip title={isThisSpeaking ? '停止朗读' : '朗读'}>
       <Button
         type="text"
         size="small"
-        className={`bubble-speak-btn${speaking ? ' is-speaking' : ''}`}
+        className={`bubble-action-btn${isThisSpeaking ? ' is-speaking' : ''}`}
         onClick={handleClick}
         // 朗读中高亮，提示当前正在读的是这条
-        style={{ color: speaking ? '#0A5ACF' : undefined }}
-        icon={speaking ? <PauseOutlined /> : <SoundOutlined />}
+        style={{ color: isThisSpeaking ? '#0A5ACF' : undefined }}
+        icon={isThisSpeaking ? <PauseOutlined /> : <SoundOutlined />}
       />
     </Tooltip>
   )

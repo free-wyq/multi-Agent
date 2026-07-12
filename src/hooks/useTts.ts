@@ -31,6 +31,9 @@ export interface UseTtsResult {
   voices: SpeechSynthesisVoice[]
   /** 是否正在朗读。 */
   speaking: boolean
+  /** 当前正在朗读的文本（null = 未朗读）。气泡按钮据此判断「是不是这条在读」，
+   *  避免一条在朗读时所有气泡的按钮都变停止态。 */
+  speakingContent: string | null
   /** 用当前 tts 配置朗读文本（朗读中再调会打断旧的）。 */
   speak: (text: string) => void
   /** 停止当前朗读。 */
@@ -42,6 +45,7 @@ export function useTts(): UseTtsResult {
   const supported = isTtsSupported()
   const [voices, setVoices] = useState<SpeechSynthesisVoice[]>(() => listVoices())
   const [speaking, setSpeaking] = useState(false)
+  const [speakingContent, setSpeakingContent] = useState<string | null>(null)
   // 标记本次 onend 是否由主动 stop 触发——避免 stop 后又被旧 utterance onend 误判。
   const stoppedRef = useRef(false)
 
@@ -57,6 +61,7 @@ export function useTts(): UseTtsResult {
     (text: string) => {
       if (!supported || !text) return
       stoppedRef.current = false
+      setSpeakingContent(text)
       speakEngine(
         text,
         {
@@ -68,8 +73,9 @@ export function useTts(): UseTtsResult {
         {
           onStart: () => setSpeaking(true),
           onEnd: () => {
-            // 主动 stop 时 stop() 已把 speaking 置 false，这里幂等再置一次也无妨。
+            // 自然读完或被打断：均清空 speaking + speakingContent。
             setSpeaking(false)
+            setSpeakingContent(null)
           },
         },
       )
@@ -82,7 +88,8 @@ export function useTts(): UseTtsResult {
     stoppedRef.current = true
     stopSpeak()
     setSpeaking(false)
+    setSpeakingContent(null)
   }, [supported])
 
-  return { supported, voices, speaking, speak, stop }
+  return { supported, voices, speaking, speakingContent, speak, stop }
 }

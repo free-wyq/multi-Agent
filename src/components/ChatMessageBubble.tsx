@@ -43,9 +43,9 @@ interface ChatMessageBubbleProps {
    *  协调者流式气泡用：渲染在气泡下方时间戳旁，实时刷新耗时/token/阶段。
    *  普通气泡不传（undefined → 不渲染），保持向后兼容。 */
   statusLine?: React.ReactNode
-  /** 气泡右上角的操作槽位（如朗读按钮）。父组件传 BubbleSpeakButton，hover 时显隐。
-   *  绝对定位锚点由 .chat-bubble-wrap 提供（position:relative）。不传则不渲染。 */
-  speakButton?: React.ReactNode
+  /** 气泡右上角的操作按钮组（复制/朗读等）。父组件传 .bubble-action-group 内的按钮，
+   *  hover 时显隐。绝对定位锚点由 .chat-bubble-wrap 提供（position:relative）。不传则不渲染。 */
+  actionGroup?: React.ReactNode
 }
 
 /** 单条 task_tool 事件 → 摘要行数据。 */
@@ -124,7 +124,7 @@ export default function ChatMessageBubble({
   isUser = false,
   renderContent,
   statusLine,
-  speakButton,
+  actionGroup,
 }: ChatMessageBubbleProps) {
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
@@ -191,7 +191,7 @@ export default function ChatMessageBubble({
     >
       {avatar}
       <div className="chat-bubble-wrap">
-        {speakButton}
+        {actionGroup}
         <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
           {senderName}
         </div>
