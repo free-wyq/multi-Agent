@@ -1,7 +1,9 @@
 import { useMemo, useState } from 'react'
-import { Collapse, Tag, Tooltip } from 'antd'
-import { CaretRightOutlined, ToolOutlined, BulbOutlined, FileOutlined } from '@ant-design/icons'
+import { Collapse, Tag, Tooltip, Button, message } from 'antd'
+import { CaretRightOutlined, ToolOutlined, BulbOutlined, DownloadOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
+import { groupApi } from '../services/api'
+import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
 import './ChatMessageBubble.css'
 
 /** ST-06（task 21 数据 / task 22 渲染）：worker 任务产物文件条目。
@@ -55,8 +57,15 @@ interface ChatMessageBubbleProps {
    *  空数组则不渲染下载卡。仅 finalizedBubbles（定稿气泡，task 21 从 task_complete 事件
    *  data.artifact 提取）传入——失败/取消/超时路径 artifact key 缺省（bus.py emit_task_completed
    *  仅成功路径透传 manifest），故失败气泡自然无下载卡（失败任务不留产物，语义正确）。
-   *  task 22 在此 prop 基础上渲染按扩展名图标 + 下载按钮（groupApi.downloadFileUrl）。 */
+   *  task 22 渲染按扩展名图标（fileIconFor，与 TaskPage 交付物卡同款）+ 下载按钮
+   *  （groupApi.downloadFileUrl → GET /api/groups/{id}/files/{name}，复用 PL-12 saveBlob）。 */
   artifactFiles?: ArtifactFile[]
+  /** ST-06（task 22）：下载产物所需 group_id（GET /api/groups/{id}/files/{name} 的路径段）。
+   *  由父组件传当前会话 groupId。仅 finalizedBubbles 传（产物只在定稿气泡出现）；
+   *  未传时下载按钮禁用（无 group 无法拼 URL，禁用 + tooltip 提示，不报错）。
+   *  从父组件传而非气泡内自己读 context——保持 ChatMessageBubble「纯展示」设计约定
+   *  （不订阅 context/不读 store，数据全由父注入）。 */
+  groupId?: string
   /** 是否正在流式生成（PL-08 逐字 token）。true → 气泡加 streaming 描边 + 正文尾追加闪烁光标。 */
   isStreaming?: boolean
   /** ST-04：是否失败定稿（task_failed 收尾）。true → 气泡加红描边标记失败语义。 */
@@ -105,14 +114,6 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-/** ST-06（task 21/22）：字节 → 人类可读大小（B/KB/MB），与 TaskPage.humanSize 同算法。
- *  产物下载卡展示文件大小用——保持与任务页交付物卡一致观感。 */
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
 /** 工具名 → Tag 颜色（与 WorkerTrace 工具卡视觉呼应：start 绿 / end 灰）。 */
 function toolTagColor(isEnd: boolean): string {
   return isEnd ? 'default' : 'green'
@@ -155,6 +156,7 @@ export default function ChatMessageBubble({
   toolEvents = [],
   thinkEvents = [],
   artifactFiles = [],
+  groupId,
   isStreaming = false,
   isFailed = false,
   isUser = false,
@@ -164,6 +166,30 @@ export default function ChatMessageBubble({
 }: ChatMessageBubbleProps) {
   // 多工具独立折叠：key=事件 id 的 Set。点击行 toggle 该工具展开/收起。
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // ST-06（task 22）：正在下载的产物文件 key（file.path）。下载期间该文件按钮 loading，
+  // 其余文件按钮禁用——与 TaskPage 同款单下载串行（避免并发下载多文件挤占带宽/混淆进度）。
+  const [downloading, setDownloading] = useState<string | null>(null)
+
+  // ST-06（task 22）：下载单个产物文件——复用 PL-12 groupApi.downloadFile + saveBlob，
+  // 与 TaskPage 交付物卡同入口同逻辑（GET /api/groups/{id}/files/{name} → Blob → a.download）。
+  // 无 groupId 时禁用按钮（前置守卫，不报错）；失败 toast 提示。串行：downloading 非空时其余禁用。
+  const handleArtifactDownload = async (file: ArtifactFile) => {
+    if (!groupId) {
+      message.warning('未选择群组，无法下载')
+      return
+    }
+    const key = file.path || file.name
+    setDownloading(key)
+    try {
+      const blob = await groupApi.downloadFile(groupId, file.path || file.name)
+      saveBlob(blob, file.name)
+      message.success(`已下载 ${file.name}`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDownloading(null)
+    }
+  }
 
   // toolEvents → 按时间序的摘要行（每条 task_tool 一行）。
   // 先按时间序排，再按工具名 LIFO 配对 start/end 算耗时：end 弹出最近同名未配对 start，
@@ -433,23 +459,41 @@ export default function ChatMessageBubble({
           {/* ST-06（task 21 数据管道 / task 22 渲染）：worker 任务产物下载卡。
               task_complete 事件 data.artifact.files[]（bus.py emit_task_completed 仅成功路径透传
               scan_workspace_artifacts manifest）经 ChatPanel.finalizedBubbles 提取 → artifactFiles
-              prop 传入。每文件一张小卡：按扩展名图标 + 文件名（截断 + tooltip 全 path）+ 大小
-              （humanSize B/KB/MB）+ 下载按钮（groupApi.downloadFileUrl → GET /api/groups/{id}/files/{name}，
-              与 TaskPage 交付物卡同下载入口，复用 PL-12 的 saveBlob 逻辑——task 22 落地完整下载交互，
-              本 task 21 先搭数据管道 + 占位渲染）。
-              位置在正文之下（产物是任务收尾后产出，逻辑上跟在回复之后）；失败/取消/超时任务无 artifact
-              （后端不透传），失败气泡自然无下载卡（语义正确——失败不留可用产物）。 */}
+              prop 传入。每文件一张小卡：按扩展名图标（fileIconFor，与 TaskPage 交付物卡同款映射：
+              pdf 红 / md 靛 / 图片绿 / 压缩橙 / word 蓝 / excel 绿 / ppt 橙 / 文本代码灰 / 未知灰）+
+              文件名（截断 + tooltip 全 path）+ 大小（humanSize B/KB/MB，复用 lib/fileIcon）+
+              下载按钮（groupApi.downloadFileUrl → GET /api/groups/{id}/files/{name}，复用 PL-12
+              saveBlob；与 TaskPage 交付物卡同下载入口同逻辑，单下载串行）。
+              无 groupId（罕见，父未传）→ 下载按钮禁用 + tooltip「未选群组」。
+              位置在正文之下（产物是任务收尾后产出，逻辑上跟在回复之后）；失败/取消/超时任务无
+              artifact（后端不透传），失败气泡自然无下载卡（语义正确——失败不留可用产物）。 */}
           {hasArtifacts && (
             <div className="chat-artifact-block">
-              {artifactFiles.map((f) => (
-                <div key={f.path || f.name} className="chat-artifact-card">
-                  <FileOutlined style={{ color: '#1677ff', fontSize: 14, flexShrink: 0 }} />
-                  <Tooltip title={f.path || f.name}>
-                    <span className="chat-artifact-name">{f.name}</span>
-                  </Tooltip>
-                  {f.size > 0 && <span className="chat-artifact-size">{humanSize(f.size)}</span>}
-                </div>
-              ))}
+              {artifactFiles.map((f) => {
+                const key = f.path || f.name
+                const isLoading = downloading === key
+                const disabled = !groupId || (downloading !== null && downloading !== key)
+                return (
+                  <div key={key} className="chat-artifact-card">
+                    {fileIconFor(f.name, { fontSize: 14, flexShrink: 0 })}
+                    <Tooltip title={f.path || f.name}>
+                      <span className="chat-artifact-name">{f.name}</span>
+                    </Tooltip>
+                    {f.size > 0 && <span className="chat-artifact-size">{humanSize(f.size)}</span>}
+                    <Tooltip title={!groupId ? '未选群组，无法下载' : ''}>
+                      <Button
+                        className="chat-artifact-download"
+                        type="link"
+                        size="small"
+                        icon={<DownloadOutlined />}
+                        loading={isLoading}
+                        disabled={disabled}
+                        onClick={() => handleArtifactDownload(f)}
+                      />
+                    </Tooltip>
+                  </div>
+                )
+              })}
             </div>
           )}
         </div>

@@ -1136,6 +1136,7 @@ export default function ChatPanel({
             toolEvents={toolEventsByTask[b.taskId] || []}
             thinkEvents={thinkEventsByTask[b.taskId] || []}
             artifactFiles={b.artifactFiles}
+            groupId={chatGroupId ?? undefined}
             isFailed={b.isFailed}
             actionGroup={
               <div className="bubble-action-group">

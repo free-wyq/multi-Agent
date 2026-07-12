@@ -188,4 +188,8 @@
   /* 与小卡同高，避免按钮撑高行 */
   display: inline-flex;
   align-items: center;
+  /* type=link 自带 padding 偏大，收紧到与图标行齐 */
+  padding: 0;
+  height: auto;
+  font-size: 13px;
 }

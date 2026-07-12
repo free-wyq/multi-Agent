@@ -16,7 +16,6 @@ import {
   CloseCircleOutlined,
   PauseCircleOutlined,
   DownloadOutlined,
-  FileOutlined,
   PaperClipOutlined,
 } from '@ant-design/icons'
 import type { Node, Edge } from 'reactflow'
@@ -24,6 +23,7 @@ import ReactFlow, { Background, Controls, MiniMap } from 'reactflow'
 import 'reactflow/dist/style.css'
 
 import { groupApi, taskApi, type Task, type TaskStatus } from '../services/api'
+import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
 import LogPanel from '../components/LogPanel'
 
 const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
@@ -52,13 +52,6 @@ interface ArtifactFile {
   modified_at: string
 }
 
-/** PL-12: human-readable file size (B/KB/MB). */
-function humanSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
-}
-
 /** PL-12: extract the artifact manifest's file list from a task, if any.
  *
  * The backend ``scan_workspace_artifacts`` records ``artifact`` as
@@ -85,18 +78,6 @@ function extractArtifacts(t: Task): ArtifactFile[] {
   return []
 }
 
-/** PL-12: save a Blob as a download in the browser (fallback to URL.open). */
-function saveBlob(blob: Blob, filename: string) {
-  const url = URL.createObjectURL(blob)
-  const a = document.createElement('a')
-  a.href = url
-  a.download = filename
-  document.body.appendChild(a)
-  a.click()
-  document.body.removeChild(a)
-  // revoke on next tick so the download has started
-  setTimeout(() => URL.revokeObjectURL(url), 1000)
-}
 
 function buildNodesEdges(tasks: Task[]): { nodes: Node[]; edges: Edge[] } {
   const nodes: Node[] = tasks.map((t, i) => ({
@@ -323,7 +304,7 @@ export default function TaskPage() {
                   }}
                 >
                   <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 8 }}>
-                    <FileOutlined style={{ color: '#1677ff', fontSize: 18 }} />
+                    {fileIconFor(file.name, { fontSize: 18 })}
                     <Tooltip title={file.path}>
                       <span style={{ fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                         {file.name}
