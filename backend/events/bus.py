@@ -3,14 +3,34 @@
 Frontend subscribes to `ws://localhost:8000/ws/bus/{groupId}`; the manager keeps
 a set of sockets per group and fans out event dicts. Event projection (domain →
 BusEventData) is implemented here too; the engine layer calls these in M3+.
+
+B15 全量审计 emit_* 错误处理 + 背压兜底（见 ``BusManager.emit`` docstring）：
+  - 13 个 ``emit_*`` helper 是纯投影器（构 dict → ``await bus_manager.emit``），
+    无 try/except、无静默吞没——错误处理单一真源在 ``BusManager.emit``。
+  - ``BusManager.emit`` 的 ``except Exception`` 不再静默：``logger.debug`` + exc_info
+    捕获（debug 非 exception——per-token 流式对掉线客户端重试会洪水，debug 在默认级
+    静默、排障时开 DEBUG 可见）。
+  - ``ws.send_json`` 包 ``asyncio.wait_for(timeout=WS_SEND_TIMEOUT)``——慢客户端
+    不再无限阻塞 emit 协程（流式 per-token 背压兜底），超时即 prune 该 socket。
 """
 from __future__ import annotations
 
+import asyncio
+import logging
 import uuid
 from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import WebSocket
+
+logger = logging.getLogger("multi-agent.bus")
+
+# B15 背压兜底：单 socket send 超时上限（秒）。健康 LAN WS send <100ms，5s 是
+# 「客户端真卡住」的宽松上限——超时即 prune 该 socket（best-effort fan-out 丢慢
+# 客户端，不让一个慢消费者阻塞整群流式推送）。流式 per-token 路径（emit_task_token
+# / emit_coordinator_token）每 token 都 await emit，无超时则慢客户端会回压 LLM 流式
+# 循环致整条流水线停滞；有超时则慢客户端被 prune，流式对其他客户端继续。
+WS_SEND_TIMEOUT: float = 5.0
 
 
 def _ts() -> str:
@@ -35,15 +55,44 @@ class BusManager:
             del self._connections[group_id]
 
     async def emit(self, group_id: str, event_data: dict[str, Any]) -> None:
-        """Push an event dict to every live socket in the group. Prunes dead ones."""
+        """Push an event dict to every live socket in the group. Prunes dead ones.
+
+        B15 错误处理 + 背压兜底（全量审计 emit_* 后的单一错误真源）：
+
+        错误处理——``except Exception`` 不再静默吞没：``logger.debug`` + ``exc_info=True``
+        捕获 send 失败（socket 关闭 / 序列化错误 / 超时），然后 prune 该 socket。为何
+        debug 而非 ``logger.exception``：这是 best-effort fan-out 的 per-socket 循环，
+        流式 per-token 路径（emit_task_token / emit_coordinator_token）对掉线客户端每
+        token 重试都触发 except——``logger.exception``（ERROR + traceback）会在客户端
+        正常断连期间按 token 频率洪水日志。``logger.debug`` 在默认日志级静默（不污染
+        INFO/WARNING），排障时开 DEBUG 即见异常类型/消息/socket，定位「真 bug（序列化
+        错误 prune 了健康 socket）」vs「正常断连 prune」。13 个 ``emit_*`` helper 是纯
+        投影器无 try/except，错误处理全汇聚到此——单一真源，不在 13 处重复。
+
+        背压兜底——``ws.send_json`` 包 ``asyncio.wait_for(timeout=WS_SEND_TIMEOUT)``：
+        慢客户端不再无限阻塞 emit 协程。流式 per-token 路径每 token ``await emit``，
+        无超时则一个慢消费者回压 LLM 流式 ``async for`` 循环致整条流水线停滞；有超时
+        则慢客户端超时即 prune（best-effort 丢慢消费者），流式对其他客户端继续。
+        ``wait_for`` 超时取消 ``send_json`` 协程——部分 send 可能已写入底层 buffer，
+        但超时后该 socket 立即 prune（不再 send），corrupted 状态不影响（已丢弃）。
+        """
         conns = self._connections.get(group_id)
         if not conns:
             return
         dead: list[WebSocket] = []
         for ws in list(conns):
             try:
-                await ws.send_json(event_data)
+                await asyncio.wait_for(
+                    ws.send_json(event_data), timeout=WS_SEND_TIMEOUT
+                )
             except Exception:
+                # B15: 不静默吞没——debug + exc_info 捕获（非 exception 防流式洪水），
+                # socket 关闭/序列化错误/超时均 prune。排障开 DEBUG 可见异常类型。
+                logger.debug(
+                    "[bus] send failed, pruning socket from group %s",
+                    group_id,
+                    exc_info=True,
+                )
                 dead.append(ws)
         for ws in dead:
             self.unsubscribe(group_id, ws)
