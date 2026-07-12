@@ -26,7 +26,7 @@ from engine.inbox import (
     unregister_inbox,
 )
 from engine.agent_executor import execute_agent_task
-from engine.mention import route_mentions
+from engine.mention import clear_group_routes, route_mentions
 from engine.worker import build_worker_graph
 from engine.workspace import scan_workspace_artifacts
 from events import (
@@ -551,13 +551,19 @@ class AgentEngine:
             return
 
         async def reply_cb(content: str) -> None:
-            """Engine-side mention routing callback for graph nodes."""
+            """Engine-side mention routing callback for graph nodes.
+
+            防循环状态用群级共享 dict（``route_mentions`` 内部 None 时自动取
+            ``_get_recent_routes(group_id)``）——原来传 self._recent_routes 是每个
+            engine 一个空 dict，反向清键打不中对方 → 接龙 4 轮就断。群级共享后 A→B
+            和 B→A 写进同一个 dict，反向清除才生效，持续交替不断链。
+            """
             await route_mentions(
                 self.group_id,
                 self.agent_id,
                 self.name,
                 content,
-                self._recent_routes,
+                None,  # None → route_mentions 取群级共享 _get_recent_routes(group_id)
             )
 
         if self.graph_kind == "coordinator":
@@ -618,15 +624,32 @@ class AgentEngine:
         else:
             worker_mod.set_reply_callback(reply_cb)
             try:
+                # 群聊普通成员的 system_prompt 追加「团队互动」语义：agent 自带的
+                # system_prompt（如「你是后端工程师，负责 API 与数据层开发」）把人设
+                # 锁死在本职工作，对成语接龙等非工作互动无参与意愿 → brain 倾向回避
+                # （回「请前端先出第一个成语」搪塞）。这段直接加在 system 层（与人设同级
+                # 权重），明确「本职外也正常参与群内互动」，压住纯工作人设的抗拒。单聊
+                # agent 没有同事互动场景，不加（保持其原 persona）。
+                sys_for_invoke = self.system_prompt
+                if not self.single_chat:
+                    sys_for_invoke = (
+                        (self.system_prompt or "")
+                        + "\n\n作为团队成员，群里除了本职工作也可能有轻松的互动（成语接龙、"
+                        "你画我猜、多轮讨论）。这类互动请正常参与、配合规则，不必端着工作人设"
+                        "拒绝；接龙等游戏按规则接续即可。"
+                    )
                 result = await self.graph.ainvoke(
                     {
                         "group_id": self.group_id,
                         "agent_id": self.agent_id,
                         "agent_name": self.name,
                         "agent_role": self.role,
+                        # coordinator_id 用于 _build_context_from_db 把协调者消息标成
+                        # 「协调者」而非裸 agent_id。
+                        "coordinator_id": self.coordinator_id,
                         # 单聊/普通成员 worker brain：作为独立 system 消息注入，覆盖
                         # brain prompt 的兜底人设；空串时退化为兜底（与改前等价）。
-                        "system_prompt": self.system_prompt,
+                        "system_prompt": sys_for_invoke,
                         "incoming_message": notify.get("content") or "",
                         "incoming_sender": notify.get("sender_id") or "",
                         "memory": self._memory,
@@ -635,15 +658,12 @@ class AgentEngine:
                 )
             finally:
                 worker_mod.set_reply_callback(None)
-            self._memory.append(
-                {"role": "user", "content": notify.get("content") or ""}
-            )
-            # if the brain decided chat/ask, record the assistant reply
-            decision = (result or {}).get("decision") or {}
-            if decision.get("action") in ("chat", "ask"):
-                self._memory.append(
-                    {"role": "assistant", "content": decision.get("content", "")}
-                )
+            # worker 不再维护 self._memory（上下文改从 messages 表真源拉，见
+            # worker._build_context_from_db）。原 append 有两个 bug：(1) 时序——append
+            # 在 ainvoke 之后，当前 incoming 没进决策时 context；(2) 身份——peer 消息
+            # 存成 role=user 被 _build_context 渲染成「用户:」。改走 DB 真源后这两个 bug
+            # 一起消失，且换话题不污染（DB 即真源，无需 reset 清内存）。coordinator 分支
+            # 仍用 self._memory（其上下文耦合 dispatch_plan 等状态，暂不动）。
 
     # ── unified reply / publish (Rust engine.reply / publish_log) ────
 
@@ -661,12 +681,15 @@ class AgentEngine:
             }
         )
         await emit_message_added(msg.model_dump())
+        # 防循环用群级共享 dict（见 mention._get_recent_routes）——原 self._recent_routes
+        # 是 per-engine，反向清键打不中对方 dict 导致接龙 4 轮断。传 None 让 route_mentions
+        # 自动取群级共享视图。
         await route_mentions(
             self.group_id,
             self.agent_id,
             self.name,
             content,
-            self._recent_routes,
+            None,
         )
 
     async def _publish_log(self, task_id: str | None, line: str) -> None:
@@ -731,6 +754,10 @@ class AgentEngine:
         self._dispatch_plan.clear()
         self._recent_routes.clear()
         self._pending_tasks.clear()
+        # 群级共享防循环状态也清掉（A2A 轮次计数 + recent_routes）——reset_session
+        # 是「换话题重来」，旧的来回传递记录不该留着卡新一轮。clear_group_routes
+        # 清的是 mention 模块级 _group_recent_routes[group_id] + _a2a_turns[group_id]。
+        clear_group_routes(self.group_id)
         logger.info(
             "[engine] %s session reset (memory + dispatch_plan cleared)",
             self.name,

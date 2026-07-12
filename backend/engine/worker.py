@@ -8,6 +8,7 @@ checkpointer and invoked per incoming notify by ``AgentEngine._handle_notify``.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 from typing import Any
@@ -25,13 +26,25 @@ from store import crud
 
 logger = logging.getLogger("multi-agent.worker")
 
-# reply callback installed by the engine for the duration of one invoke
-_REPLY_CB: Any = None
+# reply callback installed by the engine for the duration of one invoke.
+# 用 contextvars 而非模块级全局变量：每个 agent engine 是独立 asyncio task（registry
+# 用 asyncio.create_task(self._run_loop())），task 创建时 copy context，各自 set 的 cb
+# 互不覆盖。原全局单例在并发场景（前端后端同时 ainvoke）会被后 set 的覆盖先 set 的 →
+# 后端 _unified_reply 时 _REPLY_CB 已被前端的 set_reply_callback(None) 清空 → @peer
+# 不路由 → 接龙只跑一轮就断（话筒落地）。contextvars 让每个 task 有自己独立的 cb。
+_REPLY_CB: contextvars.ContextVar = contextvars.ContextVar(
+    "worker_reply_cb", default=None
+)
 
 
 def set_reply_callback(cb: Any) -> None:
-    global _REPLY_CB
-    _REPLY_CB = cb
+    """Install the engine's unified reply callable for the duration of one invoke.
+
+    Sets the callback in the *current task's* context (contextvars), so
+    concurrent engine invokes (front/back brain running in parallel) each see
+    their own cb — not a shared global that the last writer wins.
+    """
+    _REPLY_CB.set(cb)
 
 
 async def _unified_reply(
@@ -58,12 +71,18 @@ async def _unified_reply(
         }
     )
     await emit_message_added(msg.model_dump())
-    if _REPLY_CB is not None:
-        await _REPLY_CB(content)
+    cb = _REPLY_CB.get()
+    if cb is not None:
+        await cb(content)
 
 
 def _build_context(memory: list[dict], agent_name: str) -> str:
-    """Render the recent memory into a context string (Rust build_context)."""
+    """Render the recent memory into a context string (Rust build_context).
+
+    仅保留给旧路径/单聊兜底用——群聊成员的 brain 上下文现由
+    ``_build_context_from_db`` 直接从 messages 表真源拉取（见 ``node_brain_decide``），
+    不再依赖这套 self._memory + append 时序 + role 渲染。
+    """
     recent = (memory or [])[-5:]
     if not recent:
         return "（无历史对话）"
@@ -78,6 +97,40 @@ def _build_context(memory: list[dict], agent_name: str) -> str:
     return "\n".join(lines)
 
 
+async def _build_context_from_db(group_id: str, coordinator_id: str) -> str:
+    """从 messages 表真源拉最近若干条，拼成带发送者身份的上下文。
+
+    取代旧的 ``_build_context(self._memory)``——不再维护引擎内 ``self._memory`` 这套
+    list + append 时序 + role 渲染。直接查 DB：每条消息的 ``sender_id`` 天然带身份，
+    最近的当前 incoming 也在结果里（发送方落库在唤醒接收方之前），无时序坑、无身份
+    抹平、换话题自然就是新消息流（跨场景不污染）。
+
+    sender_id → 显示名：``user``→「用户」，``coordinator_id``→「协调者」，群成员→其
+    agent name（按 id 匹配成员表；非成员的 agent_id 原样显示）。一次 DB 查 messages +
+    一次查成员，相比下游 LLM 调用可忽略。
+
+    取最近 8 条（含当前 incoming）：worker 来回对话通常短轮次，8 条够覆盖接龙上下文
+    又不灌太多历史噪声。task_log/slash_card 等非对话型消息按 type 过滤掉，只留
+    agent_reply / user_input / coordinator 的对话气泡。
+    """
+    members = await crud.list_group_members_with_agent(group_id)
+    id_to_name: dict[str, str] = {m.agent_id: m.agent_name for m in members}
+    if coordinator_id:
+        id_to_name.setdefault(coordinator_id, "协调者")
+
+    msgs = await crud.list_messages(group_id, limit=8)
+    # 只留对话型消息（task_log 是执行过程产物，不该进 brain 上下文）
+    msgs = [m for m in msgs if (m.type or "") in ("agent_reply", "user_input", "coordinator_reply", "coordinator_task")]
+    if not msgs:
+        return "（无历史对话）"
+    lines = []
+    for m in msgs:
+        sender = m.sender_id or ""
+        who = id_to_name.get(sender, "用户" if sender == "user" else sender)
+        lines.append(f"[{who}] {m.content or ''}")
+    return "\n".join(lines)
+
+
 def _format_display_msg(sender: str, content: str) -> str:
     """Prefix non-user messages with the sender identity (Rust handle_notify)."""
     if sender != "user" and sender != "coordinator":
@@ -87,8 +140,13 @@ def _format_display_msg(sender: str, content: str) -> str:
 
 async def node_brain_decide(state: WorkerState) -> dict:
     """Worker LLM three-state decision: chat/execute/ask (Rust handle_notify 389-422)."""
-    memory = state.get("memory") or []
-    context = _build_context(memory, state.get("agent_name", ""))
+    # 上下文直接从 messages 表真源拉（带 sender 身份），不再用 self._memory——
+    # 修两个 bug：(1) 时序（旧 append 在 ainvoke 之后，当前 incoming 没进 context）；
+    # (2) 身份（旧 _build_context 把 peer 消息全渲染成「用户:」）。coordinator_id
+    # 用来把协调者消息标成「协调者」而非裸 agent_id。
+    context = await _build_context_from_db(
+        state.get("group_id", ""), state.get("coordinator_id", "") or ""
+    )
     display_msg = _format_display_msg(
         state.get("incoming_sender", ""), state.get("incoming_message", "")
     )

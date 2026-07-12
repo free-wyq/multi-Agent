@@ -89,6 +89,9 @@ class WorkerState(TypedDict, total=False):
     agent_id: str
     agent_name: str
     agent_role: str
+    # 群主 agent_id（用于把协调者消息在 DB 上下文里标成「协调者」而非裸 id）。
+    # 群聊 worker brain 走 _build_context_from_db 从 messages 表拉上下文时用。
+    coordinator_id: str
     # agent 基础 system_prompt：单聊 chat 路径用（brain 作为独立 system 消息注入）。
     # 空串时 LLM 以 brain prompt 内「你是一名专业的 {role}…」兜底人设作答。
     system_prompt: str
@@ -97,7 +100,9 @@ class WorkerState(TypedDict, total=False):
     incoming_message: str
     incoming_sender: str
 
-    # cross-invoke state
+    # cross-invoke state（worker 侧已不再用 memory——上下文改从 messages 表真源拉，
+    # 见 worker._build_context_from_db。保留字段仅为 state schema 兼容，引擎仍注入但
+    # brain 不读。协调者的 memory 仍走自己的 CoordinatorState.memory。）
     memory: Annotated[list[dict], append_list]
 
     # decision output

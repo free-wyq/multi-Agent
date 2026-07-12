@@ -40,6 +40,31 @@ _A2A_CAP = max(1, int(os.environ.get("MULTI_AGENT_A2A_TURNS", "8")))
 # group_id -> 已发生的 A2A @mention 传递次数
 _a2a_turns: dict[str, int] = {}
 
+# group_id -> {f"{sender_id}->{target_id}": timestamp} 防循环计数。
+# **群级共享**（非 per-engine）：route_mentions 在群里任意成员回复时都可能被调（协调者
+# 委派、worker 互相 @），防循环必须看「这对成员在群里最近一次同向传递」的全局视图。
+# 原来传 self._recent_routes（每个 engine 一个空 dict）→ 前端@后端写前端的 dict、
+# 后端@前端写后端的 dict，反向清键打不中对方 dict → 前端第二次@后端撞自己 dict 里 30s
+# 内的「前端→后端」被拦 → 接龙 4 轮就断。改群级共享后：后端@前端反向清的是群 dict 里
+# 的「前端→后端」，下次前端@后端不再被拦，持续交替；同方向连发（前端连两次@后端中间
+# 无后端@前端）仍被「前端→后端」30s 内存在拦住——防死循环保留。
+_group_recent_routes: dict[str, dict[str, float]] = {}
+
+
+def _get_recent_routes(group_id: str) -> dict[str, float]:
+    """获取（惰性创建）某群的共享防循环 dict。"""
+    routes = _group_recent_routes.get(group_id)
+    if routes is None:
+        routes = {}
+        _group_recent_routes[group_id] = routes
+    return routes
+
+
+def clear_group_routes(group_id: str) -> None:
+    """清空某群的防循环状态（reset_session 调）。"""
+    _group_recent_routes.pop(group_id, None)
+    _a2a_turns.pop(group_id, None)
+
 
 def find_mentions(content: str) -> list[str]:
     """Scan ``content`` for ``@name`` tokens, stripping trailing punctuation.
@@ -121,22 +146,31 @@ async def route_mentions(
     sender_id: str,
     sender_name: str,
     content: str,
-    recent_routes: dict[str, float],
+    recent_routes: dict[str, float] | None = None,
 ) -> None:
     """Outbound mention routing with 30s anti-loop + A2A turn cap.
 
     Scans ``content`` for @mentions, resolves each to a target agent, and
     ``push_notify`` to the target（让 peer 走 brain→chat 轻路径，而非 push_task
     的 execute 重路径——互动型任务如成语接龙/讨论需成员间来回对话，不应被塞进
-    create_react_agent）。The ``recent_routes`` dict (mutated in place, owned by
-    the AgentEngine) records ``f"{sender_id}->{target_id}"`` -> timestamp and
-    skips a *same-direction* pair if it was routed within the last 30s（同方向
-    连发=死循环，挡掉）。成功 push 后清掉反向 key（target→sender），允许 A→B→A→B
-    持续交替——若不清，B→A 之后 A→B 会被 30s 内已存在拦死，来回只能跑 2 轮。
+    create_react_agent）。防循环计数 ``recent_routes`` 记 ``f"{sender_id}->{target_id}"``
+    -> timestamp，同方向 30s 内已路由则跳过（A 连发两次 @B = 死循环，挡掉）。成功
+    push 后清掉反向 key（target→sender），允许 A→B→A→B 持续交替——若不清，B→A 之后
+    A→B 会被 30s 内已存在拦死，来回只能跑 2 轮。
+
+    ``recent_routes`` **必须是群级共享**的同一个 dict（见 ``_get_recent_routes``）。
+    原来传每个 engine 自己的 ``self._recent_routes`` → 反向清键打不中对方 dict → 接龙
+    4 轮就断。现在统一从群级 ``_group_recent_routes`` 取，A 写 A→B、B 回 B→A 时反向
+    清的是群 dict 里的 A→B，下次 A→B 不再被拦。``recent_routes`` 参数保留向后兼容
+    （None 时自动取群级共享 dict），但调用方应传群级共享 dict 或 None。
 
     ``_a2a_turns`` 按 group 计数每次 @ 传递，达 ``_A2A_CAP`` 后不再 push（回复仍
     落库+emit，话筒自然落地）；用户发新消息时 route_user_message 把计数清零。
     """
+    # 群级共享防循环 dict（None 时取 _get_recent_routes 的群级映射）
+    if recent_routes is None:
+        recent_routes = _get_recent_routes(group_id)
+
     mentions = find_mentions(content)
     if not mentions:
         return

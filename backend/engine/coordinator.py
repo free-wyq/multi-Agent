@@ -9,6 +9,7 @@ reply_content, dispatch_plan) rather than mutating engine state directly.
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 import time
 import uuid
@@ -41,14 +42,24 @@ logger = logging.getLogger("multi-agent.coordinator")
 
 # callback set by the engine on each ainvoke so nodes can persist replies +
 # mention-route via the engine's unified _reply path. Nodes must not touch
-# engine state directly; they call this to emit a reply message.
-_REPLY_CB: Any = None
+# reply callback installed by the engine for the duration of one invoke.
+# 用 contextvars 而非模块级全局变量：每个 agent engine 是独立 asyncio task，task 创建
+# 时 copy context，各自 set 的 cb 互不覆盖。原全局单例在并发场景（协调者与 worker 同时
+# ainvoke）会被后 set 的覆盖先 set 的 → _unified_reply 时 _REPLY_CB 已被清空 → @peer
+# 不路由。与 worker.py 的 _REPLY_CB 同构（各自独立 ContextVar，互不串台）。
+_REPLY_CB: contextvars.ContextVar = contextvars.ContextVar(
+    "coordinator_reply_cb", default=None
+)
 
 
 def set_reply_callback(cb: Any) -> None:
-    """Install the engine's unified reply callable for the duration of one invoke."""
-    global _REPLY_CB
-    _REPLY_CB = cb
+    """Install the engine's unified reply callable for the duration of one invoke.
+
+    Sets the callback in the *current task's* context (contextvars), so
+    concurrent engine invokes each see their own cb — not a shared global that
+    the last writer wins.
+    """
+    _REPLY_CB.set(cb)
 
 
 def _leader_system(state: CoordinatorState) -> list[dict[str, str]]:
@@ -94,8 +105,9 @@ async def _unified_reply(
         }
     )
     await emit_message_added(msg.model_dump())
-    if _REPLY_CB is not None:
-        await _REPLY_CB(content)
+    cb = _REPLY_CB.get()
+    if cb is not None:
+        await cb(content)
 
 
 # ── nodes ─────────────────────────────────────────────────────────────────
