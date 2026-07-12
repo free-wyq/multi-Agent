@@ -727,9 +727,6 @@ export default function ChatPanel({
         onScroll={handleContainerScroll}
         style={{ flex: 1, minHeight: 0, overflowY: 'auto', padding: '16px 20px' }}
       >
-        {showPlanCard && plan && chatGroupId && (
-          <PlanConfirmCard groupId={chatGroupId} plan={plan} refreshPlan={refreshPlan} />
-        )}
         {!chatGroupId ? (
           <div style={{ textAlign: 'center', padding: 60 }}>
             <Empty description="请在左侧选择一个群组开始对话" />
@@ -944,6 +941,19 @@ export default function ChatPanel({
         ))}
         <div ref={chatEndRef} />
       </div>
+
+      {/* 计划确认卡——粘在输入框上方，不随消息列表滚动。
+          原先卡片渲染在消息列表顶部（messagesContainerRef 内），出计划后用户一发问或协调者一回复，
+          新消息就把卡片顶出可视区，看不到也点不到确认按钮。现抽出滚动容器，钉在输入框正上方：
+          计划有 pending 步骤时展示，flexShrink:0 保证它和输入框都不被消息列表挤掉；
+          卡内步骤多时 maxHeight + 自滚，避免撑高把输入框顶出可视区。 */}
+      {showPlanCard && plan && chatGroupId && (
+        <div style={{ flexShrink: 0, padding: '8px 16px 0', background: '#fff' }}>
+          <div style={{ maxHeight: 280, overflowY: 'auto', padding: 2 }}>
+            <PlanConfirmCard groupId={chatGroupId} plan={plan} refreshPlan={refreshPlan} />
+          </div>
+        </div>
+      )}
 
       {/* 输入框 */}
       {chatGroupId && (

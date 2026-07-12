@@ -156,7 +156,7 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
   return (
     <Card
       size="small"
-      style={{ marginBottom: 12, borderColor: '#d3adf7' }}
+      style={{ marginBottom: 0, borderColor: '#d3adf7' }}
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Tag color="purple" style={{ margin: 0 }}>协调者计划</Tag>
