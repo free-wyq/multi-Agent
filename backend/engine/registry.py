@@ -29,6 +29,7 @@ from engine.agent_executor import execute_agent_task
 from engine.mention import clear_group_routes, route_mentions
 from engine.worker import build_worker_graph
 from engine.workspace import scan_workspace_artifacts
+from langgraph.graph import END
 from langgraph.types import Command
 from events import (
     emit_agent_status,
@@ -765,7 +766,7 @@ class AgentEngine:
         await self._handle_task(next_task)
 
     async def reset_session(self) -> None:
-        """BE-02: clear cross-invoke engine instance state (memory + dispatch plan).
+        """BE-02: clear cross-invoke engine instance state + LangGraph interrupt.
 
         Wipes the coordinator/worker conversation memory (``_memory``), the
         resident dispatch plan (``_dispatch_plan``), the mention route-rate gate
@@ -775,6 +776,25 @@ class AgentEngine:
         down and rebuilding the engine (the compiled LangGraph graph, the inbox
         channel, and the run loop all stay live — only the cross-invoke state is
         reset, so the next ``ainvoke`` starts from an empty slate).
+
+        PL-02 interrupt migration (this task): on a coordinator graph the old
+        ``_dispatch_plan.clear()`` only wiped the engine's *compatibility mirror*
+        — the thread could still be paused mid-``node_dispatch`` via
+        ``interrupt()``, with the resident plan held in the MemorySaver
+        checkpointer (the source of truth). A bare mirror clear left a dangling
+        interrupt: the next fresh-input demand auto-resumed it, and a subsequent
+        ``plan_confirm`` notify would route to ``dispatch_next`` and re-fire the
+        stale plan (409-style hazard, [[engine-audit-interrupt-replacement]]).
+        So the coordinator reset now resolves the interrupt via the graph's
+        checkpointer API — ``aupdate_state(values=None, as_node=END)`` writes a
+        terminal checkpoint (``next == ()``, pending interrupt tasks cleared),
+        matching the LangGraph idiom for "act as if the thread finished." A
+        coordinator graph that never reached ``node_dispatch`` (idle / cold /
+        auto_confirm-only) has no interrupt to resolve; the END write is a
+        harmless no-op on a terminal or empty thread (verified across cold +
+        interrupted + post-clear re-invoke cases). The mirror clear is kept as a
+        belt-and-suspenders second wipe so readers that still touch
+        ``self._dispatch_plan`` (api/plan.py until tasks 7-10 migrate) see ``[]``.
 
         Does NOT touch the LangGraph graph object, the MemorySaver checkpointer
         thread_id, or the inbox queue wiring — engine identity and graph topology
@@ -787,12 +807,38 @@ class AgentEngine:
 
         No raise: safe on a not-yet-started or already-offline engine (the
         ``executing`` cancel is best-effort; an offline engine simply has nothing
-        to cancel and clears the (already empty) state lists).
+        to cancel and clears the (already empty) state lists). The checkpointer
+        write is best-effort too — any failure there degrades to the legacy
+        mirror-only clear (logged) rather than aborting the reset.
         """
         if self.status == "executing":
             # cancel the in-flight worker task so it can't repopulate state as
             # it unwinds; reset takes effect once the engine returns to idle.
             self.request_cancel()
+        # Resolve a dangling interrupt on the coordinator thread so the next
+        # demand isn't auto-resumed into the stale plan. ``aupdate_state(...,
+        # as_node=END)`` is the LangGraph idiom for "act as if the thread
+        # finished": it clears the pending interrupt task and writes a terminal
+        # checkpoint (next == ()). No-op on a thread with no checkpoint (cold
+        # coordinator) or already-terminal (idle / auto_confirm-only) — verified
+        # across cold + interrupted + post-clear re-invoke cases. Worker graphs
+        # have no ``interrupt()`` site so they never pause; the END write is a
+        # uniform no-op there too. Best-effort: a checkpointer failure degrades
+        # to the legacy mirror-only clear (logged) rather than aborting reset.
+        if self.graph_kind == "coordinator":
+            try:
+                await self.graph.aupdate_state(
+                    config={"configurable": {"thread_id": self.thread_id}},
+                    values=None,
+                    as_node=END,
+                )
+            except Exception:
+                logger.exception(
+                    "[engine] %s reset_session: aupdate_state(END) failed, "
+                    "falling back to mirror-only plan clear (interrupt may "
+                    "linger on thread %s)",
+                    self.name, self.thread_id,
+                )
         self._memory.clear()
         self._dispatch_plan.clear()
         self._recent_routes.clear()
@@ -802,7 +848,7 @@ class AgentEngine:
         # 清的是 mention 模块级 _group_recent_routes[group_id] + _a2a_turns[group_id]。
         clear_group_routes(self.group_id)
         logger.info(
-            "[engine] %s session reset (memory + dispatch_plan cleared)",
+            "[engine] %s session reset (interrupt resolved + memory + dispatch_plan cleared)",
             self.name,
         )
 
