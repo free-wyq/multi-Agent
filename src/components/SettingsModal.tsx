@@ -5,12 +5,15 @@
  *  - 产品要求左侧 180px 导航列 + 右侧 flex:1 内容区，antd Tabs 默认顶部 tabBar 与此布局冲突；
  *  - 自己画左侧可点击导航行 + 右侧按 activeKey 条件渲染更直白，密度与 GroupInfoDrawer/AgentDetailPanel 一致。
  *
- * 四个设置项：MCP / 技能 / 记忆 / 模型服务商。
+ * 七个设置项：MCP / 技能 / 记忆 / 模型服务商 / 外部系统 / 即时消息 / 用户信息。
  *  - MCP、技能直接复用全屏路由页（McpPage/SkillPage），它们自带数据拉取与 height:100%+overflowY:auto
  *    根容器，放进右侧时外层已 overflowY auto，让其自然铺；
  *  - 记忆是占位（后端 /api/memory 端点待补）；
  *  - 模型服务商：多 provider 管理（providerApi CRUD + activate），新增/编辑委托 ProviderEditor 组件
  *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
+ *  - 外部系统：智能体数据导出（文件下载 / Webhook 推送 / 数据库同步），占位卡片待后端端点。
+ *  - 即时消息：接收外部 IM（微信/钉钉/飞书）消息转发给智能体，占位卡片待接入。
+ *  - 用户信息：游客态占位，待接登录。
  */
 import { useEffect, useState } from 'react'
 import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Avatar } from 'antd'
@@ -21,6 +24,8 @@ import {
   CloudServerOutlined,
   PlusOutlined,
   UserOutlined,
+  ExportOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
@@ -36,7 +41,7 @@ interface SettingsModalProps {
 }
 
 /** 左侧导航项 key：联合类型供 activeKey/initialKey 共用（导出供 Layout 引用）。 */
-export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user'
+export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user' | 'external' | 'im'
 
 /** 左侧导航项定义：key 唯一标识，用于 activeKey 条件渲染右侧内容。 */
 interface NavItem {
@@ -50,6 +55,8 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'skills', label: '技能', icon: <AppstoreOutlined /> },
   { key: 'memory', label: '记忆', icon: <DatabaseOutlined /> },
   { key: 'model', label: '模型服务商', icon: <CloudServerOutlined /> },
+  { key: 'external', label: '外部系统', icon: <ExportOutlined /> },
+  { key: 'im', label: '即时消息', icon: <MessageOutlined /> },
   { key: 'user', label: '用户信息', icon: <UserOutlined /> },
 ]
 
@@ -251,6 +258,69 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
               <Empty description="记忆管理开发中（后端 /api/memory 端点待补）" />
             </div>
           )}
+          {activeKey === 'external' && (
+            <div style={{ maxWidth: 560 }}>
+              <div style={{ marginBottom: 4, fontSize: 16, fontWeight: 600 }}>
+                外部系统
+              </div>
+              <div style={{ fontSize: 13, color: '#999', marginBottom: 20 }}>
+                将智能体产生的数据导出到外部系统（文件下载 / Webhook 推送 / 数据库同步等）
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                {/* 导出卡片 1：文件下载 */}
+                <ExternalExportCard
+                  title="导出为文件"
+                  desc="将对话历史、任务记录、智能体配置导出为 JSON / CSV 文件，下载到本机"
+                  badge="文件下载"
+                  onAction={() => message.info('导出文件功能开发中（后端 /api/export 端点待补）')}
+                />
+                {/* 导出卡片 2：Webhook 推送 */}
+                <ExternalExportCard
+                  title="Webhook 推送"
+                  desc="智能体产出的消息 / 产物实时推送到指定 Webhook 地址，供第三方系统消费"
+                  badge="实时推送"
+                  onAction={() => message.info('Webhook 推送配置开发中')}
+                />
+                {/* 导出卡片 3：数据库同步 */}
+                <ExternalExportCard
+                  title="数据库同步"
+                  desc="将智能体数据定期同步到外部数据库（PostgreSQL / MySQL 等），供 BI 与报表系统使用"
+                  badge="定时同步"
+                  onAction={() => message.info('数据库同步配置开发中')}
+                />
+              </div>
+            </div>
+          )}
+          {activeKey === 'im' && (
+            <div style={{ maxWidth: 560 }}>
+              <div style={{ marginBottom: 4, fontSize: 16, fontWeight: 600 }}>
+                即时消息
+              </div>
+              <div style={{ fontSize: 13, color: '#999', marginBottom: 20 }}>
+                接收外部即时通讯平台消息，转发给智能体处理；智能体回复可回推到对应平台
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <ImChannelCard
+                  name="微信"
+                  desc="接入企业微信 / 微信，接收好友或群消息转发给智能体，回复回推到会话"
+                  status="未接入"
+                  onAction={() => message.info('微信接入配置开发中')}
+                />
+                <ImChannelCard
+                  name="钉钉"
+                  desc="接入钉钉机器人，接收钉钉群 @ 消息转发给智能体，回复推送到钉钉群"
+                  status="未接入"
+                  onAction={() => message.info('钉钉接入配置开发中')}
+                />
+                <ImChannelCard
+                  name="飞书"
+                  desc="接入飞书机器人，接收飞书消息转发给智能体，回复推送到飞书会话"
+                  status="未接入"
+                  onAction={() => message.info('飞书接入配置开发中')}
+                />
+              </div>
+            </div>
+          )}
           {activeKey === 'user' && (
             <div style={{ maxWidth: 480 }}>
               <div
@@ -414,5 +484,79 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
         onClose={handleEditorClose}
       />
     </Modal>
+  )
+}
+
+/** 外部系统 — 导出方式卡片：标题 + 描述 + 角标 + 配置按钮。 */
+function ExternalExportCard({
+  title,
+  desc,
+  badge,
+  onAction,
+}: {
+  title: string
+  desc: string
+  badge: string
+  onAction: () => void
+}) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border-card)',
+        borderRadius: 8,
+        padding: '14px 16px',
+        background: 'var(--surface-raised)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>{title}</span>
+          <Tag color="blue" style={{ margin: 0 }}>{badge}</Tag>
+        </div>
+        <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
+      </div>
+      <Button size="small" onClick={onAction}>配置</Button>
+    </div>
+  )
+}
+
+/** 即时消息 — 接入渠道卡片：平台名 + 描述 + 接入状态 + 接入按钮。 */
+function ImChannelCard({
+  name,
+  desc,
+  status,
+  onAction,
+}: {
+  name: string
+  desc: string
+  status: string
+  onAction: () => void
+}) {
+  return (
+    <div
+      style={{
+        border: '1px solid var(--border-card)',
+        borderRadius: 8,
+        padding: '14px 16px',
+        background: 'var(--surface-raised)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        gap: 12,
+      }}
+    >
+      <div style={{ flex: 1, minWidth: 0 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
+          <span style={{ fontSize: 14, fontWeight: 600 }}>{name}</span>
+          <Tag style={{ margin: 0 }}>{status}</Tag>
+        </div>
+        <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
+      </div>
+      <Button size="small" onClick={onAction}>接入</Button>
+    </div>
   )
 }
