@@ -77,12 +77,17 @@ async def _require_coordinator_engine(group_id: str):
 async def plan_get(group_id: str) -> dict[str, Any]:
     """Return the coordinator's resident plan (PL-10 重连后重拉历史).
 
-    The plan lives in the coordinator engine's ``_dispatch_plan`` (方案 B
-    内存态), never persisted to the group row. On a frontend WS reconnect the
-    bus may have dropped ``coordinator_plan`` events, so this endpoint lets the
-    client re-fetch the authoritative current plan. If the coordinator engine
-    isn't running (group fresh, or backend just restarted and hasn't re-seeded),
-    returns an empty plan — an absent engine is not an error condition here.
+    The plan lives in the coordinator graph's MemorySaver checkpointer — the
+    source of truth since the M12 interrupt migration (``node_dispatch``
+    checkpoints the plan on the interrupt turn via the ``replace_value``
+    reducer). On a frontend WS reconnect the bus may have dropped
+    ``coordinator_plan`` events, so this endpoint lets the client re-fetch the
+    authoritative current plan by reading the checkpointer thread state
+    (``graph.get_state(thread_id).values.get("dispatch_plan")``). If the
+    coordinator engine isn't running (group fresh, or backend just restarted
+    and hasn't re-seeded) — or its graph thread has no checkpoint yet (never
+    reached ``node_dispatch``) — returns an empty plan; an absent engine or
+    empty thread is not an error condition here.
     """
     group = await crud.get_group(group_id)
     if not group:
@@ -91,13 +96,41 @@ async def plan_get(group_id: str) -> dict[str, Any]:
     if group.coordinator_id:
         engine = registry.get_engine(group_id, group.coordinator_id)
         if engine is not None:
-            plan = list(engine._dispatch_plan)
+            plan = await _read_resident_plan(engine)
     return {
         "ok": True,
         "group_id": group_id,
         "coordinator_id": group.coordinator_id or "",
         "plan": plan,
     }
+
+
+async def _read_resident_plan(engine) -> list[dict[str, Any]]:
+    """Read the coordinator's resident plan from the checkpointer (source of truth).
+
+    Prefers the graph's checkpointer thread state
+    (``get_state(thread_id).values.get("dispatch_plan")``) — the single source
+    of truth since the M12 interrupt migration — falling back to the engine's
+    ``_dispatch_plan`` mirror only if the checkpointer read fails (best-effort:
+    a checkpointer error degrades to the mirror rather than 500-ing the read).
+    A coordinator thread that never reached ``node_dispatch`` (cold / idle /
+    auto_confirm-only that went straight to chat) has no ``dispatch_plan`` in
+    its checkpointed state → returns ``[]``. Worker graphs hold no plan (no
+    dispatch node), so a worker engine returns ``[]`` — but this helper is only
+    called on the group's coordinator (see ``plan_get``), so the worker case is
+    defensive only.
+    """
+    try:
+        snapshot = engine.graph.get_state(
+            config={"configurable": {"thread_id": engine.thread_id}}
+        )
+        cp_plan = (snapshot.values or {}).get("dispatch_plan")
+        if cp_plan:
+            return [dict(s) for s in cp_plan]
+        return []
+    except Exception:
+        # best-effort: degrade to the mirror rather than 500-ing the read
+        return [dict(s) for s in engine._dispatch_plan]
 
 
 @router.post("/{group_id}/plan/confirm")
