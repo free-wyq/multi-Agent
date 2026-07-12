@@ -9,14 +9,17 @@ reply_content, dispatch_plan) rather than mutating engine state directly.
 """
 from __future__ import annotations
 
+import contextlib
 import contextvars
 import logging
 import time
 import uuid
-from typing import Any
+from typing import Any, Optional
 
+from langchain_core.runnables.config import RunnableConfig, var_child_runnable_config
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import interrupt
 
 from engine.dispatcher import dispatch_ready_steps
 from engine.state import CoordinatorState
@@ -60,6 +63,37 @@ def set_reply_callback(cb: Any) -> None:
     the last writer wins.
     """
     _REPLY_CB.set(cb)
+
+
+# Python 3.10 + langgraph 1.2.5 async-node contextvar workaround for interrupt().
+# See memory langgraph-interrupt-py310-contextvar-pitfall: interrupt() reads the
+# contextvar ``var_child_runnable_config`` to find its config (scratchpad/checkpointer
+# keys live there). On Python < 3.11 the async node path does NOT propagate that
+# contextvar into the user coroutine (langgraph gates the
+# ``asyncio.create_task(coro, context=ctx)`` propagation behind
+# ``ASYNCIO_ACCEPTS_CONTEXT = sys.version_info >= (3, 11)``), so a bare
+# ``interrupt(...)`` inside an async node raises ``RuntimeError: Called get_config
+# outside of a runnable context``. LangGraph *does* inject the runnable config as a
+# ``config`` kwarg when the node declares it, so we re-set the contextvar from that
+# injected config right before calling ``interrupt``. This is a no-op on 3.11+ (the
+# var is already set) and a fix on 3.10. Scoped to interrupt callers only.
+@contextlib.contextmanager
+def _runnable_config_ctx(config: RunnableConfig | None):
+    """Temporarily expose ``config`` as the runnable config contextvar.
+
+    Used to bridge the 3.10 async-node gap so ``interrupt()`` (which reads the
+    contextvar) sees the config the graph already injected via the node's
+    ``config`` kwarg. ``config`` may be ``None`` when LangGraph did not inject
+    it (defensive); in that case this context manager is a pure no-op.
+    """
+    if config is None:
+        yield
+        return
+    token = var_child_runnable_config.set(config)
+    try:
+        yield
+    finally:
+        var_child_runnable_config.reset(token)
 
 
 def _leader_system(state: CoordinatorState) -> list[dict[str, str]]:
@@ -377,14 +411,59 @@ def _normalize_revised_step(raw: dict, plan: list[dict]) -> dict:
     }
 
 
-def _parse_plan_adjust_decision(raw: str) -> dict | None:
-    """Parse the plan-adjustment LLM response into {adjust, reason, announce, revised_steps}.
+def _splice_amended_steps(plan: list[dict], amended: list[dict]) -> list[dict]:
+    """Splice user-amended steps (from a /plan/modify resume payload) into the plan.
 
-    Lenient: a missing/invalid ``adjust`` defaults to False (no change), and a
-    non-list ``revised_steps`` is treated as empty. Returns None on JSON parse
-    failure so the caller keeps the plan unchanged.
+    Each amended step is keyed by its ``step`` number. Steps whose number
+    matches an existing pending step replace it (re-deriving pending status +
+    clearing task_id so it re-dispatches); steps with a fresh/unknown number
+    are appended at the end. Steps absent from ``amended`` are left untouched
+    (the user only edited the ones they returned). Completed/failed/dispatched
+    steps are never rewritten by an amend — the modify card only sends the
+    still-pending ones.
+
+    Mirrors the in-place splice ``_maybe_adjust_remaining_steps`` does for the
+    MT-14 LLM-revision path, but driven by the user's edited payload rather
+    than an LLM decision. Returns a new plan list (does not mutate the input).
     """
-    v = extract_json(raw)
+    new_plan: list[dict] = [dict(s) for s in plan]
+    by_step = {s.get("step"): s for s in new_plan}
+    appended: list[dict] = []
+    for raw in amended:
+        if not isinstance(raw, dict):
+            continue
+        num = raw.get("step")
+        target = by_step.get(num) if num is not None else None
+        if target is not None and target.get("status") == "pending":
+            target.update(
+                {
+                    "agent_id": raw.get("agent_id", target.get("agent_id", "")),
+                    "agent_name": raw.get("agent_name", target.get("agent_name", "")),
+                    "instruction": raw.get("instruction", target.get("instruction", "")),
+                    "depends_on": raw.get("depends_on", target.get("depends_on", [])) or [],
+                    "status": "pending",
+                    "task_id": None,
+                    "result": None,
+                }
+            )
+        else:
+            fresh = max([0] + [s.get("step") or 0 for s in new_plan]) + 1
+            new_plan.append(
+                {
+                    "step": num if num is not None else fresh,
+                    "agent_id": raw.get("agent_id", ""),
+                    "agent_name": raw.get("agent_name", ""),
+                    "instruction": raw.get("instruction", ""),
+                    "depends_on": raw.get("depends_on", []) or [],
+                    "status": "pending",
+                    "result": None,
+                    "task_id": None,
+                }
+            )
+    return new_plan
+
+
+def _parse_plan_adjust_decision(raw: str) -> dict | None:
     if v is None:
         return None
     adjust = bool(v.get("adjust", False))
@@ -718,23 +797,42 @@ async def node_chat(state: CoordinatorState) -> dict:
     return {}
 
 
-async def node_dispatch(state: CoordinatorState) -> dict:
-    """Store the plan, announce it, then either wait for confirm or fan out.
+async def node_dispatch(state: CoordinatorState, config: Optional[RunnableConfig] = None) -> dict:
+    """Store the plan, announce it, then either interrupt for confirm or fan out.
 
     Rust engine.rs 586-599. The LLM-returned plan replaces the engine's
     dispatch_plan (returned via the reducer). The announcement reply goes
     through the unified path so it persists + emits.
 
-    PL-02/PL-03: by default the plan is *announced but not dispatched* — the
-    node returns ``action_taken="wait_confirm"`` and the graph edges to END,
-    leaving the plan resident in the engine's ``_dispatch_plan`` so a later
-    confirm message can resume via ``dispatch_next`` (方案 B 引擎内存态等待).
-    When ``auto_confirm`` is True ("直接干" mode, PL-03) the node tags the plan
-    ``confirm_mode="auto"`` and returns ``action_taken="direct_run"`` so
-    ``route_after_dispatch`` routes straight to fan-out, preserving the old
-    zero-confirmation behaviour.
+    PL-02/PL-03 + LangGraph native ``interrupt()``: by default the plan is
+    *announced but not dispatched* — the node calls ``interrupt({"plan": plan})``
+    which pauses the graph (the checkpointer is the single source of truth for
+    the resident plan, replacing the old engine ``_dispatch_plan`` mirror as
+    truth). A later ``Command(resume={"mode": ...})`` wakes it: on resume the
+    node re-runs from the top (LangGraph interrupt semantics — see
+    ``interrupt()`` docstring "re-executing all logic"), the second
+    ``interrupt`` call returns the resume value immediately, and the node
+    returns ``action_taken="dispatch_next"`` so ``route_after_dispatch`` fans
+    out. When ``auto_confirm`` is True ("直接干" mode, PL-03) the node tags the
+    plan ``confirm_mode="auto"`` and returns
+    ``action_taken="dispatch_next"`` straight away — no interrupt, immediate
+    fan-out, preserving the old zero-confirmation behaviour.
+
+    The ``plan`` returned here (and thus written to ``state.dispatch_plan``
+    via the ``replace_value`` reducer) is the source the resume path and
+    ``node_dispatch_next`` read. On the interrupt turn the node still returns
+    ``{"dispatch_plan": plan, "action_taken": "wait_confirm"}`` so the plan is
+    checkpointed *before* the pause (interrupt does not itself write state);
+    on the resume turn it returns ``dispatch_next`` (the plan is unchanged, so
+    the reducer no-ops).
+
+    config / 3.10 workaround: the ``config`` kwarg is injected by LangGraph
+    (declared as ``RunnableConfig | None``) and fed to ``_runnable_config_ctx``
+    around ``interrupt`` so the contextvar ``var_child_runnable_config`` is
+    visible inside ``interrupt`` on Python 3.10 (see
+    ``_runnable_config_ctx``).
     """
-    plan = state.get("dispatch_plan") or []
+    plan = list(state.get("dispatch_plan") or [])
     plan_summary = "\n".join(
         f"{s.get('step')}. {s.get('agent_name', '')} → {s.get('instruction', '')[:40]}..."
         for s in plan
@@ -752,20 +850,36 @@ async def node_dispatch(state: CoordinatorState) -> dict:
             f"📋 已制定协作计划，请确认后执行：\n{plan_summary}",
         )
     await emit_coordinator_plan(
-        state["group_id"], state["agent_id"], state.get("dispatch_plan") or []
+        state["group_id"], state["agent_id"], plan
     )
-    # PL-03 直接干: auto_confirm routes the conditional edge straight to
-    # dispatch_next. We tag the plan as a direct_run so route_after_dispatch
-    # distinguishes "auto fan-out" from a later user confirmation
-    # (confirm_dispatch) — both land on dispatch_next, but the provenance is
-    # explicit and the plan card on the front-end can reflect it.
-    plan = state.get("dispatch_plan") or []
+    # PL-03 直接干: auto_confirm skips the confirmation interrupt and routes
+    # straight to dispatch_next. We tag the plan confirm_mode="auto" so the
+    # front-end plan card can reflect direct-run provenance.
     if state.get("auto_confirm"):
         for s in plan:
             s.setdefault("confirm_mode", "auto")
-    return {
-        "action_taken": "direct_run" if state.get("auto_confirm") else "wait_confirm"
-    }
+        return {"action_taken": "dispatch_next", "dispatch_plan": plan}
+
+    # PL-02 default: pause for human confirmation. interrupt() surfaces the
+    # plan to the client and suspends; the plan is returned on this turn so the
+    # replace_value reducer writes it into the checkpointed state before the
+    # pause (interrupt itself does not write state). A later
+    # ``Command(resume=...)`` re-runs this node — the second interrupt() call
+    # returns the resume value immediately, and we fall through to fan-out.
+    # action_taken="wait_confirm" marks the interrupt turn so route_after_dispatch
+    # edges to END; on resume the node returns dispatch_next (see below).
+    with _runnable_config_ctx(config):
+        resume = interrupt({"plan": plan})
+    # On resume: the plan is already checkpointed (returned on the interrupt
+    # turn); honour a modify-mode resume by splicing amended steps if present.
+    if isinstance(resume, dict):
+        amended = resume.get("amended_steps")
+        if isinstance(amended, list) and amended:
+            plan = _splice_amended_steps(plan, amended)
+            await emit_coordinator_plan(
+                state["group_id"], state["agent_id"], plan
+            )
+    return {"action_taken": "dispatch_next", "dispatch_plan": plan}
 
 
 async def node_dispatch_next(state: CoordinatorState) -> dict:
@@ -873,18 +987,21 @@ def route_after_llm_decide(state: CoordinatorState) -> str:
 
 
 def route_after_dispatch(state: CoordinatorState) -> str:
-    """PL-02/PL-03: after announcing the plan, either wait for confirm or fan out.
+    """PL-02/PL-03: after announcing the plan, either fan out or end (interrupt).
 
-    node_dispatch sets ``action_taken`` to ``dispatch_next`` (auto_confirm /
-    "直接干" mode, PL-03) or ``wait_confirm`` (default, needs user confirmation).
-    In the wait case the graph ends here — the plan stays resident in the
-    engine's ``_dispatch_plan`` and is resumed by a later confirm message that
-    routes through classify → dispatch_next (方案 B 引擎内存态等待).
+    ``node_dispatch`` returns ``action_taken="dispatch_next"`` in two cases:
+    - ``auto_confirm`` / "直接干" mode (PL-03): the node skipped the interrupt
+      and wants immediate fan-out.
+    - resume turn: the interrupt was resumed via ``Command(resume=...)``, the
+      node fell through to ``dispatch_next`` to fan out the (possibly amended)
+      plan.
 
-    PL-03 "直接干" is realized entirely here: when ``auto_confirm`` is True,
-    node_dispatch marks the plan ``direct_run`` so this router sends the graph
-    straight to fan-out, skipping the confirmation step the user would otherwise
-    take manually.
+    Otherwise (``wait_confirm`` — the interrupt turn) the graph ends here: the
+    plan was returned on this turn so the ``replace_value`` reducer checkpointed
+    it before the pause, and a later ``Command(resume=...)`` re-enters
+    ``node_dispatch`` to complete the loop. No hand-written ``wait_confirm→END``
+    branch is needed beyond this default — interrupt naturally suspends, and the
+    interrupt turn's ``END`` is just "graph returned without routing on".
     """
     action = state.get("action_taken", "")
     if action in ("dispatch_next", "confirm_dispatch", "direct_run"):
