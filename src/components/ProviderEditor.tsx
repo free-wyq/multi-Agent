@@ -520,7 +520,7 @@ export default function ProviderEditor({
           step={1024}
           size="small"
           style={{ width: '100%' }}
-          placeholder="0"
+          placeholder="0 = 未知"
         />
       ),
     },
@@ -699,7 +699,12 @@ export default function ProviderEditor({
             </Form.Item>
           </Col>
           <Col span={12}>
-            <Form.Item label="Max Tokens">
+            <Form.Item
+              label="Max Tokens"
+              tooltip="单次回复的输出 token 上限（如 4096）。勿填模型上下文窗口大小——
+              上下文窗口是「输入+输出总长」，填这里会把它全占给输出，导致输入 0 字节
+              上限、上游返 400（如 kimi 200k 上下文填这里会打爆）。"
+            >
               <InputNumber
                 value={formState.max_tokens}
                 onChange={(v) =>
@@ -709,7 +714,9 @@ export default function ProviderEditor({
                   })
                 }
                 step={256}
+                min={1}
                 style={{ width: '100%' }}
+                placeholder="4096"
               />
             </Form.Item>
           </Col>

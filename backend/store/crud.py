@@ -1185,19 +1185,27 @@ def _provider_to_model(p: LlmProviderEntity) -> LlmProvider:
     (capability metadata per model); the 6 connection-level fields
     (``api_version``/``organization``/``extra_headers``/``request_timeout``/
     ``max_retries``/``proxy``) are passed through so the UI can render the
-    full connection config. The flat ``model`` column is still emitted as-is
-    (the legacy field) — the UI / engine resolves the active model from
-    ``models`` first (see ``config.select_active_model``).
+    full connection config. The flat ``model`` column is output as the
+    *resolved* active model (via :func:`_select_model`) — NOT the raw legacy
+    column — so the UI card shows the model the engine actually uses
+    (catalog ``is_default`` wins over the legacy column; a stale legacy value
+    left by ``PUT /api/config`` no longer mislabels the card).
     """
     import config as _config
 
     raw_key = p.api_key or ""
+    # `model` 输出解析后的生效模型（_select_model：is_default → 匹配 model 列 →
+    # catalog 首个 → model 列 → 默认），而非原始 legacy `model` 列。legacy 列是
+    # 编辑器不暴露的死字段（PUT /api/config 热切换会写它，但生效仍走 catalog
+    # is_default），原样吐给前端会导致「卡片显示的 model ≠ 后端实际生效的 model」
+    # （用户实测：卡片显 deepseek-v4-flash，实际生效 kimi-k2.6）。输出解析值让
+    # 「看着生效的就是生效的」，legacy 列退回纯内部 fallback 用。
     return LlmProvider.model_validate(
         {
             "id": p.id,
             "name": p.name,
             "provider": p.provider,
-            "model": p.model,
+            "model": _select_model(p),
             "base_url": p.base_url,
             "api_key": _config._mask_key(raw_key),
             "has_key": bool(raw_key),
@@ -1453,6 +1461,15 @@ async def update_provider(provider_id: str, payload: Any) -> LlmProvider | None:
     inconsistent state). ``models=None`` (omitted) leaves the catalog unchanged;
     ``models=[]`` (explicit empty) clears it. The 6 connection-level fields are
     whitelisted alongside the legacy fields.
+
+    The legacy ``model`` column is NOT written by this path — the active model
+    is owned by the catalog's ``is_default`` entry (see ``_select_model``). The
+    frontend payload still carries ``model`` for backward-compat, but writing it
+    here would split state (legacy column ≠ catalog default), and the output
+    mapper (``_provider_to_model``) now returns the resolved active model, so a
+    stale legacy column would otherwise be invisible-but-present. ``PUT /api/config``
+    (``update_provider_model``) still writes the legacy column for the hot-switch
+    path; that's the only writer now.
     """
     from store.database import SessionLocal
 
@@ -1467,8 +1484,17 @@ async def update_provider(provider_id: str, payload: Any) -> LlmProvider | None:
                 if v:
                     row.api_key = v
                 continue
-            if k in ("name", "provider", "model", "base_url", "temperature", "max_tokens"):
+            if k in ("name", "provider", "base_url", "temperature", "max_tokens"):
                 setattr(row, k, v)
+            elif k == "model":
+                # 旧扁平 `model` 列不再由前端驱动——生效模型一律由 catalog 的
+                # is_default 决定（_select_model）。前端 payload 仍带 model 字段
+                # （LlmProviderCreatePayload 保留它向后兼容），但写入它会制造
+                # 「legacy 列 ≠ catalog 默认」的分裂态：_provider_to_model 现输出
+                # 解析后的生效模型，但 update_provider_model（PUT /api/config 热切换）
+                # 仍会写 legacy 列——保留该列供热切换用，只是 ProviderEditor 保存时
+                # 不再写它（避免编辑保存把 legacy 列刷成与 catalog 默认不一致的值）。
+                continue
             elif k == "is_active":
                 if v and not row.is_active:
                     await _deactivate_all(db)
