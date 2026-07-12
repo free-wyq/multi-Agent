@@ -216,8 +216,10 @@ main_loop() {
         --dangerously-skip-permissions 2>> "$LOG_FILE" || true
     else
       # 首轮：开新会话，stream-json 抓 session_id
+      # 注意：stream-json 必须配 --verbose，否则 claude 报
+      # "When using --print, --output-format=stream-json requires --verbose" 直接退出
       SESSION_JSON=$(claude -p "$CLAUDE_PROMPT" \
-        --output-format stream-json \
+        --output-format stream-json --verbose \
         --dangerously-skip-permissions 2>> "$LOG_FILE" || true)
       # 从 init 事件抓 session_id（type:system, subtype:init 那行）
       SESSION_ID=$(printf '%s' "$SESSION_JSON" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/"session_id":"//; s/"$//' || true)
