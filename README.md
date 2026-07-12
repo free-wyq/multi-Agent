@@ -104,7 +104,7 @@ mindmap
 | 功能模块 | 后端 | 前端 | 里程碑 |
 |---|---|---|---|
 | 智能体中心 | `api/agents.py` `models/agent.py` | `AgentPage.tsx` | M1/M2 |
-| 群组协作 | `api/groups.py` `engine/mention.py` | `GroupPage.tsx` | M3 |
+| 群组协作 | `api/groups.py` `engine/mention.py` | `GroupPage.tsx` | M3/A2A |
 | 协调者调度 | `engine/coordinator.py` `dispatcher.py` | `LeaderPanel.tsx` | M3/M4 |
 | 计划确认 | `engine/coordinator.py` `api/plan.py` `engine/mention.py` | `PlanConfirmCard.tsx` | M12 |
 | 子智能体执行 | `engine/worker.py` `agent_loop.py` `tools.py` | `WorkerTrace.tsx` | M5/M10 |
@@ -215,9 +215,24 @@ sequenceDiagram
 
 无依赖的任务并行派发（M4 fan-out），有依赖的等前置完成后再派发。Coordinator 的 `dispatch_next` 节点找出所有 deps 满足的 pending 步骤，一次性 fan-out 到各自 worker 引擎。
 
-### 7. @mention 智能路由 + 防循环
+### 7. 两条协作路径 + @mention 防循环
 
-群聊消息中的 @mention 自动路由到对应智能体。30 秒防循环机制，避免两个智能体互相 @ 死循环。
+群组协作有**两条互补路径**，按任务形态分流、互不干涉：
+
+| | 中心化调度 | 去中心化 A2A |
+|--|------|------|
+| 适用 | 有明确步骤、可并行/依赖的工程任务（写代码、调研、交付物） | 来回互动型任务（成语接龙、你画我猜、多轮讨论、对话游戏） |
+| 入口 | coordinator `dispatch` 节点拆 DAG | coordinator `chat` 节点 @一个成员开局委派 + 讲清规则 |
+| 传递 | `dispatcher._dispatch_one` 直调 `push_task` → worker `execute` 重路径（create_react_agent ReAct） | `route_mentions` 调 `push_notify` → peer worker `brain→chat` 轻路径 |
+| 终止 | 全步骤完成 → `summarize` 汇总 | 成员接不上不再 @对方，话筒自然落地 |
+
+DAG 派发不经 `route_mentions`，A2A @mention 不进 create_react_agent——互动型来回对话不会被塞进带工具的 ReAct 重路径。协调者开局委派后即退场，不替成员接龙。
+
+**@mention 防循环**（`route_mentions`，三层机制）：
+- **群级共享计数**：防循环 dict 按 group 共享（非 per-engine），前端@后端与后端@前端写进同一 dict，反向清键才打中——原来 per-engine 各自一个空 dict，反向清键打不中对方，接龙 4 轮即断。
+- **反向清键**：A→B push 后清 B→A，允许 A→B→A→B 持续交替；不清则来回 2 轮就被同方向 30s 拦死。
+- **同方向 30s 拦截**：A 连发两次 @B（中间无 B→A）仍被拦——保留死循环防护。
+- **轮次上限**：`_A2A_CAP`（默认 50，`MULTI_AGENT_A2A_TURNS` 可调）兜底防 LLM 失灵无限刷屏；用户每发新消息（`route_user_message`）重置计数，新一轮接龙从 0 数。
 
 ### 8. 计划确认闭环（PL-02/PL-03）
 
@@ -323,7 +338,7 @@ multi-Agent/
       mcp_manager.py           # langchain-mcp-adapters → BaseTool
       inbox.py                 # asyncio.Queue channel（push_task/push_notify 唤醒）
       dispatcher.py             # DAG fan-out 派发
-      mention.py                # @mention 路由 + 防循环
+      mention.py                # @mention 路由 + 群级共享防循环 + A2A 轮次上限
       workspace.py             # 工作区隔离 + safe_path
       scheduler.py             # APScheduler 定时触发
     llm/                       # OpenAI 兼容 HTTP + 提示词 + JSON 提取
@@ -350,8 +365,13 @@ multi-Agent/
 - [x] 黑盒透明化 UI（typed BusEventData + LeaderPanel + WorkerTrace 监控，M11）
 - [x] 计划确认闭环（PL-02 确认/修改 + PL-03 直接干，引擎内存态驻留 + classify 绕过 LLM resume）
 - [x] Apache License 2.0 开源协议
+- [x] 去中心化 A2A 协作路径（worker↔worker @mention 来回对话，群级共享防循环 + 反向清键 + 轮次上限）
+- [x] 透明化统计：协调者/worker 回复均带「model · Ns · ↓ N tokens（含 N 推理）」状态行（流式采集真实 usage）
+- [x] 对话语音朗读（Web Speech API，自动朗读 + 气泡按需朗读）
+- [x] 顶部栏三视图切换（对话 / 智能体广场 / skill广场）+ 用户入口移至侧栏左下角
 - [ ] 执行可控：停止执行 / 超时降级 / 失败重派
 - [ ] 产物交付：交付物下载 / 文件浏览
+- [ ] 协调者主动收尾：监听群消息判断 A2A 何时该停（替换硬轮次上限的最终停止机制）
 - [ ] 打包发布（PyInstaller + electron-builder）
 
 ## License
