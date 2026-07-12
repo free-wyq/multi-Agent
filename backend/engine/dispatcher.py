@@ -15,8 +15,8 @@ import logging
 from typing import Any
 
 from engine.inbox import push_task
-from events import emit_message_added, emit_task_dispatched
-from store import crud
+from engine.reply import persist_agent_reply
+from events import emit_task_dispatched
 
 logger = logging.getLogger("multi-agent.dispatcher")
 
@@ -92,20 +92,18 @@ async def _dispatch_one(
     agent_name: str = step["agent_name"]
     instruction: str = step["instruction"]
 
-    # reply: persist dispatch message + emit
+    # reply: persist dispatch message + emit. This is a templated announce (B14):
+    # the text is built from the step's agent_name + instruction, NOT streamed LLM
+    # output, so it carries no model/elapsed_ms/tokens stats — ``data`` stays None
+    # (aligns with A8/vg2: dispatch announce is excluded from the stats contract,
+    # the same way node_dispatch's "📋 已制定协作计划" announce is excluded in
+    # coordinator.py). The frontend's extractCoordStats returns null on a missing
+    # elapsed_ms and renders no status line, which is correct for announce text
+    # (stats wouldn't match the templated content). Delegating to persist_agent_reply
+    # (engine.reply, B10) keeps the agent_reply shape a single source shared with the
+    # registry's execute-path announce and the coordinator/worker graph replies.
     dispatch_msg = f"🚀 步骤 {step_num} 派发：\n@{agent_name} \n\n{instruction}"
-    msg = await crud.create_message(
-        {
-            "group_id": group_id,
-            "task_id": None,
-            "sender_id": coordinator_id,
-            "receiver_id": "broadcast",
-            "type": "agent_reply",
-            "content": dispatch_msg,
-            "data": None,
-        }
-    )
-    await emit_message_added(msg.model_dump())
+    await persist_agent_reply(group_id, coordinator_id, dispatch_msg, None)
 
     # push task to worker — this wakes the target AgentEngine's run loop as an
     # independent asyncio task, so multiple dispatched steps run concurrently.

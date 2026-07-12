@@ -1030,6 +1030,13 @@ async def node_dispatch(state: CoordinatorState, config: Optional[RunnableConfig
         f"{s.get('step')}. {s.get('agent_name', '')} → {s.get('instruction', '')[:40]}..."
         for s in plan
     )
+    # B14 announce 类回复不带 stats：此处「📋 已制定协作计划...」是模板文本（由
+    # plan_summary 拼接，非 brain 流式 LLM 输出），故 _unified_reply 不传 data →
+    # persist_agent_reply 落 data=None。与 dispatcher._dispatch_one 的「🚀 步骤 N 派发」
+    # announce 同判定（模板文本不带 stats），与 A8/vg2 的 stats 契约对齐——dispatch
+    # announce 被排除在 stats 透传外（stats 不匹配模板 content，前端 extractCoordStats
+    # 对 data.elapsed_ms 缺失返 null 不渲染状态行，正确）。只有 chat/ask/continue
+    # （reply_content 即流式 LLM 文本）才透传 _stream_stats（见 node_llm_decide 盖 stats 注释）。
     if state.get("auto_confirm"):
         await _unified_reply(
             state["group_id"],
