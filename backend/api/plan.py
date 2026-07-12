@@ -159,10 +159,14 @@ async def plan_modify(group_id: str, body: PlanModifyBody) -> dict[str, Any]:
     """Amend the resident plan's steps then confirm (user edited the plan).
 
     Merges each provided field into the matching step (by ``step`` number);
-    steps absent from the body keep their existing values. After patching, the
-    amended plan is written back to the engine + re-announced over the bus so
-    the front-end PlanConfirmCard reflects the new plan, then a ``plan_confirm``
-    notify resumes fan-out.
+    steps absent from the body keep their existing values. The patched
+    ``amended_steps`` are carried in the resume payload (``{"mode": "modify",
+    "amended_steps": [...]}``) rather than written directly to the engine's
+    mirror — ``node_dispatch``'s ``interrupt()`` returns the payload and
+    ``_splice_amended_steps`` rewrites the plan in the checkpointer (the source
+    of truth) before fan-out. The front-end PlanConfirmCard is pre-emptively
+    re-announced with the patched plan so the card reflects the edit before
+    the resume fans out.
     """
     group, engine = await _require_coordinator_engine(group_id)
     if not engine._dispatch_plan:
@@ -187,10 +191,17 @@ async def plan_modify(group_id: str, body: PlanModifyBody) -> dict[str, Any]:
             target["task_id"] = None
             target["result"] = None
 
-    # write back to engine + re-announce
-    engine._dispatch_plan = plan
+    # re-announce the patched plan so the front-end card reflects the edit
+    # immediately (the checkpointer is updated by node_dispatch on resume).
     await emit_coordinator_plan(group_id, group.coordinator_id, plan)
-    await route_plan_confirm(group_id, {"mode": "modify"})
+    # carry the patched steps in the resume payload — node_dispatch's interrupt
+    # returns this and _splice_amended_steps rewrites the checkpointer's plan
+    # (the source of truth) before fan-out. We no longer write engine._dispatch
+    # _plan directly: the mirror is synced back from the graph result by
+    # _handle_notify after the resume completes.
+    await route_plan_resume(
+        group_id, {"mode": "modify", "amended_steps": plan}
+    )
     return {
         "ok": True,
         "group_id": group_id,
