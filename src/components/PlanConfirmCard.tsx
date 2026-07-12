@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Alert, Button, Card, Input, Modal, Select, Tag, message } from 'antd'
+import { Button, Card, Input, Modal, Select, Tag, Typography, message } from 'antd'
 import { CheckOutlined, ThunderboltOutlined, EditOutlined } from '@ant-design/icons'
 import { planApi, type PlanStep, type PlanModifyStep } from '../services/api'
 
@@ -157,6 +157,7 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
     <Card
       size="small"
       style={{ marginBottom: 0, borderColor: '#d3adf7' }}
+      styles={{ body: { padding: '8px 12px' } }}
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <Tag color="purple" style={{ margin: 0 }}>协调者计划</Tag>
@@ -166,56 +167,49 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
         </span>
       }
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="请确认是否按此计划执行"
-        description="确认继续 → 按原计划派发；直接干 → 本群后续计划自动派发不再确认；修改 → 编辑步骤后派发。"
-      />
-
-      {/* 步骤列表 */}
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
+      {/* 步骤列表——紧凑行（单行指令，长指令省略号 + Tooltip 全文 hover 看），
+          取代原先每步一张厚 padding 卡片 + 顶部 Alert 说明卡。单步从 ~110px 压到 ~36px，
+          1 步计划整卡从 ~280px 压到 ~120px，不再占半个对话区。 */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginBottom: 8 }}>
         {plan.map((step) => {
           const badge = stepBadge(step.status)
           return (
             <div
               key={`pc-step-${step.step}`}
               style={{
-                padding: '8px 12px',
+                padding: '4px 8px',
                 background: step.status === 'pending' ? '#fff7e6' : '#fafafa',
                 borderRadius: 4,
                 border: '1px solid #f0f0f0',
               }}
             >
-              <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                <span style={{ fontWeight: 600, color: '#722ed1' }}>步骤 {step.step}</span>
-                <Tag color={badge.color}>{badge.label}</Tag>
-                <span style={{ fontSize: 12, color: '#666' }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, minWidth: 0 }}>
+                <span style={{ fontWeight: 600, color: '#722ed1', fontSize: 12, flexShrink: 0 }}>
+                  {step.step}
+                </span>
+                <Tag color={badge.color} style={{ margin: 0, fontSize: 11, lineHeight: '18px', padding: '0 6px' }}>
+                  {badge.label}
+                </Tag>
+                <span style={{ fontSize: 12, color: '#666', flexShrink: 0 }}>
                   {step.agent_name || step.agent_id}
                 </span>
+                <Typography.Text
+                  ellipsis={{ tooltip: step.instruction }}
+                  style={{ fontSize: 12, color: '#333', flex: 1, minWidth: 0 }}
+                >
+                  {step.instruction}
+                </Typography.Text>
               </div>
-              <div style={{ fontSize: 13, color: '#333', whiteSpace: 'pre-wrap' }}>
-                {step.instruction}
-              </div>
-              {step.depends_on && step.depends_on.length > 0 && (
-                <div style={{ fontSize: 11, color: '#999', marginTop: 4 }}>
-                  依赖: 步骤 {step.depends_on.join(', ')}
-                </div>
-              )}
-              {step.result && (
-                <div style={{ fontSize: 12, color: '#666', marginTop: 4, whiteSpace: 'pre-wrap' }}>
-                  结果: {step.result}
-                </div>
-              )}
             </div>
           )
         })}
       </div>
 
-      {/* 操作按钮：确认/直接干需有待执行步骤；三者互斥（任一进行中禁用其余）。 */}
-      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+      {/* 操作按钮：确认/直接干需有待执行步骤；三者互斥（任一进行中禁用其余）。
+          按钮贴右边——和发送键同侧，确认动作与发送形成视觉连续。 */}
+      <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
         <Button
+          size="small"
           type="primary"
           icon={<CheckOutlined />}
           loading={confirming}
@@ -225,6 +219,7 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
           确认继续
         </Button>
         <Button
+          size="small"
           icon={<ThunderboltOutlined />}
           loading={directing}
           disabled={!hasPending || (busy && !directing)}
@@ -233,6 +228,7 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
           直接干
         </Button>
         <Button
+          size="small"
           icon={<EditOutlined />}
           disabled={plan.length === 0 || (busy && !modifying)}
           onClick={openModify}
