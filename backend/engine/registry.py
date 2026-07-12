@@ -951,15 +951,6 @@ class AgentRegistry:
         self._engines[group_id][agent_def["id"]] = engine
         return engine
 
-    async def remove_engine(self, group_id: str, agent_id: str) -> None:
-        group = self._engines.get(group_id)
-        if not group or agent_id not in group:
-            return
-        await group[agent_id].stop()
-        del group[agent_id]
-        if not group:
-            del self._engines[group_id]
-
     async def stop_group(self, group_id: str) -> int:
         """MT-07: stop every engine in a group (解散团队时停止引擎).
 

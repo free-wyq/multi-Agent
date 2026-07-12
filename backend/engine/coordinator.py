@@ -1302,8 +1302,14 @@ class _ContentExtractor(ContentExtractor):
     Kept so any external/test reference to ``engine.coordinator._ContentExtractor``
     still resolves after the class moved to ``llm.json_stream.ContentExtractor``.
     The coordinator's own call sites use the public ``ContentExtractor`` directly
-    (see ``_stream_coordinator_decision``). Remove this alias once no remaining
-    consumer references the underscore name (verified by grep before deletion).
+    (see ``_stream_coordinator_decision``).
+
+    B32 死代码重巡航核实：全仓 grep ``_ContentExtractor`` 的非 tests/ 引用为零——
+    coordinator.py:1356 + worker.py:172 都用 ``ContentExtractor()``（公共名），
+    无源码消费者经此别名导入。但 test_vh6 [B6] 显式锁定此别名存在（锁「向后兼容
+    别名保留」契约），故保留不删——删了破 vh6 回归。保留理由：别名是 B9 抽出时的
+    有意过渡保留（防外部插件/未来 import 断），vh6 把「保留」本身锁成契约；真要
+    删需先同步删 vh6 [B6] 断言 + 评估外部 import 面，非本轮「逐个核实」范围。
     """
 
 

@@ -376,6 +376,14 @@ def list_hubs() -> list[dict[str, Any]]:
     """Introspection helper: which providers are active right now.
 
     Useful for the UI to badge "market: catalog (+ remote when configured)".
+
+    B32 死代码重巡航核实：全仓 grep ``list_hubs`` 零调用方（src + tests + 前端都不调）。
+    **保留不删**——与 ``agent_templates.list_categories`` 同型：是公开模块 ``skill_hub``
+    的 introspection helper，前端「技能市场」页 badge「市场：内置 + 远程（已配时）」
+    时正是此函数的预期消费场景（docstring 已点明「Useful for the UI to badge」）。
+    当前前端技能市场页用客户端硬编码 badge，未走此 endpoint 是现状非设计意图——删了断
+    「按配置动态 badge」的未来扩展。保留理由 = 预留 UI 消费出口，纯内存计算零开销，
+    已注释说明保留意图。
     """
     hubs: list[dict[str, Any]] = [{"id": "catalog", "name": "内置市场", "active": True}]
     remote_url = os.environ.get("SKILL_HUB_URL", "").strip()

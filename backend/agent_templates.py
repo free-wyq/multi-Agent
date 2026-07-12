@@ -239,6 +239,16 @@ def list_categories() -> list[dict[str, Any]]:
 
     Useful for the UI to render category filter tabs in the 角色模板广场.
     Returns ``[{id, name, count}]`` in catalog declaration order (deduped).
+
+    B32 死代码重巡航核实：全仓 grep ``list_categories`` 零调用方（src + tests + 前端
+    services/api.ts 都不调——前端 templates 页直接 GET /api/agents/templates?category=
+    按需过滤，未消费 categories 元数据 endpoint）。**保留不删**——它是公开模块
+    ``agent_templates`` 的 introspection helper（与 ``list_templates`` / ``get_template``
+    同层的 catalog 元数据出口），前端「角色模板广场」未来渲染分类筛选 tab 时正是消费
+    此函数的预期场景（docstring 已点明「Useful for the UI to render category filter
+    tabs」）。当前前端用客户端硬编码分类（templates 页写死分类列表），未走此 endpoint
+    是现状非设计意图——删了会断「按 catalog 动态生成分类」的未来扩展，且无收益（纯内存
+    计算，无 I/O 无副作用，留着零开销）。保留理由 = 预留 UI 消费出口，已注释说明。
     """
     seen: dict[str, int] = {}
     for t in _CATALOG_INDEX.values():
