@@ -178,6 +178,20 @@ async def update_group(group_id: str, payload: GroupUpdateBody) -> Group | None:
     agent that has no member row). The Leader swap does not touch membership: the
     old Leader stays as an ordinary member, the new Leader's member row (if any) is
     untouched. Use add/remove member to change the roster itself.
+
+    B11 pending-restart 文档化（换群主不重建驻留引擎）：此 PUT 只落 DB 行的
+    ``coordinator_id``，不触发 ``registry`` 重建该群驻留引擎。引擎身份层
+    (``is_coordinator`` / ``graph_kind`` / ``coordinator_id``) 在启动烘焙
+    (``AgentEngine.__init__``) 时落定、生命周期内不再变——见 ``AgentEngine`` 类
+    docstring 的时效口径契约。换群主的后果：(1) ``route_user_message`` /
+    ``route_plan_resume`` 等入站路由每条消息 ``crud.get_group`` 现读新群主 id，
+    把用户消息/计划确认 notify 推给新群主引擎；(2) 但新群主引擎仍跑建群时烘焙的
+    worker 图（当时是成员），其 ``_handle_notify`` 走 worker 分支而非 coordinator
+    图调度——即「能收信但不调度」；(3) 老群主的 coordinator 图被现读路由旁路闲置，
+    其驻留 ``_dispatch_plan`` 状态保留但不再被入站消息唤醒。完整换群主生效需进程
+    重启（``load_from_store`` 按新 ``coordinator_id`` 重建图）或解散群组重建。
+    有意分层：图身份 ≠ 消息级配置，本端点不擅自重建引擎（重建须停 inbox、作废
+    checkpointer 线程的 dispatch_plan/interrupt 状态、迁移驻留对话记忆，高风险未做）。
     """
     new_coord = payload.coordinator_id
     if new_coord is not None:

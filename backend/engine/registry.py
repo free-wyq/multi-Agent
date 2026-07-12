@@ -55,6 +55,28 @@ class AgentEngine:
     cross-invoke state (memory, dispatch_plan, recent_routes, pending_tasks).
     The run loop blocks on ``inbox.get`` with a 1s timeout so shutdown can
     interrupt it.
+
+    时效口径契约（B11 文档化「群主运行期不可变」）—引擎字段分两层时效，勿混：
+
+    身份层（startup-baked，``__init__`` 落定，引擎生命周期内不再变）：
+    ``agent_id`` / ``group_id`` / ``coordinator_id`` / ``is_coordinator`` /
+    ``graph_kind`` / ``single_chat`` / ``system_prompt``。``is_coordinator`` 派生
+    ``graph_kind`` → 决定编译哪张 LangGraph 图（coordinator 图 vs worker 图），这是
+    引擎*身份*非消息级配置。每 notify 刷新 ``coordinator_id`` 会要求重建图 + 作废
+    MemorySaver checkpointer 线程（coordinator 线程的 dispatch_plan/interrupt 状态
+    worker 图无法解释），代价高且状态腐蚀风险大，故启动缓存不再二次查库（见
+    ``_run_worker_task`` 的 report-back notify 用 ``self.coordinator_id``）。
+
+    配置层（per-invoke，``_handle_notify`` 每次 ``crud.get_group`` 现读）：
+    ``auto_confirm`` / ``leader_strategy``。消息级行为旋钮（群设置 Modal / plan-direct
+    API 可随时改），现读代价一次 DB 读（vs 下游 LLM 调用可忽略），缓存会冻结「等待确认
+    vs 直接干」模式与指挥策略直到重启。
+
+    后果——换群主是 pending-restart：``PUT /api/groups/{id}`` 改 ``coordinator_id``
+    只落 DB 行，不重建驻留引擎；新群主的引擎仍跑启动烘焙的图（建群时是成员 → worker
+    图），老群主的 coordinator 图被 ``route_user_message`` 等现读路由旁路闲置。换群主
+    仅在进程重启或解散重建后生效。这是有意分层（图身份 ≠ 消息级配置），非 bug；要支持
+    运行期换群主须实现引擎重建（高风险，未做）。
     """
 
     def __init__(
@@ -68,8 +90,12 @@ class AgentEngine:
         self.name: str = agent_def["name"]
         self.role: str = agent_def.get("role", "")
         self.group_id: str = group_id
-        # 判定群主：谁被设为该群的 coordinator_id，谁就是协调者——
-        # 不按 role 字符串判定（role 是创建时设的数据，群主身份是群组级配置）。
+        # B11 时效契约·身份层（startup-baked）：谁被设为该群的 coordinator_id，谁
+        # 就是协调者——不按 role 字符串判定（role 是创建时设的数据，群主身份是群组级
+        # 配置）。coordinator_id / is_coordinator / graph_kind 在 __init__ 落定，引擎
+        # 生命周期内不再变（启动缓存「不再二次查库」是有意为之——换群主须重建图 +
+        # 作废 checkpointer 线程，见类 docstring 时效口径契约）。auto_confirm /
+        # leader_strategy 属配置层，在 _handle_notify 每 notify 现读（见下）。
         self.is_coordinator: bool = self.agent_id == coordinator_id
         self.coordinator_id: str = coordinator_id
         # agent 基础 system_prompt 缓存到引擎，供 coordinator 图（拼接 COORDINATOR_SYSTEM）
@@ -407,7 +433,9 @@ class AgentEngine:
         await self._reply(reply)
 
         # single agent_reply notify to coordinator (Rust 318-339)
-        # 用 engine 启动时缓存的 coordinator_id，不再二次查库
+        # 用 engine 启动时缓存的 coordinator_id（身份层·startup-baked，B11 时效契约
+        # 见类 docstring）。不每任务查库：coordinator_id 是引擎身份非消息级配置，
+        # 运行期不变；换群主须重建引擎（未实现，pending-restart）。
         if self.coordinator_id and self.coordinator_id != agent_id:
             await push_notify(
                 group_id,
@@ -592,6 +620,12 @@ class AgentEngine:
                 # would freeze the wait/confirm vs 直接干 mode and a stale Leader
                 # strategy until the engine restarts. Cost is one DB read per
                 # coordinator notify, negligible vs the LLM call downstream.
+                #
+                # B11 时效口径契约·配置层（per-invoke 现读）：auto_confirm /
+                # leader_strategy 是消息级行为旋钮，每 notify 现读（与身份层
+                # coordinator_id 启动缓存对照——两类字段不同时效，有意分层非口径
+                # 不一致：身份层决定编译哪张图不可运行期变；配置层只影响本轮图内
+                # 决策节点可随时改，见类 docstring 时效口径契约）。
                 auto_confirm = False
                 leader_strategy = ""
                 grp = await crud.get_group(self.group_id)
