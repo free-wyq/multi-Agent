@@ -3,7 +3,6 @@ import { Button, Collapse, Empty, Form, Input, Modal, Select, Spin, Tooltip, mes
 import {
   PlusOutlined,
   RobotOutlined,
-  SettingOutlined,
   TeamOutlined,
 } from '@ant-design/icons'
 
@@ -25,26 +24,30 @@ const STATUS_DOT: Record<string, string> = {
 }
 
 interface SidebarProps {
-  /** 打开设置弹窗。由 Layout 持有 SettingsModal 的 open 态，Sidebar 只触发。 */
-  onOpenSettings: () => void
+  /**
+   * 选中列表项后切回聊天视图（顶部栏视图切换为 'chat'）。由 Layout 传入——
+   * 广场页（AgentPage/SkillPage）展示时点侧栏智能体/群组应立即进入对应单聊/群聊，
+   * 而非停留在广场页。
+   */
+  onNavigateChat: () => void
 }
 
 /**
- * Sidebar — 左栏导航（布局重构 2026-07-11）。
+ * Sidebar — 左栏导航（顶部栏改版 2026-07-12）。
  *
  * 240px 浅灰侧栏，VS Code/Linear 极简风格。结构：
- *  - 顶部品牌区：🤖 MA（品牌蓝）。
  *  - 两个可折叠分组（antd Collapse）：「智能体」= agent 列表（点选进单聊），
  *    「多智能体」= 群组列表（点选进群聊，过滤掉 config.single_chat===true 的单聊群）。
  *    每组底部带 +新建入口。
- *  - 左下角 ⚙ 设置 按钮（打开 SettingsModal）。
+ *  - 品牌区与设置入口已上移至全局顶部栏（见 Layout），本组件不再渲染头部/尾部。
  *
  * 选择态走 SelectionContext：selectAgent（find-or-create 单聊群）/ selectGroup（直接切群）。
  * 数据（groups/agents/agentStatusMap）由 SelectionContext 集中加载，Sidebar 只消费渲染。
+ * 选中项时同步调 onNavigateChat 把顶部栏视图切回聊天。
  *
  * 高亮：多智能体选中 = activeGroupId===g.id；智能体选中 = activeAgentId===agent.id。
  */
-export default function Sidebar({ onOpenSettings }: SidebarProps) {
+export default function Sidebar({ onNavigateChat }: SidebarProps) {
   const { groups, agents, agentStatusMap, loading, activeAgentId, activeGroup, selectAgent, selectGroup } =
     useSelection()
 
@@ -53,6 +56,12 @@ export default function Sidebar({ onOpenSettings }: SidebarProps) {
 
   // 多智能体列表过滤掉单聊群（single_chat 群不显示在多智能体分组，只在智能体分组以单聊形式进入）。
   const multiAgentGroups = groups.filter((g) => !g.config?.single_chat)
+
+  // 选中任一列表项后切回聊天视图（广场页 → 聊天的直觉切换）。
+  const wrapSelect = (fn: (id: string) => void) => (id: string) => {
+    fn(id)
+    onNavigateChat()
+  }
 
   return (
     <div
@@ -67,23 +76,7 @@ export default function Sidebar({ onOpenSettings }: SidebarProps) {
         overflow: 'hidden',
       }}
     >
-      {/* 品牌区 */}
-      <div
-        style={{
-          height: 48,
-          flexShrink: 0,
-          padding: '0 16px',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 8,
-          borderBottom: '1px solid #ececec',
-        }}
-      >
-        <span style={{ fontSize: 18 }}>🤖</span>
-        <span style={{ fontWeight: 700, fontSize: 15, color: BRAND }}>MA</span>
-      </div>
-
-      {/* 分组列表 */}
+      {/* 分组列表（品牌区已上移至顶部栏） */}
       <div style={{ flex: 1, minHeight: 0, overflowY: 'auto' }}>
         {loading && groups.length === 0 && agents.length === 0 ? (
           <div style={{ textAlign: 'center', padding: 24 }}>
@@ -104,7 +97,7 @@ export default function Sidebar({ onOpenSettings }: SidebarProps) {
                   agents={agents}
                   agentStatusMap={agentStatusMap}
                   activeAgentId={activeAgentId}
-                  onSelect={selectAgent}
+                  onSelect={wrapSelect(selectAgent)}
                 />,
               },
               {
@@ -113,31 +106,12 @@ export default function Sidebar({ onOpenSettings }: SidebarProps) {
                 children: <GroupsPanel
                   groups={multiAgentGroups}
                   activeGroupId={activeGroup && !activeGroup.config?.single_chat ? activeGroup.id : null}
-                  onSelect={selectGroup}
+                  onSelect={wrapSelect(selectGroup)}
                 />,
               },
             ]}
           />
         )}
-      </div>
-
-      {/* 左下角设置 */}
-      <div
-        style={{
-          flexShrink: 0,
-          borderTop: '1px solid #ececec',
-          padding: 8,
-        }}
-      >
-        <Button
-          block
-          type="text"
-          icon={<SettingOutlined />}
-          onClick={onOpenSettings}
-          style={{ textAlign: 'left', height: 36 }}
-        >
-          设置
-        </Button>
       </div>
     </div>
   )
