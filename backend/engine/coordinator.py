@@ -229,6 +229,56 @@ async def _detect_residual_interrupt(
         )
 
 
+# ── plan-formatting helpers ────────────────────────────────────────────────
+
+#: Maximum chars of a step's ``result``/``instruction`` carried into any
+#: human-facing summary or LLM view. Bound so a single runaway worker output
+#: (e.g. a verbose ``cat`` of a large file) can't blow up the chat bubble or
+#: starve the prompt's context window. Single source — replaces the scattered
+#: ``[:200]`` magic numbers that previously dotted ``node_summarize``,
+#: ``_build_plan_adjust_state`` and ``_build_step_recovery_state`` (B7).
+STEP_FIELD_LIMIT = 200
+
+
+def _step_text(step: dict[str, Any]) -> str:
+    """Return the human-facing text for a step: its result if present else its instruction.
+
+    ``node_summarize`` renders a per-step line; both result and instruction must
+    be truncated so one runaway worker output can't dominate the summary bubble.
+    This helper is the single source for that truncation (B7) — previously
+    ``node_summarize`` inlined ``(s.get('result') or s.get('instruction', ''))[:200]``
+    with a bare magic ``200``. Kept as a private helper (not ``format_step_summary``)
+    because the per-step text is also reused by ``_build_plan_adjust_state`` /
+    ``_build_step_recovery_state`` for their LLM views, which truncate at the
+    same limit — centralizing the truncation + the ``result or instruction``
+    precedence avoids the three copies drifting.
+    """
+    return (step.get("result") or step.get("instruction") or "")[:STEP_FIELD_LIMIT]
+
+
+def format_step_summary(plan: list[dict[str, Any]]) -> str:
+    """Render a plan as a per-step summary block (✅/❌ + agent + result-or-instruction).
+
+    Used by ``node_summarize`` to build the "🎉 全部完成！协作结果汇总" reply.
+    Previously inlined in the node as a ``"\\n".join(...)`` over ``plan`` with a
+    bare ``[:200]`` truncation on the result-or-instruction text (B7). Extracted
+    to a shared helper so the format (status emoji + agent name + truncated text,
+    newline-joined) has one definition — the dispatcher could reuse it for a
+    progress announce if needed. ``STEP_FIELD_LIMIT`` is the single source for
+    the per-field truncation width.
+
+    Each step line: ``"<✅|❌> <agent_name>: <result-or-instruction, ≤200 chars>"``.
+    A step with no result and no instruction renders an empty text segment
+    (``"✅ bob: "``) rather than crashing — consistent with the prior inlined
+    behaviour (``s.get('result') or s.get('instruction', '')`` defaulted to ``""``).
+    """
+    return "\n".join(
+        f"{'✅' if s.get('status') == 'completed' else '❌'} {s.get('agent_name', '')}: "
+        f"{_step_text(s)}"
+        for s in plan
+    )
+
+
 # ── nodes ─────────────────────────────────────────────────────────────────
 
 
@@ -1071,11 +1121,7 @@ async def node_dispatch_next(state: CoordinatorState) -> dict:
 async def node_summarize(state: CoordinatorState) -> dict:
     """All steps done: summarize results, reply, clear plan (Rust dispatch_all_done)."""
     plan = state.get("dispatch_plan") or []
-    summary = "\n".join(
-        f"{'✅' if s.get('status') == 'completed' else '❌'} {s.get('agent_name', '')}: "
-        f"{(s.get('result') or s.get('instruction', ''))[:200]}"
-        for s in plan
-    )
+    summary = format_step_summary(plan)
     await _unified_reply(
         state["group_id"],
         state["agent_id"],
