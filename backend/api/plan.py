@@ -127,8 +127,10 @@ async def plan_direct(group_id: str) -> dict[str, Any]:
     """Switch the group to 直接干 (auto_confirm=True) and resume.
 
     Sets ``group.config.auto_confirm = True`` so future plans auto-dispatch
-    without waiting, then resumes the resident plan (same notify path as
-    confirm). The mode persists in the group config across engine restarts.
+    without waiting, then resumes the resident plan via the native resume
+    channel (``Command(resume={"mode": "direct"})``) — ``node_dispatch``'s
+    ``interrupt()`` returns the payload and the graph fans out the pending
+    steps. The mode persists in the group config across engine restarts.
     """
     group, engine = await _require_coordinator_engine(group_id)
     # flip the config flag (merge so we don't clobber a co-existing leader_strategy
@@ -140,7 +142,7 @@ async def plan_direct(group_id: str) -> dict[str, Any]:
     # resume the resident plan if any
     resumed = False
     if any(s.get("status") == "pending" for s in engine._dispatch_plan):
-        await route_plan_confirm(group_id, {"mode": "direct"})
+        await route_plan_resume(group_id, {"mode": "direct"})
         resumed = True
     return {
         "ok": True,
