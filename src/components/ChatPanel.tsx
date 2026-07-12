@@ -742,18 +742,22 @@ export default function ChatPanel({
             const isUser = msg.sender_id === 'user'
             // SC-11：slash 命令卡片（type=slash_card）——handler 经 ctx.renderCard 推入，
             // content 存字符串（stub 占位），data.node 存富卡片 ReactNode（SC-03~10 实现）。
-            // 渲染为系统消息气泡（左对齐，不复用 HighlightMessage 的 @mention 高亮）。
+            // 渲染为系统消息（左对齐，头像 + 卡片 + 时间戳），不复用 HighlightMessage 的
+            // @mention 高亮。
+            //
+            // 关键：node 是 antd Card（ModelCard/ToolsCard 等，自带白底+边框+圆角+标题），
+            // 不再套 .chat-bubble 气泡层——否则灰底气泡 + padding + max-width:70% 会把卡片
+            // 挤变形（双层背景/双层圆角/padding 双挤/字段被压窄）。卡片直接裸露渲染，仅靠
+            // chat-bubble-wrap 对齐头像与时间戳，宽度对系统卡片放宽到 90%（信息密集需舒展）。
             if (msg.type === 'slash_card') {
               return (
                 <div key={msg.id} className="chat-msg" style={{ flexDirection: 'row' }}>
                   <ChatAvatar id="system" agents={agents} />
-                  <div className="chat-bubble-wrap">
+                  <div className="chat-bubble-wrap" style={{ flex: 1, minWidth: 0, maxWidth: 760 }}>
                     <div className="chat-sender-name">
                       <SenderName id="system" agents={agents} />
                     </div>
-                    <div className="chat-bubble chat-bubble--other">
-                      {msg.data?.node as ReactNode ?? msg.content}
-                    </div>
+                    {msg.data?.node as ReactNode ?? msg.content}
                     <div className="chat-timestamp">
                       {new Date(msg.created_at).toLocaleTimeString()}
                     </div>
