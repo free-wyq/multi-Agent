@@ -123,6 +123,16 @@ main_loop() {
   COMPLETED=0
   LOOP_COUNT=0
 
+  # 会话 id：首轮用 `claude -p`（无 --continue）开一个全新会话，从 stream-json 的
+  # init 事件抓 session_id 落盘；后续轮次用 `claude --resume <id> -p` 续接这个会话。
+  # 为什么不用 --continue：--continue 续接「项目最近会话」，而最近会话往往是上一批
+  # 跑完的旧会话（上下文里满是「全部完成」的认知）→ worker 走「已完成检测」直接
+  # 判定已实现、秒退打勾、零产出。新会话从零开始，才能真去做任务。
+  # 见用户反馈 [[unattended-new-session-fix]]。
+  local SESSION_ID_FILE=".session_id"
+  local SESSION_ID=""
+  [ -f "$SESSION_ID_FILE" ] && SESSION_ID=$(cat "$SESSION_ID_FILE" 2>/dev/null || true)
+
   while true; do
     local REMAINING CURRENT_TASK
     REMAINING=$(grep -c '\[ \]' "$TASK_FILE" 2>/dev/null || true)
@@ -161,7 +171,13 @@ main_loop() {
 
     # 核心：调用 Claude，注入"禁止提问"铁律
     # 注意：打勾由脚本在 claude 退出后用 sed 完成，不依赖 claude 自己改 .task.md
-    claude --continue -p "## 角色
+    #
+    # 会话策略：首轮 SESSION_ID 为空 → 用 `claude -p`（无 --continue）开新会话，
+    #   --output-format stream-json 抓 init 事件的 session_id 落盘；
+    #   后续轮次 SESSION_ID 非空 → 用 `claude --resume <id> -p` 续接同一新会话。
+    #   看门狗 --internal-resume 重启时也会读 .session_id 续接，不丢上下文。
+    local CLAUDE_PROMPT RESUME_ARG SESSION_JSON
+    CLAUDE_PROMPT="## 角色
 你是无人值守开发助手，当前处于 24 小时自动运行模式。全程没有任何人在场，你必须独立完成决策。
 
 ## 铁律（违反会导致系统崩溃）
@@ -192,7 +208,26 @@ main_loop() {
 - 不要自己修改 .task.md 的勾选状态——打勾由外部脚本负责。
 - 依赖已有文件时自己读。
 - 本轮结束后直接结束，不要输出总结。
-" --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+"
+
+    if [ -n "$SESSION_ID" ]; then
+      # 续接已有会话（纯文本输出，stderr 入日志）
+      claude --resume "$SESSION_ID" -p "$CLAUDE_PROMPT" \
+        --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+    else
+      # 首轮：开新会话，stream-json 抓 session_id
+      SESSION_JSON=$(claude -p "$CLAUDE_PROMPT" \
+        --output-format stream-json \
+        --dangerously-skip-permissions 2>> "$LOG_FILE" || true)
+      # 从 init 事件抓 session_id（type:system, subtype:init 那行）
+      SESSION_ID=$(printf '%s' "$SESSION_JSON" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/"session_id":"//; s/"$//' || true)
+      if [ -n "$SESSION_ID" ]; then
+        echo "$SESSION_ID" > "$SESSION_ID_FILE"
+        log "🔗 新会话已建立: $SESSION_ID"
+      else
+        log "⚠️ 未能从首轮输出抓到 session_id，下轮仍尝试新会话"
+      fi
+    fi
 
     end_ts=$(date +%s)
     dur_min=$(((end_ts - start_ts) / 60))
@@ -246,9 +281,14 @@ main_loop() {
     fi
 
     # 每 5 轮普通压缩一次；压缩后下一轮 Prompt 会强制重读 .task.md（见上）
+    # 用 --resume <SESSION_ID> 续接同一新会话做压缩（不能 --continue，理由见会话策略注释）
     if [ $((LOOP_COUNT % 5)) -eq 0 ]; then
       log "🗜️ 压缩会话..."
-      echo "/compact" | claude --continue --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+      if [ -n "$SESSION_ID" ]; then
+        echo "/compact" | claude --resume "$SESSION_ID" --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+      else
+        echo "/compact" | claude --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+      fi
       log "🗜️ 压缩完成"
     fi
 

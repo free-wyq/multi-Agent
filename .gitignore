@@ -36,5 +36,6 @@ __pycache__/
 *.log
 .status
 .pid.*
+.session_id
 .task.md
 .claude/memory/
