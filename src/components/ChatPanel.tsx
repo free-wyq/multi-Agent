@@ -37,19 +37,27 @@ const { Text } = Typography
  * 为什么需要白名单：WS 事件流把所有 content truthy 的事件都灌进 logs，但只有
  * 「消息语义」的事件（agent_reply 智能体回复 / user_input 用户消息 / task_log
  * 任务日志 / slash_card slash 命令卡片）才该出现在聊天气泡流里。其余是 trace
- * 事件——coordinator_think 协调者思考、task_token 流式 token、task_think/tool
- * 工作过程、agent_status 状态迁移、coordinator_plan 计划——它们有自己的展示区
- * （LeaderPanel 思考链 / 流式气泡 / 计划卡片），不该再混进消息气泡流。
+ * 事件——coordinator_think 协调者思考、task_token 流式 token、task_tool 工具调用、
+ * agent_status 状态迁移、coordinator_plan 计划——它们有自己的展示区（LeaderPanel
+ * 思考链 / 流式气泡 / 计划卡片），不该再混进消息气泡流。
  *
  * 特别是 coordinator_think：它携带协调者完整回复文本，若也桥接成气泡，会与随后
  * node_chat 持久化的 agent_reply 消息（id 不同，去重命中不了）同时渲染 → 「协调者
  * 回复两次」缺陷。白名单从源头排除这类重复。
+ *
+ * task_think（本任务放行）：worker 在 ReAct 循环里流出的中间推理（on_chat_model_end
+ * 的 think phase，registry.on_log → emit_task_think，data {phase:'thinking'|'final'}）。
+ * 它与 coordinator_think 的关键区别——worker think 是 ReAct 中间步（工具调用前的模型
+ * 思考片段），与该 task 最终回复（task_answer / 持久化 agent_reply）语义不同、不重复，
+ * 故可安全桥接成气泡内折叠块（按 task_id 归并到对应流式/定稿气泡，见 tasks 18-19）。
+ * coordinator_think 仍排除（协调者 think 即其回复正文，会与 agent_reply 重复）。
  */
 const CHAT_MESSAGE_TYPES = new Set([
   'agent_reply',
   'user_input',
   'task_log',
   'slash_card',
+  'task_think',
 ])
 
 /** antd Input.TextArea 的 ref 类型（antd v6 未从顶层导出 TextAreaRef，用 ComponentRef 推导）。 */
@@ -445,12 +453,14 @@ export default function ChatPanel({
   }, [events, streaming, chatMessages, agentStatuses])
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
-  // 按类型白名单过滤：只 agent_reply/user_input/task_log/slash_card 桥接成聊天气泡，
-  // 其余 trace 事件（coordinator_think/task_token/task_think/task_tool/agent_status/
+  // 按类型白名单过滤：agent_reply/user_input/task_log/slash_card/task_think 桥接成
+  // 聊天气泡，其余 trace 事件（coordinator_think/task_token/task_tool/agent_status/
   // coordinator_plan/...）不进气泡——否则 coordinator_think 携带的完整回复文本会被
   // 渲染成气泡，与随后 node_chat 的 agent_reply 持久化消息（id 不同，不去重）重复，
   // 即「协调者回复两次」缺陷根因。logs 只取最后一条（旧契约，保留）。
   // 注意：lastLog 若是 coordinator_think 直接 return，不落进 chatMessages。
+  // task_think 已放行（本任务）：worker ReAct 中间推理片段，与最终回复不重复，安全桥接
+  // 成气泡内折叠块（归并与渲染见 tasks 18-19；此处仅放行进 chatMessages 流）。
   useEffect(() => {
     if (logs.length === 0) return
     const lastLog = logs[logs.length - 1]
