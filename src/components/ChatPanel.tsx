@@ -111,13 +111,22 @@ function formatElapsed(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`
 }
 
-/** 取 ISO 时间戳的「年-月-日」本地日期 key（用于判断两条消息是否同一天）。 */
+/** 取 ISO 时间戳的「年-月-日」本地日期 key（用于判断两条消息是否同一天）。
+ *  B21：返回值仅用于 ``dateKey(prevIso) === dateKey(iso)`` 相等比较，从不展示——故
+ *  0-index/1-index 对比较结果本无影响。但 dateLabel 同样取本地月日且 ``getMonth()+1``
+ *  展示，两函数共用「本地年月日」口径——dateKey 显式 ``getMonth()+1`` 与 dateLabel 对齐
+ *  （隐式耦合改显式：两处都 +1，一处改另一处忘改则肉眼可见不一致）。
+ *  不用 ``toISOString().slice(0,10)``：那是 UTC 日期，会与 dateLabel 的本地「今天/昨天」
+ *  判定在非 UTC 时区跨日边界处脱钩（本地同日但 UTC 跨日 / 反之），致分隔条漏渲染或误渲染。 */
 function dateKey(iso: string): string {
   const d = new Date(iso)
-  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+  return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`
 }
 
-/** 日期分隔条标签：今天/昨天/更早完整日期。与微信/钉钉同款口语化。 */
+/** 日期分隔条标签：今天/昨天/更早完整日期。与微信/钉钉同款口语化。
+ *  B21：与 dateKey 共用「本地年月日」口径——``getMonth()+1`` 1-indexed 月展示，
+ *  ``getDate()`` 日，``getFullYear()`` 年。午夜锚点 ``new Date(y, m0, d)`` 用 0-indexed
+ *  getMonth()（Date 构造器要求 0-indexed 月）算日差，与展示口径分开（构造器口径非展示口径）。 */
 function dateLabel(iso: string): string {
   const d = new Date(iso)
   const now = new Date()
