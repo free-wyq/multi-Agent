@@ -49,6 +49,9 @@ CRUD = REPO / "backend" / "store" / "crud.py"
 ENTITIES = REPO / "backend" / "store" / "entities.py"
 HOOK = REPO / "src" / "hooks" / "useBusEvent.ts"
 PANEL = REPO / "src" / "components" / "ChatPanel.tsx"
+# B18：Number()/Number.isFinite 守卫抽到 services/api.ts parseStats（单一真源）。
+# extractCoordStats 现是 parseStats 薄封装，守卫在 parseStats 而非 extractCoordStats。
+API = REPO / "src" / "services" / "api.ts"
 
 # node_llm_decide 盖到 _stream_stats 的 6 个字段（七元组里 reasoning_text 落到
 # data["reasoning"]，其余 5 个槽位 + reasoning 共 6 个 key）。
@@ -247,29 +250,41 @@ def assert_contract() -> list[str]:
             print(f"[9] OK  logs 排除四类逐字 delta（{sorted(required_exclude)}）—— c32de07 不回归")
 
     # ── [10] 前端 extractCoordStats 与后端落盘字段对齐 ──
+    # B18：extractCoordStats 现是 services/api.ts parseStats 的薄封装（守卫下沉到 parseStats
+    # 单一真源）。断言：① extractCoordStats 调 parseStats(strictElapsed=true, withPhase=false)；
+    # ② parseStats 读后端落盘字段子集 + elapsed_ms 守卫（与原 extractCoordStats 同口径）。
     panel = PANEL.read_text(encoding="utf-8")
-    m_extract = re.search(
-        r"function extractCoordStats\([^)]*\)[^{]*\{(.*?)\n\}",
-        panel,
-        re.S,
-    )
+    m_extract = re.search(r"function extractCoordStats\([^)]*\)[^{]*\{(.*?)\n\}", panel, re.S)
+    api_src = API.read_text(encoding="utf-8")
+    m_parse = re.search(r"export function parseStats\([^)]*\)[^{]*\{(.*?)\n\}", api_src, re.S)
     if not m_extract:
         errs.append("[10] extractCoordStats 未找到")
+    elif "parseStats(" not in m_extract.group(1):
+        errs.append("[10] extractCoordStats 未调 parseStats（B18 单一真源未接线）")
+    elif "strictElapsed: true" not in m_extract.group(1):
+        errs.append("[10] extractCoordStats 未传 strictElapsed: true（定稿气泡口径破——会渲染 0 耗时假状态行）")
+    elif "withPhase: false" not in m_extract.group(1):
+        errs.append("[10] extractCoordStats 未传 withPhase: false（持久化 data 无 phase，应返 FinalizedStats 子集）")
     else:
-        body = m_extract.group(1)
-        # 前端读的字段必须是后端落盘的子集
-        fe_reads = set(re.findall(r'data\.(\w+)', body))
+        print("[10] OK  extractCoordStats → parseStats({ withPhase: false, strictElapsed: true })（B18 薄封装，守卫在真源）")
+    # parseStats 真源读后端落盘字段子集 + elapsed_ms 守卫（B18 下沉）
+    if not m_parse:
+        errs.append("[10] services/api.ts parseStats 未找到（B18 单一真源缺失）")
+    else:
+        pbody = m_parse.group(1)
+        # parseStats 读的字段必须是后端落盘的子集
+        pe_reads = set(re.findall(r"dd\['(\w+)'\]", pbody))
         # 后端落盘 6 key，前端应读 elapsed_ms/tokens/model/reasoning_tokens（reply_id/reasoning
-        # 由 finalizedBubbles 退场判定/extractCoordReasoning 另读，不在 extractCoordStats）
+        # 由 finalizedBubbles 退场判定/extractCoordReasoning 另读，不在 parseStats）
         expected_fe = {"elapsed_ms", "tokens", "model", "reasoning_tokens"}
-        missing_fe = expected_fe - fe_reads
+        missing_fe = expected_fe - pe_reads
         if missing_fe:
-            errs.append(f"[10] extractCoordStats 未读 {missing_fe}（与后端落盘字段不对齐）")
+            errs.append(f"[10] parseStats 未读 {missing_fe}（与后端落盘字段不对齐）")
         else:
-            print(f"[10] OK  extractCoordStats 读 {sorted(fe_reads & expected_fe)}（与后端 _stream_stats 字段对齐）")
-        # elapsed_ms 非有限/<=0 返 null（不渲染假状态行）
-        if "Number.isFinite(elapsed)" not in body or "elapsed <= 0" not in body:
-            errs.append("[10] extractCoordStats 缺 elapsed_ms 非有限/<=0 → null 守卫")
+            print(f"[10] OK  parseStats 读 {sorted(pe_reads & expected_fe)}（与后端 _stream_stats 字段对齐）")
+        # elapsed_ms 非有限/<=0 返 null（strictElapsed 分支，不渲染假状态行）——与原口径对齐
+        if "Number.isFinite(elapsedMsNum)" not in pbody or "elapsedMs <= 0" not in pbody:
+            errs.append("[10] parseStats 缺 elapsed_ms 非有限/<=0 → null 守卫（strictElapsed 分支）")
 
     return errs
 

@@ -6,7 +6,9 @@ import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutline
 import {
   messageApi,
   taskApi,
+  parseStats,
   type AgentDefinition,
+  type FinalizedStats,
   type Group,
   type GroupMember,
   type Message,
@@ -134,19 +136,14 @@ function renderDateDivider(iso: string, prevIso: string | null): React.ReactNode
  *  reasoning_tokens > 0 时追加「（含 N 推理）」——否则 5 字回复显示 148 tokens 显得假，
  *  其实 133 个是模型内部推理（用户看不见），点明后数字才可解释。
  *  非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
- *  data 无 elapsed_ms → null，不渲染状态行。 */
-function extractCoordStats(
-  data: Record<string, unknown> | null,
-): { elapsed_ms: number; tokens: number; model?: string; reasoning_tokens?: number } | null {
-  if (!data) return null
-  const elapsed = Number(data.elapsed_ms)
-  if (!Number.isFinite(elapsed) || elapsed <= 0) return null
-  const tokens = Number(data.tokens)
-  const model = typeof data.model === 'string' && data.model ? data.model : undefined
-  const reasoningTokensNum = Number(data.reasoning_tokens)
-  const reasoning_tokens =
-    Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0 ? reasoningTokensNum : undefined
-  return { elapsed_ms: elapsed, tokens: Number.isFinite(tokens) ? tokens : 0, model, reasoning_tokens }
+ *  data 无 elapsed_ms → null，不渲染状态行。
+ *
+ *  B18：Number()/Number.isFinite 守卫抽到 services/api.ts parseStats（与 useBusEvent
+ *  coordinator_stats 分支共享单一真源，原两处重复守卫去重）。定稿气泡走 strictElapsed=true
+ *  守卫（elapsed_ms 非有限/<=0 返 null——announce 类回复无 elapsed_ms 不渲染假状态行，
+ *  A8/vg2 契约）+ withPhase=false（持久化 data 无 phase，返 FinalizedStats 子集）。 */
+function extractCoordStats(data: Record<string, unknown> | null): FinalizedStats | null {
+  return parseStats(data, { withPhase: false, strictElapsed: true }) as FinalizedStats | null
 }
 
 /** 取持久化协调者回复的推理文本（agent_reply.data.reasoning，推理模型落盘的 reasoning_content 全文）。

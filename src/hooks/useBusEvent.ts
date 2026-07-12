@@ -4,7 +4,9 @@ import {
   onBusEvent,
   planApi,
   systemApi,
+  parseStats,
   type BusEventData,
+  type CoordStats,
   type Message,
   type TraceEvent,
   type AgentStatusInfo,
@@ -119,9 +121,7 @@ export function useBusEvent(groupId: string | null) {
   // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
   const [coordStreaming, setCoordStreaming] = useState<Record<string, string>>({})
   const [coordReasoning, setCoordReasoning] = useState<Record<string, string>>({})
-  const [coordStats, setCoordStats] = useState<
-    Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string; reasoning_tokens?: number }>
-  >({})
+  const [coordStats, setCoordStats] = useState<Record<string, CoordStats>>({})
 
   // 推理链逐字 delta 节流缓冲（思考流式优化）：
   // 推理模型思考阶段 chunk 极密（kimi 写 200 字实测 820 delta），逐条 setState 会触发
@@ -506,21 +506,16 @@ export function useBusEvent(groupId: string | null) {
           }
         }
       } else if (d.type === 'coordinator_stats') {
+        // B18：Number()/Number.isFinite 守卫抽到 services/api.ts parseStats（与 ChatPanel
+        // extractCoordStats 共享单一真源，原两处重复守卫去重）。WS 路径 withPhase=true
+        // 返回 CoordStats（含 phase，streaming/done），非 strictElapsed（streaming 中间
+        // elapsed_ms=0 合法，不返 null）。raw 非 object / reply_id 非 string 时本块前已 guard。
         const dd =
           d.data && typeof d.data === 'object'
             ? (d.data as Record<string, unknown>)
             : null
         const replyId = dd ? (dd['reply_id'] as string | undefined) : undefined
         if (dd && typeof replyId === 'string') {
-          const phase = String(dd['phase'] || 'streaming')
-          const elapsedMs = Number(dd['elapsed_ms'] || 0)
-          const tokens = Number(dd['tokens'] || 0)
-          const model =
-            typeof dd['model'] === 'string' ? (dd['model'] as string) : undefined
-          const reasoningTokensNum = Number(dd['reasoning_tokens'] || 0)
-          const reasoning_tokens = Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0
-            ? reasoningTokensNum
-            : undefined
           // 只更新统计；phase=done 不再清 coordStreaming/coordReasoning/coordStats——
           // 改由持久化 agent_reply 落地时清（见下方 d.type==='agent_reply' 分支）。
           // 原 stats(done) 一到就清，但 agent_reply 几十毫秒后才到 → 中间空泡间隙，
@@ -529,10 +524,13 @@ export function useBusEvent(groupId: string | null) {
           // chatMessages，流式气泡无缝交接，无空泡无乱序。
           // phase=done 仍写入 coordStats（isStreaming=phase!=='done' → false，气泡停流式光标
           // 显示「完成」，但内容/思考仍可见，等 agent_reply 落地才退场）。
-          setCoordStats((prev) => ({
-            ...prev,
-            [replyId]: { elapsed_ms: elapsedMs, tokens, phase, model, reasoning_tokens },
-          }))
+          const parsed = parseStats(dd, { withPhase: true })
+          if (parsed) {
+            setCoordStats((prev) => ({
+              ...prev,
+              [replyId]: parsed as CoordStats,
+            }))
+          }
         }
       }
 

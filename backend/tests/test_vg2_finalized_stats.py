@@ -36,6 +36,9 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 COORD = REPO / "backend" / "engine" / "coordinator.py"
 PANEL = REPO / "src" / "components" / "ChatPanel.tsx"
+# B18：Number()/Number.isFinite 守卫抽到 services/api.ts parseStats（单一真源）。
+# extractCoordStats 现是 parseStats 薄封装，守卫在 parseStats 而非 extractCoordStats。
+API = REPO / "src" / "services" / "api.ts"
 
 # 任务明列的 5 个必填 key（reasoning 是第 6 个，va2 已锁，vg2 聚焦任务明列的 5 个）。
 REQUIRED_KEYS = {"reply_id", "elapsed_ms", "tokens", "model", "reasoning_tokens"}
@@ -199,24 +202,37 @@ def assert_contract() -> list[str]:
         errs.append("[C9] 依赖 [A4] except 块，[A4] 已 FAIL")
 
     # [10] 前端 extractCoordStats: elapsed_ms finite & > 0 → 渲染状态行（与后端保证对齐）
+    # B18：extractCoordStats 现是 services/api.ts parseStats 薄封装（守卫下沉到 parseStats
+    # 单一真源）。断言：① extractCoordStats 调 parseStats(strictElapsed=true)；
+    # ② parseStats 有 Number.isFinite + <=0 → null 守卫（strictElapsed 分支）。
     panel = PANEL.read_text(encoding="utf-8")
+    api_src = API.read_text(encoding="utf-8")
     m_extract = re.search(r"function extractCoordStats\([^)]*\)[^{]*\{(.*?)\n\}", panel, re.S)
+    m_parse = re.search(r"export function parseStats\([^)]*\)[^{]*\{(.*?)\n\}", api_src, re.S)
     if not m_extract:
         errs.append("[C10] extractCoordStats 未找到")
+    elif "parseStats(" not in m_extract.group(1):
+        errs.append("[C10] extractCoordStats 未调 parseStats（B18 单一真源未接线）")
+    elif "strictElapsed: true" not in m_extract.group(1):
+        errs.append("[C10] extractCoordStats 未传 strictElapsed: true（定稿气泡口径破——会渲染 0 耗时假状态行）")
     else:
-        body = m_extract.group(1)
-        # elapsed 非有限 → null；elapsed <= 0 → null（不渲染假状态行）
-        if "Number.isFinite(elapsed)" not in body:
-            errs.append("[C10] extractCoordStats 缺 Number.isFinite(elapsed) 守卫")
-        elif "elapsed <= 0" not in body:
-            errs.append("[C10] extractCoordStats 缺 elapsed <= 0 → null 守卫（会渲染 0 耗时假状态行）")
+        print("[C10] OK  extractCoordStats → parseStats({ strictElapsed: true })（B18 薄封装）")
+    # parseStats 真源有 elapsed_ms 非有限/<=0 → null 守卫（strictElapsed 分支）
+    if not m_parse:
+        errs.append("[C10] services/api.ts parseStats 未找到（B18 单一真源缺失）")
+    else:
+        pbody = m_parse.group(1)
+        if "Number.isFinite(elapsedMsNum)" not in pbody:
+            errs.append("[C10] parseStats 缺 Number.isFinite(elapsedMsNum) 守卫")
+        elif "elapsedMs <= 0" not in pbody:
+            errs.append("[C10] parseStats 缺 elapsedMs <= 0 → null 守卫（会渲染 0 耗时假状态行）")
         else:
-            # 确认 finite & > 0 时返状态行（return { elapsed_ms: elapsed, ... }）
-            has_return_stats = re.search(r"return\s*\{\s*elapsed_ms:\s*elapsed", body) is not None
+            # finite & > 0 时返状态行对象（不返 null）——确认 strictElapsed 通过后继续返对象
+            has_return_stats = re.search(r"return\s*\{", pbody) is not None
             if not has_return_stats:
-                errs.append("[C10] extractCoordStats finite&>0 时未返 {elapsed_ms:elapsed,...}（不渲染状态行）")
+                errs.append("[C10] parseStats finite&>0 时未返对象（不渲染状态行）")
             else:
-                print("[C10] OK  extractCoordStats: elapsed_ms finite&>0 → 返状态行（与后端 elapsed_ms>0 保证对齐）")
+                print("[C10] OK  parseStats: elapsed_ms finite&>0 → 返状态行（与后端 elapsed_ms>0 保证对齐）")
 
     return errs
 

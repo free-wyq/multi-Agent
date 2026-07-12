@@ -53,6 +53,11 @@ WORKER = REPO / "backend" / "engine" / "worker.py"
 COORD = REPO / "backend" / "engine" / "coordinator.py"
 REPLY = REPO / "backend" / "engine" / "reply.py"
 PANEL = REPO / "src" / "components" / "ChatPanel.tsx"
+# B18：Number()/Number.isFinite 守卫抽到 services/api.ts parseStats（单一真源）。
+# extractCoordStats 现是 parseStats 的薄封装，守卫在 parseStats 而非 extractCoordStats。
+# 三处断言「字段读取 + elapsed_ms 守卫」改为：parseStats 真源有守卫 + extractCoordStats
+# 调 parseStats(strictElapsed=true, withPhase=false)（定稿气泡口径）。
+API = REPO / "src" / "services" / "api.ts"
 
 # worker stats 必塞的 5 key（reasoning 条件塞，非必塞——与协调者口径差异）。
 WORKER_STAT_KEYS = {"reply_id", "elapsed_ms", "tokens", "model", "reasoning_tokens"}
@@ -217,20 +222,44 @@ def assert_contract() -> list[str]:
         errs.append("[12] extractCoordStats 未找到")
     else:
         body = m_extract.group(1)
-        # 不按 sender_id 区分协调者/worker：只看 data.elapsed_ms（无 sender_id 条件分支）
+        # B18：extractCoordStats 现是 parseStats 薄封装（守卫在 services/api.ts parseStats）。
+        # 断言它调 parseStats(data, { withPhase: false, strictElapsed: true })——定稿气泡口径
+        # （strictElapsed：elapsed_ms 非有限/<=0 返 null，announce 类回复不渲染假状态行；
+        # withPhase=false：持久化 data 无 phase，返 FinalizedStats 子集）。
+        if "parseStats(" not in body:
+            errs.append("[12] extractCoordStats 未调 parseStats（B18 单一真源未接线）")
+        elif "strictElapsed: true" not in body:
+            errs.append("[12] extractCoordStats 未传 strictElapsed: true（定稿气泡口径破——会渲染 0 耗时假状态行）")
+        elif "withPhase: false" not in body:
+            errs.append("[12] extractCoordStats 未传 withPhase: false（持久化 data 无 phase，应返 FinalizedStats 子集）")
+        else:
+            print("[12] OK  extractCoordStats → parseStats({ withPhase: false, strictElapsed: true })（B18 薄封装）")
+        # 不按 sender_id 区分协调者/worker：parseStats 不读 sender_id（无来源分支）
         has_sender_branch = bool(re.search(r"sender_id|isCoordinator|graph_kind|sender\s*===", body))
         if has_sender_branch:
             errs.append("[12] extractCoordStats 含 sender_id/来源分支（违反「不区分来源」契约）")
+        elif "parseStats(" not in body:
+            pass  # 已在上面报错，不重复
         else:
             print("[12] OK  extractCoordStats 不按 sender_id 区分来源（仅看 data.elapsed_ms）—— worker/coordinator 同段渲染")
-        # 与 worker stats 字段对齐：elapsed_ms/tokens/model/reasoning_tokens
-        fe_reads = set(re.findall(r"data\.(\w+)", body))
-        expected = {"elapsed_ms", "tokens", "model", "reasoning_tokens"}
-        missing = expected - fe_reads
-        if missing:
-            errs.append(f"[12] extractCoordStats 未读 {missing}（与 worker stats 字段不对齐）")
+        # B18：字段读取守卫下沉到 parseStats 真源——断言 api.ts parseStats 读四字段 + elapsed 守卫。
+        api_src = API.read_text(encoding="utf-8")
+        m_parse = re.search(r"export function parseStats\([^)]*\)[^{]*\{(.*?)\n\}", api_src, re.S)
+        if not m_parse:
+            errs.append("[12] services/api.ts parseStats 未找到（B18 单一真源缺失）")
         else:
-            print(f"[12] OK  extractCoordStats 读 {sorted(fe_reads & expected)}（与 worker/coordinator stats 字段同形对齐）")
+            pbody = m_parse.group(1)
+            # parseStats 读的字段必须是后端落盘的子集（与 worker/coordinator 同形）
+            pe_reads = set(re.findall(r"dd\['(\w+)'\]", pbody))
+            expected = {"elapsed_ms", "tokens", "model", "reasoning_tokens"}
+            missing = expected - pe_reads
+            if missing:
+                errs.append(f"[12] parseStats 未读 {missing}（与 worker/coordinator stats 字段不对齐）")
+            else:
+                print(f"[12] OK  parseStats 读 {sorted(pe_reads & expected)}（worker/coordinator stats 字段同形对齐）")
+            # elapsed_ms 非有限/<=0 守卫（strictElapsed 分支）——与原 extractCoordStats 同口径
+            if "Number.isFinite(elapsedMsNum)" not in pbody or "elapsedMs <= 0" not in pbody:
+                errs.append("[12] parseStats 缺 elapsed_ms 非有限/<=0 → null 守卫（strictElapsed 分支）")
 
     # ── [13] worker/coordinator stats key 同形对照（reasoning 口径差异说明）──
     coord = COORD.read_text(encoding="utf-8")

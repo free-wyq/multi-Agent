@@ -1077,6 +1077,89 @@ export interface PlanStep {
   task_id?: string | null
 }
 
+/** 协调者/worker 流式回复的运行统计——elapsed_ms/tokens/model/reasoning_tokens +
+ *  phase（仅流式 WS 事件用，持久化 agent_reply.data 无此 key）。
+ *
+ *  两个来源同形（B18 抽 parseStats 单一真源前是两处重复 Number() 守卫）：
+ *   - WS ``coordinator_stats`` 事件 data（useBusEvent coordStats[reply_id]）——含 phase，
+ *     streaming/done 两种，elapsed_ms/tokens 在 streaming 阶段可为 0（节流中间值）。
+ *   - 持久化 agent_reply.data（ChatPanel 定稿气泡 extractCoordStats）——无 phase，
+ *     elapsed_ms>0 是真实值（后端 time.monotonic 墙钟，见 vg2 [C7]）。
+ *  字段集：``CoordStats`` 是超集（含 phase），``FinalizedStats`` 是子集（无 phase）。
+ *  parseStats 默认不强求 elapsed_ms>0（流式中间值 0 合法），strictElapsed 守卫仅
+ *  定稿气泡用（无 elapsed_ms 的 announce 类回复返 null 不渲染状态行，见 A8/vg2）。
+ */
+export interface CoordStats {
+  elapsed_ms: number
+  tokens: number
+  phase: string
+  model?: string
+  reasoning_tokens?: number
+}
+
+/** 定稿气泡的统计子集（无 phase——持久化 agent_reply.data 不带 phase）。
+ *  ChatPanel extractCoordStats 返回此形（去掉 phase 后给定稿状态行用）。 */
+export interface FinalizedStats {
+  elapsed_ms: number
+  tokens: number
+  model?: string
+  reasoning_tokens?: number
+}
+
+/** B18 共享解析器：从 raw data（WS 事件 dd 或持久化 message.data）提取统计字段，
+ *  统一 Number()/Number.isFinite/typeof string 守卫（原 useBusEvent coordinator_stats
+ *  分支与 ChatPanel.extractCoordStats 两处重复，抽此单一真源）。
+ *
+ *  字段守卫口径（与原两处逐字对齐，行为零变）：
+ *   - elapsed_ms: ``Number(raw.elapsed_ms ?? 0)`` —— WS 路径传 0 兜底（streaming 中间
+ *     值合法）；``strictElapsed=true`` 时非有限/<=0 返 null（定稿气泡用，见 A8/vg2）。
+ *   - tokens: ``Number(raw.tokens ?? 0)``，非有限降 0（原 useBusEvent 隐式，原 ChatPanel
+ *     显式 ``Number.isFinite(tokens) ? tokens : 0``——口径统一为显式 finite? :0）。
+ *   - model: 仅非空 string 才取（``typeof === 'string' && raw.model``）。
+ *   - reasoning_tokens: ``Number(raw.reasoning_tokens ?? 0)``，finite & >0 才取，否则
+ *     undefined（不渲染「含 N 推理」段，原两处同口径）。
+ *   - phase: ``String(raw.phase ?? 'streaming')`` —— WS 路径默认 streaming（done 时
+ *     后端显式传 'done'）；定稿气泡不读 phase（``withPhase=false`` 不返回此 key）。
+ *
+ *  ``withPhase``（默认 true）: WS 流式路径返回 ``CoordStats``（含 phase）；定稿气泡路径
+ *  传 ``false`` 返回 ``FinalizedStats``（无 phase）——同一函数两种返回形，对应两个调用方。
+ *  ``strictElapsed``（默认 false）: true 时 elapsed_ms 非有限/<=0 返 null（定稿气泡用，
+ *  防渲染「0 耗时」假状态行——announce 类回复无 elapsed_ms 应不渲染状态行）。
+ *
+ *  返回 null 的两种情况：① raw 非 object（WS 事件 data 缺失/异常）；② strictElapsed 且
+ *  elapsed_ms 非有限/<=0。其他情况必返对象（即便 tokens=0 / model=undefined 也返，
+ *  流式阶段这些是合法中间值）。 */
+export function parseStats(
+  raw: unknown,
+  opts?: { withPhase?: boolean; strictElapsed?: boolean },
+): CoordStats | FinalizedStats | null {
+  const withPhase = opts?.withPhase ?? true
+  const strictElapsed = opts?.strictElapsed ?? false
+  if (!raw || typeof raw !== 'object') return null
+  const dd = raw as Record<string, unknown>
+
+  const elapsedMsNum = Number(dd['elapsed_ms'] ?? 0)
+  const elapsedMs = Number.isFinite(elapsedMsNum) ? elapsedMsNum : 0
+  if (strictElapsed && (!Number.isFinite(elapsedMsNum) || elapsedMs <= 0)) return null
+
+  const tokensNum = Number(dd['tokens'] ?? 0)
+  const tokens = Number.isFinite(tokensNum) ? tokensNum : 0
+
+  const modelRaw = dd['model']
+  const model = typeof modelRaw === 'string' && modelRaw ? modelRaw : undefined
+
+  const reasoningTokensNum = Number(dd['reasoning_tokens'] ?? 0)
+  const reasoning_tokens =
+    Number.isFinite(reasoningTokensNum) && reasoningTokensNum > 0
+      ? reasoningTokensNum
+      : undefined
+
+  const base = { elapsed_ms: elapsedMs, tokens, model, reasoning_tokens }
+  if (!withPhase) return base as FinalizedStats
+  const phase = String(dd['phase'] ?? 'streaming')
+  return { ...base, phase } as CoordStats
+}
+
 /** 监听某群组的总线事件，返回取消监听函数（与旧 UnlistenFn 兼容）。
  *  断线自动重连（指数退避，最多 5 次），保证长任务期间 WS 不丢。
  *
