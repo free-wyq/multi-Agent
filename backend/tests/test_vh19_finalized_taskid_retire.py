@@ -176,26 +176,39 @@ def assert_contract() -> list[str]:
         errs.append("[setup] finalizedBubbles 函数体未找到")
     else:
         fb_nc = _strip_ts_comments(fb_body)
-        # [6] 退场判定含 m.task_id === e.taskId
-        if "m.task_id === e.taskId" not in fb_nc:
-            errs.append("[C6] finalizedBubbles 退场判定缺 m.task_id === e.taskId（B22 主路径 task_id 精确匹配未接线）")
+        # [6] 退场判定含 task_id 精确匹配（B22 m.task_id === e.taskId 或 B23 repliedTaskIds.has(e.taskId)）
+        # B23 改：退场判定从 chatMessages.some 扫描改为 repliedTaskIdsRef.has(e.taskId)
+        # （reply 落地 effect 增量回填 ref）。两种形态都接受（B22 直扫 chatMessages / B23 读 ref），
+        # 核心契约「按 task_id 精确退场」不变。断言：函数体含 task_id 退场匹配（两种之一）。
+        has_b22 = "m.task_id === e.taskId" in fb_nc
+        has_b23 = "repliedTaskIds.has(e.taskId)" in fb_nc
+        if not (has_b22 or has_b23):
+            errs.append("[C6] finalizedBubbles 退场判定缺 task_id 精确匹配（B22 m.task_id===e.taskId 或 B23 repliedTaskIds.has(e.taskId)——两者皆无）")
         else:
-            print("[C6] OK  退场判定含 m.task_id === e.taskId（主路径 task_id 精确匹配）")
+            mode = "B23 repliedTaskIds.has(e.taskId)" if has_b23 else "B22 m.task_id === e.taskId"
+            print(f"[C6] OK  退场判定含 task_id 精确匹配（{mode}）")
         # [7] 退场判定仍含时间戳兜底
         if "new Date(m.created_at).getTime() >= e.timestamp" not in fb_nc:
             errs.append("[C7] finalizedBubbles 退场判定缺时间戳兜底（task_id-less 路径防御性退场丢失）")
         else:
             print("[C7] OK  退场判定仍含 new Date(m.created_at).getTime() >= e.timestamp（兜底时间戳）")
-        # [8] task_id 匹配与时间戳兜底用 || 短路连接
-        if not re.search(r"m\.task_id === e\.taskId\s*\|\|\s*new Date\(m\.created_at\)\.getTime\(\) >= e\.timestamp", fb_nc):
-            errs.append("[C8] finalizedBubbles 退场判定 task_id 与时间戳未用 || 短路连接（应 task_id 命中即返不查时间戳）")
+        # [8] task_id 匹配与时间戳兜底连接关系（B22 || 短路 或 B23 分支顺序短路）
+        # B22：m.task_id === e.taskId || new Date(m.created_at)... 在同一 some 回调内 || 短路。
+        # B23：repliedTaskIds.has(e.taskId) 先判（命中 continue 不扫 chatMessages），未命中才
+        # chatMessages.some 时间戳兜底——分支顺序短路（if-has-continue; if-some-continue）。
+        # 两种形态都接受，核心契约「task_id 命中即不查时间戳」不变。
+        b22_shortcircuit = bool(re.search(r"m\.task_id === e\.taskId\s*\|\|\s*new Date\(m\.created_at\)\.getTime\(\) >= e\.timestamp", fb_nc))
+        b23_branch = "repliedTaskIds.has(e.taskId)" in fb_nc and "new Date(m.created_at).getTime() >= e.timestamp" in fb_nc
+        if not (b22_shortcircuit or b23_branch):
+            errs.append("[C8] finalizedBubbles 退场判定 task_id 与时间戳未短路（B22 || 短路 或 B23 分支顺序短路——两者皆无）")
         else:
-            print("[C8] OK  task_id 匹配 || 时间戳兜底（短路：task_id 命中即返 true 不查时间戳）")
+            mode = "B23 分支顺序短路（has 先判 / some 兜底）" if b23_branch else "B22 || 短路"
+            print(f"[C8] OK  task_id 命中即不查时间戳（{mode}）")
         # [9] 退场判定仍含 m.sender_id === e.agentId
         if "m.sender_id === e.agentId" not in fb_nc:
             errs.append("[C9] finalizedBubbles 退场判定缺 m.sender_id === e.agentId（sender 守卫丢失）")
         else:
-            print("[C9] OK  退场判定仍含 m.sender_id === e.agentId（sender 守卫，两路径前置条件）")
+            print("[C9] OK  退场判定仍含 m.sender_id === e.agentId（sender 守卫，兜底路径前置条件）")
 
     # ── D. 行为零变 ──
     # [10] persist_agent_reply 默认 task_id=None
