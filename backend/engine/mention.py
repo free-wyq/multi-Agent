@@ -36,7 +36,9 @@ _TERM = _TRAIL
 
 # A2A 来回对话的轮次上限（防两个 worker 互相 @ 无限刷屏）。env 可调；用户每发一条
 # 新消息（route_user_message）就把该群计数清零，故一轮接龙从 0 重新数。
-_A2A_CAP = max(1, int(os.environ.get("MULTI_AGENT_A2A_TURNS", "8")))
+# 默认 50：给接龙/讨论等互动留够来回空间，正常互动几乎不会触顶。最终停止机制应靠
+# 协调者监听群消息主动收尾（待实现），cap 仅作兜底防 LLM 失灵无限刷屏烧 token。
+_A2A_CAP = max(1, int(os.environ.get("MULTI_AGENT_A2A_TURNS", "50")))
 # group_id -> 已发生的 A2A @mention 传递次数
 _a2a_turns: dict[str, int] = {}
 
