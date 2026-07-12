@@ -22,8 +22,14 @@ import {
   InputNumber,
   Row,
   Col,
+  Table,
+  Button,
+  Radio,
+  Switch,
   message,
 } from 'antd'
+import type { TableProps } from 'antd'
+import { PlusOutlined, DeleteOutlined } from '@ant-design/icons'
 import { providerApi } from '../services/api'
 import type { LlmProvider, LlmModel, ProviderPreset } from '../services/api'
 
@@ -92,7 +98,8 @@ const PROVIDER_OPTIONS = [
  * api_key 留空（后端返回的 api_key 是脱敏 mask，不可回填；PE-03 用 placeholder
  * 提示「留空则不修改」）。models 浅拷贝每个条目，避免前端编辑直接改后端返回对象。
  */
-function providerToFormState(p: LlmProvider): ProviderFormState {  return {
+function providerToFormState(p: LlmProvider): ProviderFormState {
+  return {
     name: p.name,
     provider: p.provider,
     base_url: p.base_url,
@@ -108,6 +115,24 @@ function providerToFormState(p: LlmProvider): ProviderFormState {  return {
     max_tokens: p.max_tokens,
   }
 }
+
+/**
+ * 新增模型空行默认值（PE-04「+ 添加模型」push 进 models）。
+ * model_id/display_name 留空让用户填；能力开关默认开（多数现代模型都支持）；
+ * is_default=false（单 default 不变量——handleAddModel 会处理「空目录时自动置首个为 default」）。
+ */
+function emptyModel(): LlmModel {
+  return {
+    model_id: '',
+    display_name: '',
+    context_window: 0,
+    supports_function_calling: true,
+    supports_vision: false,
+    supports_streaming: true,
+    is_default: false,
+  }
+}
+
 
 interface ProviderEditorProps {
   open: boolean
@@ -256,6 +281,165 @@ export default function ProviderEditor({
     onSaved?.()
     onClose?.()
   }
+
+  // ── PE-04 模型目录 Table handlers ──
+  /**
+   * 改某行某字段（immutable 更新：map 出新数组，命中 index 替换该行）。
+   * 用 index 作为 row key 而非 model_id（model_id 可空/重复，见下方 columns 说明）。
+   */
+  const updateModel = (index: number, patch: Partial<LlmModel>) => {
+    setFormState((prev) => ({
+      ...prev,
+      models: prev.models.map((m, i) => (i === index ? { ...m, ...patch } : m)),
+    }))
+  }
+
+  /** 「+ 添加模型」：push 空行。若当前无任何 default，自动把新行置为 default（单 default 不变量）。 */
+  const handleAddModel = () => {
+    setFormState((prev) => {
+      const noDefault = !prev.models.some((m) => m.is_default)
+      return {
+        ...prev,
+        models: [...prev.models, { ...emptyModel(), is_default: noDefault }],
+      }
+    })
+  }
+
+  /** 删除某行。若删的是 default 且还有剩余行，把首个置为新 default（保单 default 不变量）。 */
+  const handleDeleteModel = (index: number) => {
+    setFormState((prev) => {
+      const target = prev.models[index]
+      const next = prev.models.filter((_, i) => i !== index)
+      // 删的是 default 且仍有剩余 → 把首个补为 default，避免「无 default」态。
+      if (target?.is_default && next.length > 0) {
+        next[0] = { ...next[0], is_default: true }
+      }
+      return { ...prev, models: next }
+    })
+  }
+
+  /** 设某行为 default（单选语义：先全部置 false，再把目标置 true）。 */
+  const handleSetDefault = (index: number) => {
+    setFormState((prev) => ({
+      ...prev,
+      models: prev.models.map((m, i) => ({ ...m, is_default: i === index })),
+    }))
+  }
+
+  // PE-04 模型目录 Table 列定义。rowKey 用 index（见下方 Table props 说明）。
+  const modelColumns: TableProps<LlmModel>['columns'] = [
+    {
+      title: 'Model ID',
+      dataIndex: 'model_id',
+      width: 140,
+      render: (_v, _r, index) => (
+        <Input
+          value={_r.model_id}
+          onChange={(e) => updateModel(index, { model_id: e.target.value })}
+          placeholder="如 deepseek-chat"
+          size="small"
+        />
+      ),
+    },
+    {
+      title: '显示名',
+      dataIndex: 'display_name',
+      width: 120,
+      render: (_v, _r, index) => (
+        <Input
+          value={_r.display_name}
+          onChange={(e) =>
+            updateModel(index, { display_name: e.target.value })
+          }
+          placeholder="留空则用 Model ID"
+          size="small"
+        />
+      ),
+    },
+    {
+      title: '上下文窗口',
+      dataIndex: 'context_window',
+      width: 110,
+      render: (_v, _r, index) => (
+        <InputNumber
+          value={_r.context_window}
+          onChange={(n) => updateModel(index, { context_window: n ?? 0 })}
+          min={0}
+          step={1024}
+          size="small"
+          style={{ width: '100%' }}
+          placeholder="0"
+        />
+      ),
+    },
+    {
+      title: 'FC',
+      dataIndex: 'supports_function_calling',
+      width: 50,
+      align: 'center' as const,
+      render: (_v, _r, index) => (
+        <Switch
+          size="small"
+          checked={_r.supports_function_calling}
+          onChange={(on) =>
+            updateModel(index, { supports_function_calling: on })
+          }
+        />
+      ),
+    },
+    {
+      title: '视觉',
+      dataIndex: 'supports_vision',
+      width: 50,
+      align: 'center' as const,
+      render: (_v, _r, index) => (
+        <Switch
+          size="small"
+          checked={_r.supports_vision}
+          onChange={(on) => updateModel(index, { supports_vision: on })}
+        />
+      ),
+    },
+    {
+      title: '流式',
+      dataIndex: 'supports_streaming',
+      width: 50,
+      align: 'center' as const,
+      render: (_v, _r, index) => (
+        <Switch
+          size="small"
+          checked={_r.supports_streaming}
+          onChange={(on) => updateModel(index, { supports_streaming: on })}
+        />
+      ),
+    },
+    {
+      title: '默认',
+      dataIndex: 'is_default',
+      width: 56,
+      align: 'center' as const,
+      render: (_v, _r, index) => (
+        <Radio
+          checked={_r.is_default}
+          onChange={() => handleSetDefault(index)}
+        />
+      ),
+    },
+    {
+      title: '操作',
+      key: 'action',
+      width: 64,
+      render: (_v, _r, index) => (
+        <Button
+          type="link"
+          danger
+          size="small"
+          icon={<DeleteOutlined />}
+          onClick={() => handleDeleteModel(index)}
+        />
+      ),
+    },
+  ]
 
   return (
     <Modal
@@ -476,8 +660,32 @@ export default function ProviderEditor({
         </Row>
         {/* PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
         <Divider plain style={{ fontSize: 12, color: '#999' }}>
-          模型目录 · 测试连通（PE-04~05 待实现）
+          模型目录 · 测试连通（PE-05 待实现）
         </Divider>
+        {/* PE-04 模型目录 Table：每行一个 LlmModel，可增删 + 能力开关 + 单 default Radio。
+         *  rowKey 用 index（非 model_id——model_id 可空/重复，作 key 会导致 React
+         *  diff 错乱；index 稳定标识行位置，删除时 filter 重建数组 index 自然重排）。 */}
+        <div style={{ marginBottom: 8, display: 'flex', gap: 8 }}>
+          <Button
+            size="small"
+            icon={<PlusOutlined />}
+            onClick={handleAddModel}
+          >
+            添加模型
+          </Button>
+          <span style={{ fontSize: 12, color: '#999', alignSelf: 'center' }}>
+            单选「默认」列指定生效模型（全 provider 仅一个）
+          </span>
+        </div>
+        <Table<LlmModel>
+          size="small"
+          rowKey={(_r, index) => String(index)}
+          columns={modelColumns}
+          dataSource={formState.models}
+          pagination={false}
+          scroll={{ x: 640 }}
+          locale={{ emptyText: '暂无模型，点击「添加模型」' }}
+        />
       </Form>
     </Modal>
   )
