@@ -11,9 +11,10 @@
  * PE-01 当前为骨架：props + formState（models + 8 连接级字段）+ Modal 容器，
  * 组件可独立编译；SettingsModal 尚未接入（PE-07 改造）。
  */
-import { useState } from 'react'
-import { Modal, Form, Input, Divider } from 'antd'
-import type { LlmProvider, LlmModel } from '../services/api'
+import { useState, useEffect } from 'react'
+import { Modal, Form, Input, Divider, Select, message } from 'antd'
+import { providerApi } from '../services/api'
+import type { LlmProvider, LlmModel, ProviderPreset } from '../services/api'
 
 /** 服务商表单内部 state（PE-01：含 models 目录 + 8 连接级字段）。 */
 interface ProviderFormState {
@@ -107,6 +108,64 @@ export default function ProviderEditor({
     provider ? providerToFormState(provider) : EMPTY_FORM,
   )
 
+  // ── PE-02 预设选择器 ──
+  // 预设是「编辑器加载的模板」（base_url + 连接配置 + 预置 models），用户选预设后一键灌入
+  // formState，省去手填。仅新增态展示（编辑态已有配置，套预设会覆盖用户既有定制，有风险）。
+  const [presets, setPresets] = useState<ProviderPreset[]>([])
+  const [presetsLoading, setPresetsLoading] = useState(false)
+  // 当前选中的预设 slug；'__custom__' = 自定义（不灌入）；undefined = 未选（初始态）。
+  const [selectedPreset, setSelectedPreset] = useState<string | undefined>(
+    undefined,
+  )
+
+  // 新增态打开时拉一次 catalog（后端静态目录恒可用，无网络/DB 依赖）。
+  // 依赖 [open, isEdit]：仅新增态且打开时拉；编辑态/关闭时不拉。
+  useEffect(() => {
+    if (!open || isEdit) return
+    if (presets.length > 0) return // 已拉过不重复
+    setPresetsLoading(true)
+    providerApi
+      .catalog()
+      .then((list) => setPresets(list))
+      .catch(() => message.error('获取预设目录失败'))
+      .finally(() => setPresetsLoading(false))
+  }, [open, isEdit, presets.length])
+
+  /**
+   * 应用预设：把 ProviderPreset 的连接配置 + 预置 models 灌入 formState。
+   *
+   * 不灌入 name（用户自填，预设只承载连接/模型模板）与 api_key（预设无密钥，用户填）。
+   * models 每条浅拷贝，避免与 presets 缓存中的对象共享引用（后续 PE-04 Table 编辑会 mutate）。
+   */
+  const applyPreset = (preset: ProviderPreset) => {
+    setFormState((prev) => ({
+      ...prev,
+      provider: preset.provider,
+      base_url: preset.base_url,
+      api_version: preset.api_version,
+      organization: preset.organization,
+      extra_headers: preset.extra_headers,
+      request_timeout: preset.request_timeout,
+      max_retries: preset.max_retries,
+      proxy: preset.proxy,
+      temperature: preset.temperature,
+      max_tokens: preset.max_tokens,
+      models: preset.models.map((m) => ({ ...m })),
+    }))
+  }
+
+  /** 预设 Select onChange：'__custom__' 或 undefined = 自定义（不灌入，保留当前 formState）。 */
+  const handlePresetChange = (value: string) => {
+    setSelectedPreset(value)
+    if (value === '__custom__') return // 自定义：不灌入
+    const preset = presets.find((p) => p.slug === value)
+    if (preset) applyPreset(preset)
+  }
+
+  // 当前选中预设的 note（显示在选择器下方）；自定义/未选时无 note。
+  const activePreset = presets.find((p) => p.slug === selectedPreset)
+  const presetNote = activePreset?.note ?? ''
+
   // PE-06 将实现完整保存：name 必填校验 → 构造 LlmProviderPayload（api_key 仅非空传；
   //  models 整体传并保证恰好一个 is_default，无 default 时把首个置 true）→
   //  编辑态 update / 新增态 create → message.success + onSaved + 关闭。
@@ -128,6 +187,29 @@ export default function ProviderEditor({
       cancelText="取消"
     >
       <Form layout="vertical" style={{ marginTop: 8 }}>
+        {/* PE-02 预设选择器：仅新增态。选预设一键灌入连接配置 + 预置 models 目录；
+         *  选「自定义」从零开始不灌入。编辑态不展示（套预设会覆盖用户既有定制）。 */}
+        {!isEdit && (
+          <Form.Item label="预设">
+            <Select
+              value={selectedPreset}
+              onChange={handlePresetChange}
+              loading={presetsLoading}
+              placeholder="选择预设快速填充，或选「自定义」从零开始"
+              allowClear
+              options={[
+                // 「自定义」置顶：显式表达「不套预设」语义（与 allowClear 清除等价但更直白）。
+                { label: '自定义（手动填写）', value: '__custom__' },
+                ...presets.map((p) => ({ label: p.name, value: p.slug })),
+              ]}
+            />
+            {presetNote && (
+              <div style={{ fontSize: 12, color: '#999', marginTop: 6 }}>
+                {presetNote}
+              </div>
+            )}
+          </Form.Item>
+        )}
         <Form.Item label="名称" required>
           <Input
             value={formState.name}
@@ -137,9 +219,9 @@ export default function ProviderEditor({
             placeholder="如 OpenAI 官方、DeepSeek"
           />
         </Form.Item>
-        {/* PE-02 预设选择器 · PE-03 连接配置 · PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
+        {/* PE-03 连接配置 · PE-04 模型目录 Table · PE-05 测试连通+拉取模型 */}
         <Divider plain style={{ fontSize: 12, color: '#999' }}>
-          预设选择器 · 连接配置 · 模型目录 · 测试连通（PE-02~05 待实现）
+          连接配置 · 模型目录 · 测试连通（PE-03~05 待实现）
         </Divider>
       </Form>
     </Modal>
