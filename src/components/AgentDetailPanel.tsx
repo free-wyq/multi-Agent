@@ -2,6 +2,8 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   Button,
   Card,
+  Collapse,
+  Divider,
   Empty,
   Input,
   Modal,
@@ -12,7 +14,7 @@ import {
   Typography,
   message,
 } from 'antd'
-import { EditOutlined, RobotOutlined } from '@ant-design/icons'
+import { EditOutlined, LockOutlined, RobotOutlined } from '@ant-design/icons'
 import {
   agentApi,
   mcpApi,
@@ -23,6 +25,24 @@ import {
 } from '../services/api'
 
 const { Paragraph } = Typography
+
+/**
+ * 内建能力清单（系统预置、所有执行任务的智能体均自带、只读展示）。
+ *
+ * 对应后端 `engine/tools.py` 的 `tools_for_group` 返回的 5 个 @tool 框架内工具——
+ * 每个 worker 跑任务时 `ChatOpenAI.bind_tools` 自动绑定，与群组工作区闭包绑定，
+ * 用户不可增删（区别于「已挂载技能」「已挂载 MCP」两类可挂载资源）。
+ *
+ * 这里只做展示：让用户知道智能体开箱即得这些能力，无需也无法配置。desc 取自
+ * 各 @tool 的 docstring（摘最关键一句），保持与后端实际工具语义一致。
+ */
+const BUILTIN_TOOLS: { name: string; desc: string }[] = [
+  { name: 'read_file', desc: '读取工作区文件（UTF-8，截断 8KB）' },
+  { name: 'write_file', desc: '创建/覆盖工作区文件（自动建父目录）' },
+  { name: 'edit_file', desc: '精确字符串替换（old_text→new_text）' },
+  { name: 'list_dir', desc: '列出目录条目（最多 200 项）' },
+  { name: 'run_command', desc: '工作区内执行 shell 命令（超时 30s）' },
+]
 
 interface AgentDetailPanelProps {
   /**
@@ -62,16 +82,16 @@ function summarize(text: string | null | undefined, max = 200): string {
  * 不必跳 AgentPage 翻卡片。
  *
  * AD-02 编辑入口（单 agent 模式）：
- *  - 卡片右上角「编辑」按钮打开 Modal，内含三段可编辑：
+ *  - 卡片右上角「编辑」按钮打开 Modal，内含：
  *    ① 已挂载技能（Select multiple + options 来自 skillApi.list 未挂载项）——
  *       选中→POST /api/skills/{id}/mount，取消选中→POST /api/skills/{id}/unmount，
  *       每次变更实时调 skillApi.mount/unmount，返回最新 AgentDefinition 同步 local。
  *    ② 已挂载 MCP（同上，options 来自 mcpApi.list 未挂载项）——mcpApi.mount/unmount。
- *    ③ 运行参数 model（Input）+ max_turns（InputNumber）+ 工具权限 allowed/denied_tools
- *       （Select tags mode）——「保存」调 agentApi.update(id, {model, max_turns,
- *       allowed_tools, denied_tools})，成功后同步 local。
+ *    ③ 身份与行为（name / role / description / system_prompt）+ 运行参数（model /
+ *       max_turns / allowed_tools / denied_tools）——底部「保存」调
+ *       agentApi.update(id, {...})，成功后同步 local。
  *  - 设计原则：mount/unmount 是即时生效的细粒度操作（每次 Select 变更即调 api），
- *    model/tools 是批量保存（Modal 底部「保存」按钮）——与 AgentPage 编辑 Modal 一致风格。
+ *    身份+运行参数是批量保存（Modal 底部「保存」按钮）——与 AgentPage 编辑 Modal 一致风格。
  *
  * 设计：
  *  - 两种模式：单 agent → 完整聚合详情（+ 编辑入口）；多 agent → 紧凑名册列表（无编辑）。
@@ -321,15 +341,18 @@ function AgentDetailView({
 
 /**
  * AD-02 编辑按钮 + Modal：挂载/卸载技能（skillApi）、挂载/卸载 MCP（mcpApi）、
- * 更新 model/tools（agentApi.update）。
+ * 更新 身份字段 + model/tools（agentApi.update）。
  *
  * 触发：单 agent 详情卡片右上角「编辑」按钮（small 卡片用 size="small" 文本按钮）。
- * Modal 三段：
+ * Modal 四段：
  *  1. 已挂载技能——Select multiple，options = skillApi.list 中未挂载项；onChange 时
  *     diff 出新增/移除的 skill id，分别调 skillApi.mount/unmount（即时生效，每次变更即调）。
  *  2. 已挂载 MCP——同上，options = mcpApi.list 未挂载项；mcpApi.mount/unmount。
- *  3. 运行参数 + 工具权限——model（Input）/ max_turns（InputNumber）/ allowed_tools
- *     （Select tags）/ denied_tools（Select tags），底部「保存」调 agentApi.update。
+ *  3. 身份与行为——name（Input）/ role（Input）/ description（TextArea autoSize）/
+ *     system_prompt（TextArea autoSize），底部「保存」调 agentApi.update。
+ *  4. 运行参数 + 工具权限——model（Input）/ max_turns（Input type=number）/
+ *     allowed_tools（Select tags）/ denied_tools（Select tags），底部「保存」调 agentApi.update。
+ *     （3+4 同一次 payload 一起保存。）
  *
  * 数据流：mount/unmount 返回最新 AgentDefinition → onUpdated 同步父 local → 卡片立即刷新。
  * model/tools 保存后同样 onUpdated。Modal 内 options（skills/mcps 全量列表）懒加载：
@@ -353,12 +376,20 @@ export function AgentEditButton({
   const [mcps, setMcps] = useState<McpConnection[]>([])
   const [optsLoading, setOptsLoading] = useState(false)
 
-  // Modal 表单态：model/max_turns/allowed/denied（model/tools 段批量保存）
+  // Modal 表单态：身份段 name/role/description/system_prompt + 运行段 model/max_turns/allowed/denied
+  const [nameVal, setNameVal] = useState(agent.name || '')
+  const [roleVal, setRoleVal] = useState(agent.role || '')
+  const [descVal, setDescVal] = useState(agent.description ?? '')
+  const [sysPromptVal, setSysPromptVal] = useState(agent.system_prompt ?? '')
   const [modelVal, setModelVal] = useState(agent.model || '')
   const [maxTurns, setMaxTurns] = useState<number | null>(agent.max_turns ?? null)
   const [allowedTools, setAllowedTools] = useState<string[]>(agent.allowed_tools ?? [])
   const [deniedTools, setDeniedTools] = useState<string[]>(agent.denied_tools ?? [])
   const [saving, setSaving] = useState(false)
+
+  // 运行参数段（model/max_turns/allowed/denied_tools）当前先隐藏：本阶段聚焦身份字段。
+  // state 与 payload 保留（隐藏时仍以原值回传，不会误清空），需要时改 true 即恢复整段。
+  const showRuntime = false
 
   // Modal 打开时懒拉取 skills/mcps 全量列表（供 Select options）。
   // 仅首次打开拉取一次（后续开 Modal 复用已加载 state，避免重复请求）。
@@ -378,6 +409,10 @@ export function AgentEditButton({
 
   const openModal = () => {
     // 每次打开同步表单初值为最新 agent（agent 可能已被上次编辑更新）
+    setNameVal(agent.name || '')
+    setRoleVal(agent.role || '')
+    setDescVal(agent.description ?? '')
+    setSysPromptVal(agent.system_prompt ?? '')
     setModelVal(agent.model || '')
     setMaxTurns(agent.max_turns ?? null)
     setAllowedTools(agent.allowed_tools ?? [])
@@ -425,13 +460,23 @@ export function AgentEditButton({
     }
   }
 
-  // ── model/tools 批量保存（agentApi.update）──
+  // ── 身份 + 运行参数批量保存（agentApi.update）──
   const handleSaveRuntime = async () => {
+    if (!nameVal.trim()) {
+      message.warning('名称不能为空')
+      return
+    }
+    if (!roleVal.trim()) {
+      message.warning('角色不能为空')
+      return
+    }
     setSaving(true)
     try {
       const payload = {
-        name: agent.name,
-        role: agent.role,
+        name: nameVal.trim(),
+        role: roleVal.trim(),
+        description: descVal.trim(),
+        system_prompt: sysPromptVal,
         model: modelVal,
         max_turns: maxTurns ?? 0,
         allowed_tools: allowedTools,
@@ -440,7 +485,7 @@ export function AgentEditButton({
       const updated = await agentApi.update(agent.id, payload)
       if (updated) {
         onUpdated(updated)
-        message.success('运行参数已更新')
+        message.success('已保存')
       }
       setOpen(false)
     } catch (e) {
@@ -482,11 +527,86 @@ export function AgentEditButton({
         open={open}
         onCancel={() => setOpen(false)}
         onOk={handleSaveRuntime}
-        okText="保存运行参数"
+        okText="保存"
         confirmLoading={saving}
-        width={560}
+        width={640}
         destroyOnHidden
       >
+        {/* 身份与行为——点底部「保存」生效 */}
+        <Divider plain style={{ marginTop: 0 }}>身份与行为</Divider>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>名称</div>
+          <Input
+            value={nameVal}
+            onChange={(e) => setNameVal(e.target.value)}
+            placeholder="智能体名称"
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>角色</div>
+          <Input
+            value={roleVal}
+            onChange={(e) => setRoleVal(e.target.value)}
+            placeholder="如：后端开发工程师"
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>定位描述</div>
+          <Input.TextArea
+            value={descVal}
+            onChange={(e) => setDescVal(e.target.value)}
+            placeholder="一句话说明这个智能体的职责（可选）"
+            autoSize={{ minRows: 1, maxRows: 3 }}
+          />
+        </div>
+        <div style={{ marginBottom: 12 }}>
+          <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>系统提示词（system_prompt）</div>
+          <Input.TextArea
+            value={sysPromptVal}
+            onChange={(e) => setSysPromptVal(e.target.value)}
+            placeholder="定义该智能体的行为准则、语气、约束。留空则用角色模板默认。"
+            autoSize={{ minRows: 3, maxRows: 10 }}
+          />
+        </div>
+
+        {/* 内建能力——系统预置工具，所有执行者自带，只读，折叠展示（BUILTIN_TOOLS） */}
+        <Collapse
+          ghost
+          size="small"
+          style={{ marginBottom: 16 }}
+          items={[{
+            key: 'builtin-tools',
+            label: (
+              <span style={{ fontSize: 12, color: '#999' }}>
+                <LockOutlined style={{ marginRight: 4 }} />
+                内建能力（系统预置 · 只读）
+              </span>
+            ),
+            children: (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                {BUILTIN_TOOLS.map((t) => (
+                  <div
+                    key={t.name}
+                    style={{
+                      display: 'flex',
+                      alignItems: 'baseline',
+                      gap: 8,
+                      fontSize: 12,
+                      color: '#666',
+                    }}
+                  >
+                    <Tag color="default" style={{ margin: 0, fontFamily: 'monospace' }}>{t.name}</Tag>
+                    <span>{t.desc}</span>
+                  </div>
+                ))}
+                <div style={{ fontSize: 11, color: '#bbb', marginTop: 2 }}>
+                  执行任务时自动绑定到当前群组工作区，无需配置、不可增删。
+                </div>
+              </div>
+            ),
+          }]}
+        />
+
         {/* 已挂载技能——即时 mount/unmount */}
         <div style={{ marginBottom: 16 }}>
           <div style={{ fontSize: 12, color: '#999', marginBottom: 6 }}>已挂载技能（即时生效）</div>
@@ -523,54 +643,55 @@ export function AgentEditButton({
           />
         </div>
 
-        {/* 运行参数 + 工具权限——批量保存 */}
-        <div style={{ marginBottom: 16, padding: 12, background: '#fafafa', borderRadius: 4 }}>
-          <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>
-            运行参数 + 工具权限（点底部「保存运行参数」生效）
-          </div>
-          <Space direction="vertical" style={{ width: '100%' }} size="middle">
-            <div>
-              <div style={{ fontSize: 12, marginBottom: 4 }}>模型</div>
-              <Input
-                value={modelVal}
-                onChange={(e) => setModelVal(e.target.value)}
-                placeholder="留空用全局默认模型"
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, marginBottom: 4 }}>最大轮次（0 = 不限）</div>
-              <Input
-                type="number"
-                value={maxTurns ?? ''}
-                onChange={(e) => {
-                  const n = e.target.value === '' ? null : Number(e.target.value)
-                  setMaxTurns(n != null && Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null)
-                }}
-                placeholder="0"
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, marginBottom: 4 }}>工具白名单（allowed_tools）</div>
-              <Select
-                mode="tags"
-                style={{ width: '100%' }}
-                placeholder="输入工具名回车添加"
-                value={allowedTools}
-                onChange={(v: string[]) => setAllowedTools(v)}
-              />
-            </div>
-            <div>
-              <div style={{ fontSize: 12, marginBottom: 4 }}>工具黑名单（denied_tools）</div>
-              <Select
-                mode="tags"
-                style={{ width: '100%' }}
-                placeholder="输入工具名回车添加"
-                value={deniedTools}
-                onChange={(v: string[]) => setDeniedTools(v)}
-              />
-            </div>
-          </Space>
-        </div>
+        {/* 运行参数段先隐藏（state 与 payload 保留，保存身份时不误改 model/tools；
+            需要时把下面的 showRuntime 改 true 即可恢复）。 */}
+        {showRuntime && (
+          <>
+            <Divider plain>运行参数</Divider>
+            <Space direction="vertical" style={{ width: '100%' }} size="middle">
+              <div>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>模型</div>
+                <Input
+                  value={modelVal}
+                  onChange={(e) => setModelVal(e.target.value)}
+                  placeholder="留空用全局默认模型"
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>最大轮次（0 = 不限）</div>
+                <Input
+                  type="number"
+                  value={maxTurns ?? ''}
+                  onChange={(e) => {
+                    const n = e.target.value === '' ? null : Number(e.target.value)
+                    setMaxTurns(n != null && Number.isFinite(n) ? Math.max(0, Math.floor(n)) : null)
+                  }}
+                  placeholder="0"
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>工具白名单（allowed_tools）</div>
+                <Select
+                  mode="tags"
+                  style={{ width: '100%' }}
+                  placeholder="输入工具名回车添加"
+                  value={allowedTools}
+                  onChange={(v: string[]) => setAllowedTools(v)}
+                />
+              </div>
+              <div>
+                <div style={{ fontSize: 12, marginBottom: 4 }}>工具黑名单（denied_tools）</div>
+                <Select
+                  mode="tags"
+                  style={{ width: '100%' }}
+                  placeholder="输入工具名回车添加"
+                  value={deniedTools}
+                  onChange={(v: string[]) => setDeniedTools(v)}
+                />
+              </div>
+            </Space>
+          </>
+        )}
       </Modal>
     </>
   )
