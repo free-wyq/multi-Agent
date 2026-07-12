@@ -188,6 +188,19 @@ async def _detect_residual_interrupt(
     semantics; this is observability only (the task spec's "update_state resolve"
     is unnecessary in 1.2.5 because fresh-input already resolves — verified
     across 5+ runs).
+
+    Outlet contract (B6): the detect result has a *structured* log outlet, not a
+    free-text peep — both the info (abandon-plan surfaced) and the debug (probe
+    degraded) carry an ``extra={"event": ...}`` field so a future log shipper
+    (Loki/ELK/json-formatter) can aggregate by ``event`` without grepping prose.
+    This is observability-only with NO downstream consumer in-process; if no
+    collector is ever wired AND product confirms abandon-plan needs no trace,
+    the whole helper + ``_PENDING_PLAN_VIEW`` + the classify call site (the
+    ``_PENDING_PLAN_VIEW.set(...)`` / ``await _detect_residual_interrupt`` block
+    in ``node_classify_incoming``) are safe to delete — routing is unchanged
+    (``test_m12_boundary_new_demand`` asserts routing behavior, not logs, so it
+    stays green). Kept now because abandon-plan is a real, low-frequency,
+    hard-to-otherwise-see event.
     """
     try:
         # state-visible pending plan = a plan awaiting confirmation that a new
@@ -199,10 +212,21 @@ async def _detect_residual_interrupt(
                 "[coordinator] pending plan awaiting confirmation; a new %r demand "
                 "may abandon it if the LLM decides dispatch again (%d pending step(s))",
                 incoming_kind, pending,
+                extra={
+                    "event": "plan_abandoned_by_new_demand",
+                    "incoming_kind": incoming_kind,
+                    "pending_steps": pending,
+                },
             )
     except Exception:
         # Observability-only: never block classify routing on a state lookup.
-        logger.debug("[coordinator] residual-interrupt probe skipped", exc_info=True)
+        # ``extra.event`` tags the degradation so it is collectible (not silent)
+        # when debug logging is enabled; ``exc_info`` keeps the traceback.
+        logger.debug(
+            "[coordinator] residual-interrupt probe skipped",
+            exc_info=True,
+            extra={"event": "residual_interrupt_probe_skipped"},
+        )
 
 
 # ── nodes ─────────────────────────────────────────────────────────────────
