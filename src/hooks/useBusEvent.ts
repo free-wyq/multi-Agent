@@ -424,6 +424,8 @@ export function useBusEvent(groupId: string | null) {
       //     用 task_id 前缀判定路径：`task_` 前缀 → 真 task（PL-08）；否则 → worker 单聊 reply_id。
       //     后端 task id 一律 `_next_id("task")` = `task_` + hex（crud._PREFIX_MAP），reply_id 是
       //     裸 uuid4().hex（无前缀），故前缀判定可靠不混淆。
+      //     命名口径（见 docs/naming-conventions.md §2.4）：task_id 与 reply_id 是两套 id
+      //     命名空间，靠 `task_` 前缀判别——非碰撞，是有意的跨命名空间复用 + 前缀分流。
       if (d.type === 'task_token') {
         if (d.content && d.task_id) {
           const key = d.task_id as string

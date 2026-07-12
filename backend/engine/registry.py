@@ -123,12 +123,20 @@ class AgentEngine:
         # 唯一 agent、普通成员）→ worker 图。graph_kind 作为后续 is_coordinator 分支的
         # 判定基准（_handle_task 看门狗、_execute_body 分流），单聊 worker 也能挂看门狗、
         # 走 _run_worker_task（不再合成 coordinator_task notify 死循环）。
+        #
+        # 命名口径（见 docs/naming-conventions.md §1）：single_chat 是「输入」（群级配置
+        # 标志），graph_kind 是「派生」（编译哪张图）——非两套平行分类，是同一条身份派生
+        # 链的输入→输出。single_chat=True 把 is_coordinator=True 的 agent 降级成 worker 图
+        # （单聊=退化的多智能体，supervisor 只在多 agent 里存在）。两轴各有读处，勿混。
         if self.is_coordinator and not self.single_chat:
             self.graph = build_coordinator_graph()
             self.graph_kind: str = "coordinator"
         else:
             self.graph = build_worker_graph()
             self.graph_kind = "worker"
+        # 命名口径（见 docs/naming-conventions.md §2.3）：thread_id 是 LangGraph MemorySaver
+        # 检查点键。驻留引擎图用稳定键 {group}:{agent}（跨 invoke 持久化图状态）；
+        # create_react_agent（agent_loop.py:257）另用 task_id-or-uuid 的 per-exec 键。
         self.thread_id = f"{group_id}:{self.agent_id}"
 
     async def start(self) -> None:

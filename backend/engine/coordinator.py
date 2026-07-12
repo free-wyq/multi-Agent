@@ -1345,6 +1345,8 @@ async def _stream_coordinator_decision(
       so the finalized bubble's collapsible panel can expand the reasoning even
       after the live ``coordReasoning`` buffer is cleared on ``phase="done"``.
     """
+    # 命名口径（见 docs/naming-conventions.md §2.2）：reply_id 是裸 uuid hex（无 `task_`
+    # 前缀），作为单轮流式归并键，与 worker._stream_brain_decision 的 reply_id 同构。
     reply_id = uuid.uuid4().hex
     model = str(config.get("model") or "")
     extractor = ContentExtractor()

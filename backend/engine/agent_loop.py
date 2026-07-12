@@ -253,7 +253,10 @@ async def run_agent_loop(
     # recursion_limit: each "model call + tool exec" ≈ 2 super-steps
     recursion_limit = max_turns * 2 + 4
 
-    # unique thread_id per invocation so MemorySaver never collides
+    # unique thread_id per invocation so MemorySaver never collides.
+    # 命名口径（见 docs/naming-conventions.md §2.1/§2.3）：有 task_id 时复用作 thread_id
+    # （task-scoped 检查点，同 task 多轮 tool 调用共享状态）；否则用新鲜 uuid4（per-exec
+    # 独立检查点，不与历史 task 串话）。与驻留引擎图的 {group}:{agent} 稳定键是两型 thread_id。
     thread_id = task_id or str(uuid4())
     config = {
         "configurable": {"thread_id": thread_id},

@@ -158,6 +158,10 @@ async def _stream_brain_decision(
     # 按 reply_id 拼接逐字增量。落盘到 agent_reply.data.reply_id 后，前端用「该 agent 在
     # 收尾时间戳之后的消息」判定持久化回复已落地、退场流式气泡——与协调者 phase=done
     # 清 coordStreaming 同模式。
+    # 命名口径（见 docs/naming-conventions.md §2.2）：reply_id 是裸 uuid hex（无 `task_`
+    # 前缀），与 task_id（恒 `task_`+hex）靠前缀判别。worker 单聊回复走 task_token 通道，
+    # 后端把 reply_id 塞进事件 task_id 槽，前端 useBusEvent.ts:430 按 `task_` 前缀分流到
+    # coordStreaming[reply_id]——非碰撞，是有意的跨命名空间复用 + 前缀判别。
     reply_id = uuid.uuid4().hex
     # worker brain 的 LLM 输出是 strict JSON（``{"action","content","reasoning"}``），
     # 可见回复是 ``content`` 字段值——若把 raw_parts（含 JSON 骨架/action/reasoning）逐字
