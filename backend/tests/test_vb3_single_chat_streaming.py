@@ -264,13 +264,16 @@ def assert_contract() -> list[str]:
         else:
             print("[后端5] OK  worker.py reply_id 生成 + emit_task_token(reply_id) 推逐字 delta")
 
-    # [6] _ContentExtractor 跳过 JSON 骨架（只推可见回复解码增量）
-    if "_ContentExtractor" not in worker:
-        errs.append("[后端6] worker.py 未用 _ContentExtractor（JSON 骨架会泄漏到流式气泡）")
+    # [6] ContentExtractor 跳过 JSON 骨架（只推可见回复解码增量）
+    #     B9 抽出 _ContentExtractor 到 llm/json_stream.py（公共 ContentExtractor），
+    #     消除 worker 从 coordinator 反向导入。两种名都接受（核心契约「worker 用
+    #     streaming-JSON extractor 跳骨架」不变，仅类名/位置迁移）。
+    if "_ContentExtractor" not in worker and "ContentExtractor" not in worker:
+        errs.append("[后端6] worker.py 未用 ContentExtractor（JSON 骨架会泄漏到流式气泡）")
     elif "extractor.feed" not in worker or "extractor.take" not in worker:
-        errs.append("[后端6] _ContentExtractor feed/take 未接线")
+        errs.append("[后端6] ContentExtractor feed/take 未接线")
     else:
-        print("[后端6] OK  _ContentExtractor.feed/take 跳过 JSON 骨架，只推可见回复解码增量")
+        print("[后端6] OK  ContentExtractor.feed/take 跳过 JSON 骨架，只推可见回复解码增量")
 
     return errs
 
@@ -427,7 +430,7 @@ async def main() -> int:
         "  · 静态契约：mapKind('task_token')=='token' + logs 排除 task_token + "
         "task_ 前缀分流（task_→streaming / 裸 hex→coordStreaming）+ "
         "coordinatorStreamingBubbles 渲染 + coordStreaming 经 context 下发 + "
-        "worker.py reply_id 生成 + emit_task_token + _ContentExtractor 跳 JSON 骨架；\n"
+        "worker.py reply_id 生成 + emit_task_token + ContentExtractor 跳 JSON 骨架；\n"
         f"  · 运行时：收到 {n_tokens} 个 task_token 逐字增量（短增量占比 {short_ratio:.0%}），"
         f"task_id 是裸 hex（reply_id，非 PL-08 真 task），"
         f"流式拼接 == 定稿回复（同源等式），"

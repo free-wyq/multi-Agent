@@ -17,12 +17,12 @@ from typing import Any
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 
-from engine.coordinator import _ContentExtractor
 from engine.inbox import push_task
 from engine.state import WorkerState
 from events import emit_coordinator_reasoning, emit_message_added, emit_task_token
 from llm.client import chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
+from llm.json_stream import ContentExtractor
 from llm.prompts import build_brain_prompt
 from store import crud
 
@@ -167,9 +167,10 @@ async def _stream_brain_decision(
     # worker brain 的 LLM 输出是 strict JSON（``{"action","content","reasoning"}``），
     # 可见回复是 ``content`` 字段值——若把 raw_parts（含 JSON 骨架/action/reasoning）逐字
     # 推给前端，流式气泡会渲染出 ``{"action":"chat","content":"...`` 这种骨架噪声。故复用
-    # 协调者的 ``_ContentExtractor``：feed 每个 content_delta，take() 出「content 字段的
-    # 解码增量」（跳过 JSON 骨架/转义解码/前导散文），只把真正的可见回复文本逐字推。
-    extractor = _ContentExtractor()
+    # ``llm.json_stream.ContentExtractor``（与协调者 ``_stream_coordinator_decision`` 同款）：
+    # feed 每个 content_delta，take() 出「content 字段的解码增量」（跳过 JSON 骨架/转义解码/
+    # 前导散文），只把真正的可见回复文本逐字推。
+    extractor = ContentExtractor()
     start = time.monotonic()
     raw_parts: list[str] = []
     # reasoning_content 全文累积——落盘到 agent_reply.data.reasoning，定稿气泡的折叠区据此
