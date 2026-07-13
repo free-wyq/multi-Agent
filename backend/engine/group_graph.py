@@ -346,6 +346,29 @@ def build_group_graph(
     # route_entry: parse incoming @mention → first speaker (or END).
     g.add_node("route_entry", build_route_entry(legal_targets))
 
+    # Coordinator sub-nodes (task: coordinator.py 把 classify/llm_decide/chat 节点
+    # 改造为群图内 coordinator 子节点). The centralized path (engineering / plan-
+    # confirm turns) runs through these nodes inside the SAME group graph, sharing
+    # ``GroupState`` with the agent (member) nodes. The node functions are the
+    # resident coordinator's (``coordinator.node_*``) reused unchanged — they read
+    # every state key via duck-typed ``state.get(...)`` / ``state[...]``, and
+    # ``GroupState`` is a schema union over ``CoordinatorState`` (this task ported
+    # ``agent_id``/``agent_name``/``system_prompt``/``action_taken``/``reply_content``
+    # /``_stream_stats`` onto ``GroupState``), so ``state["agent_id"]`` resolves to
+    # the Leader in both graphs. Registering them here is the wiring step the task
+    # names; the node bodies + the ``route_after_*`` conditional-edge semantics are
+    # preserved verbatim (a later task adds the conditional edges + the route_entry
+    # fan-out that routes engineering/plan-confirm turns here).
+    from engine.coordinator import build_coordinator_subnodes  # local import avoids cycle
+    coord_nodes = build_coordinator_subnodes(
+        coordinator_id=coordinator_id,
+        coordinator_name="",
+        system_prompt="",
+    )
+    for name in ("classify", "llm_decide", "chat", "dispatch",
+                 "handle_reply", "dispatch_next", "summarize"):
+        g.add_node(name, coord_nodes[name])
+
     # one agent node per member. build_agent_node closure-binds identity so
     # the compiled node knows who it is speaking as (mirrors AgentEngine
     # caching self.agent_id / self.name / self.role / self.system_prompt).
@@ -370,8 +393,11 @@ def build_group_graph(
     compiled._legal_handoff_targets = legal_targets  # type: ignore[attr-defined]
     compiled._group_id = group_id  # type: ignore[attr-defined]
     compiled._member_agent_ids = member_agent_ids  # type: ignore[attr-defined]
+    compiled._coordinator_id = coordinator_id  # type: ignore[attr-defined]
+    compiled._has_coordinator_subnodes = True  # type: ignore[attr-defined]
     logger.info(
-        "[group_graph] compiled graph for group=%s members=%d handoff_targets=%d",
+        "[group_graph] compiled graph for group=%s members=%d handoff_targets=%d "
+        "coordinator_subnodes=on",
         group_id, len(member_agent_ids), len(legal_targets),
     )
     return compiled

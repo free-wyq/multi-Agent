@@ -212,6 +212,25 @@ class GroupState(TypedDict, total=False):
     auto_confirm: bool
     leader_strategy: str
 
+    # coordinator identity fields. ``agent_id`` / ``agent_name`` / ``system_prompt``
+    # here are the *group's Leader* identity (the coordinator sub-node), NOT a
+    # generic member's (members carry their own identity closed-over in
+    # ``worker.build_agent_node``). The coordinator sub-nodes (classify/llm_decide/
+    # chat/dispatch/...) read these exactly as the resident coordinator graph reads
+    # ``CoordinatorState.agent_id``/``agent_name``/``system_prompt`` — ported onto
+    # the shared group state verbatim so the migration preserves behaviour. In
+    # ``CoordinatorState`` these are the only identity fields (``group_id`` +
+    # ``agent_id`` + ``agent_name`` + ``system_prompt``); here they sit alongside
+    # ``coordinator_id`` (the Leader's agent_id, read by agent-node handoff guards)
+    # — ``agent_id`` (sub-node control) and ``coordinator_id`` (handoff target set)
+    # are two views of the same Leader agent_id, kept distinct by name so the
+    # coordinator sub-node's ``state["agent_id"]`` reads (imported verbatim from the
+    # resident node code) resolve against the Leader, while the agent-node
+    # handoff guard ``target == coordinator_id`` is unambiguous.
+    agent_id: str
+    agent_name: str
+    system_prompt: str
+
     # shared turn memory (appended across handoffs; checkpointer-persisted)
     memory: Annotated[list[dict], append_list]
 
@@ -220,3 +239,30 @@ class GroupState(TypedDict, total=False):
     incoming_sender: str
     incoming_kind: str  # agent_reply | coordinator_task | coordinator_reply | plan_confirm | ...
     incoming_data: dict | None
+
+    # coordinator sub-node control channel (task: coordinator classify/llm_decide/
+    # chat 节点改造为群图内 coordinator 子节点). These three keys are the
+    # coordinator sub-nodes' inter-node hand-off within the group graph — the
+    # same control channel the resident ``CoordinatorState`` uses, ported onto
+    # the shared group state so the coordinator sub-nodes can be wired with
+    # ``route_after_classify`` / ``route_after_llm_decide`` conditional edges
+    # (semantics preserved verbatim). Agent nodes (``worker.make_agent_node``)
+    # never touch these — they drive the turn via ``Command(goto=...)`` and the
+    # ``messages``/``turn_count``/``recent_speakers`` keys; the coordinator sub-
+    # nodes drive theirs via ``action_taken`` + the conditional edges. ``total=False``
+    # keeps them optional so agent nodes / route_entry aren't forced to return them.
+    # ``action_taken`` — the routing decision a coordinator sub-node sets so the
+    # conditional edge (``route_after_classify`` → {dispatch_next|handle_reply|
+    # llm_decide}, ``route_after_llm_decide`` → {chat|dispatch}) can route. Same
+    # value vocabulary as ``CoordinatorState.action_taken`` (chat | dispatch | ask
+    # | continue | handle_reply | summarize | dispatch_next | confirm_dispatch).
+    action_taken: str
+    # ``reply_content`` — the coordinator LLM's reply text, carried from
+    # ``llm_decide`` to ``chat`` (the resident graph's same channel).
+    reply_content: str
+    # ``_stream_stats`` — per-turn streaming run-stats (``{reply_id, elapsed_ms,
+    # tokens, model, reasoning_tokens, reasoning?}``) carried from ``llm_decide``
+    # to ``chat`` so the finalized bubble keeps the "Ns · ↓ N tokens" status line
+    # after the streaming bubble retires. None for non-chat actions (dispatch/
+    # summarize announce their own reply). Mirrors ``CoordinatorState._stream_stats``.
+    _stream_stats: dict | None

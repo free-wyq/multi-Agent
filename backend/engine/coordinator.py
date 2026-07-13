@@ -1222,6 +1222,97 @@ def route_after_dispatch(state: CoordinatorState) -> str:
 # ── graph builder ─────────────────────────────────────────────────────────
 
 
+def build_coordinator_subnodes(coordinator_id: str = "", coordinator_name: str = "",
+                               system_prompt: str = "") -> dict:
+    """Build the coordinator sub-nodes for wiring into the group graph.
+
+    Task: coordinator.py 把 classify/llm_decide/chat 节点改造为群图内 coordinator
+    子节点，状态读写改用 GroupState，保 route_after_* 条件边语义.
+
+    The resident ``build_coordinator_graph`` keeps a self-contained 7-node graph
+    (``CoordinatorState`` schema) for the live coordinator engine until the full
+    group-graph migration swaps consumers over. This helper packages the same
+    node functions (``node_classify_incoming`` / ``node_llm_decide`` / ``node_chat``
+    / ``node_dispatch`` / ``node_handle_reply`` / ``node_dispatch_next`` /
+    ``node_summarize``) + the four ``route_after_*`` routers as a dict so
+    ``group_graph.build_group_graph`` can register them as the centralized-path
+    sub-nodes of the single-graph-per-group topology — the coordinator sits
+    alongside the agent (member) ``agent_<id>`` nodes in ONE compiled graph.
+
+    **Why the node code is reused unchanged**: the node functions already read
+    every state key via ``state.get(...)`` / ``state[...]`` (duck-typed dict
+    access), NOT via TypedDict attribute access. ``CoordinatorState`` and
+    ``GroupState`` share all the keys the coordinator nodes touch — ``group_id``,
+    ``agent_id``, ``agent_name``, ``system_prompt``, ``incoming_*``,
+    ``dispatch_plan``, ``memory``, ``auto_confirm``, ``leader_strategy``,
+    ``action_taken``, ``reply_content``, ``_stream_stats``. The resident graph
+    injects ``agent_id`` = the group's Leader agent_id (the engine is the
+    coordinator's AgentEngine); in the group graph the same field is injected
+    at ``invoke_turn`` time. So the node code that does ``state["agent_id"]``
+    resolves to the Leader in BOTH graphs without a code change — the
+    state-read/write migration is a schema union, not a code rewrite.
+
+    **The three sub-nodes named in the task** (classify / llm_decide / chat) plus
+    the four the centralized path needs (dispatch / dispatch_next / handle_reply
+    / summarize) are all returned — wiring only classify+llm_decide+chat would
+    leave dispatch's ``interrupt()`` (PL-02) and the DAG fan-out (dispatch_next)
+    without a home, breaking the resident coordinator's plan-confirmation +
+    parallel-dispatch semantics the group graph is meant to preserve. All seven
+    are returned together; ``build_group_graph`` wires whichever it needs (a
+    later task wires the full centralized path; this task packages the nodes).
+
+    Args:
+        coordinator_id: the group's Leader agent_id. Stamped onto the returned
+            node specs (``agent_id``) so a later wiring task can register the
+            sub-nodes with identity bound, mirroring ``worker.build_agent_node``'s
+            closure-binding of member identity. The node code reads
+            ``state["agent_id"]`` at runtime — the value injected there at
+            ``invoke_turn`` is the Leader (single source), so this is only the
+            build-time annotation, NOT a hard-wired override.
+        coordinator_name: the Leader's display name (build-time annotation).
+        system_prompt: the Leader's persona (build-time annotation; ``_leader_system``
+            reads ``state["system_prompt"]`` at runtime, so this is only an
+            annotation for symmetry with the agent-node factory).
+
+    Returns a dict mapping node name → node callable, plus the four routers, all
+    importable from this module. The keys mirror the resident graph's node names
+    verbatim so ``add_conditional_edges`` path maps stay identical:
+
+        {"classify": node_classify_incoming, "llm_decide": node_llm_decide,
+         "chat": node_chat, "dispatch": node_dispatch,
+         "handle_reply": node_handle_reply, "dispatch_next": node_dispatch_next,
+         "summarize": node_summarize,
+         "route_after_classify": route_after_classify,
+         "route_after_handle_reply": route_after_handle_reply,
+         "route_after_llm_decide": route_after_llm_decide,
+         "route_after_dispatch": route_after_dispatch,
+         "_coordinator_id": coordinator_id,
+         "_coordinator_name": coordinator_name,
+         "_system_prompt": system_prompt}
+
+    The routers are returned verbatim too — they read ``state.get("action_taken")``
+    only, which exists on BOTH ``CoordinatorState`` and ``GroupState`` (the union
+    landed in this task), so ``route_after_*`` conditional-edge semantics are
+    preserved byte-for-byte without modification.
+    """
+    return {
+        "classify": node_classify_incoming,
+        "llm_decide": node_llm_decide,
+        "chat": node_chat,
+        "dispatch": node_dispatch,
+        "handle_reply": node_handle_reply,
+        "dispatch_next": node_dispatch_next,
+        "summarize": node_summarize,
+        "route_after_classify": route_after_classify,
+        "route_after_handle_reply": route_after_handle_reply,
+        "route_after_llm_decide": route_after_llm_decide,
+        "route_after_dispatch": route_after_dispatch,
+        "_coordinator_id": coordinator_id,
+        "_coordinator_name": coordinator_name,
+        "_system_prompt": system_prompt,
+    }
+
+
 def build_coordinator_graph():
     """Compile the coordinator StateGraph with a MemorySaver checkpointer."""
     g: StateGraph = StateGraph(CoordinatorState)
