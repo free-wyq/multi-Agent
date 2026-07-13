@@ -5,10 +5,19 @@ StateGraphs. Reducers: ``append_list`` concatenates lists (memory), ``merge_dict
 right-overrides-left (dispatch_plan, recent_routes). The engine injects the
 runtime values (memory, dispatch_plan, recent_routes) at each ``ainvoke`` so
 the checkpointer + thread_id keep cross-invoke state.
+
+``GroupState`` (task: 去中心化群图 handoff 迁移) is the shared state schema for
+the single-graph-per-group swarm topology (engine/group_graph.py, to be wired in
+later tasks). It supersedes neither ``CoordinatorState`` nor ``WorkerState`` —
+those remain the schemas for the resident coordinator/worker graphs until the
+group-graph migration lands and consumers switch over.
 """
 from __future__ import annotations
 
 from typing import Annotated, Any, TypedDict
+
+from langchain_core.messages import BaseMessage
+from langgraph.graph.message import add_messages
 
 
 def append_list(left: list, right: list) -> list:
@@ -121,3 +130,93 @@ class WorkerState(TypedDict, total=False):
     # execute 路径回复是模板化 announce，不匹配 brain token，不带 stats（与协调者
     # dispatch 排除同理）。None=无统计（错误兜底/execute）。
     _stream_stats: dict | None
+
+
+class GroupState(TypedDict, total=False):
+    """Shared state schema for the single-graph-per-group swarm topology.
+
+    Task: 去中心化群图 handoff 迁移（engine/group_graph.py，后续任务装配）.
+    Replaces the per-agent resident ``CoordinatorState``/``WorkerState`` graphs
+    with ONE compiled graph per group: every agent (including the coordinator)
+    is a node, and "who speaks next" is decided by LangGraph handoff edges (an
+    @mention parsed from the current speaker's reply → ``goto`` the target agent
+    node; no @mention → ``END`` ends the turn). See memory
+    ``decentralized-scheduling-stop-plan-2026-07-13`` (方向 A) and
+    ``langgraph-two-collaboration-paths`` for the design rationale.
+
+    Field-by-field mapping to the three群聊缺陷 (顺序乱 / 协调者插话 / 停不下来):
+
+      · ``messages`` (``add_messages`` reducer) — the turn's accumulated
+        message log shared across all agent nodes. LangGraph's handoff model
+        threads this through every node so each speaker sees prior context.
+        Replaces the per-engine ``CoordinatorState.incoming_message`` /
+        ``WorkerState.incoming_message`` pair (one shared log, not two routed
+        fields). ``add_messages`` dedups by id so a resumed turn does not
+        double-append.
+      · ``current_speaker`` — the agent_id of the node currently driving the
+        turn. Set by ``route_entry`` at turn start and by each handoff edge on
+        control transfer. Nodes read it to know "who am I speaking as" without
+        re-deriving from identity. (后端/前端接龙顺序乱的根因是同一 agent 一轮
+        被驱动两次；current_speaker + handoff 串行只一节点在跑共同消除连发.)
+      · ``dispatch_plan`` (``replace_value`` reducer) — the coordinator's DAG
+        plan, last-write-wins (a node returns the FULL updated plan rather than
+        a delta, mirroring ``CoordinatorState.dispatch_plan``). Carried in the
+        shared state so the coordinator's dispatch/handle_reply/summarize nodes
+        and any agent's report-back all read/write the same plan slot.
+      · ``turn_count`` (int) — increments per turn within a single
+        ``graph.ainvoke``. Bounds how many handoffs one user turn may chain
+        (防连发 + 防 @mention 死循环的图内兜底, complementing LangGraph's
+        ``recursion_limit``). Resets to 0 at each ``invoke_turn``.
+      · ``recent_speakers`` (list[str], ``append_list`` reducer) — the ordered
+        list of agent_ids that have spoken this turn. Nodes / ``route_entry``
+        consult it to enforce "same agent not driven twice in one turn"
+        (顺序乱根因②). Cleared at turn boundary (paired with ``turn_count`` reset).
+      · ``auto_confirm`` / ``leader_strategy`` — group-config flags injected per
+        ``invoke_turn`` from ``GroupEntity.config`` (same source as
+        ``CoordinatorState.auto_confirm`` / ``leader_strategy``), kept verbatim
+        so coordinator sub-nodes inside the group graph read the same config.
+      · ``memory`` (``append_list`` reducer) — the group's shared turn memory,
+        appended across handoffs within a turn (mirrors
+        ``CoordinatorState.memory`` semantics; each agent node may push a
+        per-turn memo). Persisted via checkpointer across ``invoke_turn``.
+      · ``incoming_*`` — the user/system message that kicked off the turn,
+        mirroring ``CoordinatorState.incoming_*`` (``incoming_message`` /
+        ``incoming_sender`` / ``incoming_kind`` / ``incoming_data``).
+        ``route_entry`` injects them from ``route_user_message``; coordinator
+        sub-nodes (classify/llm_decide) read them exactly as the resident
+        coordinator graph does today.
+
+    ``total=False``: every field is optional — nodes only declare the keys
+    they read/write, and ``StateGraph`` merges per-key reducers across all
+    node returns. No node is forced to return keys it didn't touch.
+    """
+
+    # identity (injected at invoke_turn; the coordinator sub-node also reads these)
+    group_id: str
+    coordinator_id: str  # the group's Leader agent_id (handoff target for plan/engineering turns)
+
+    # shared message log — add_messages dedups by id (resume-safe)
+    messages: Annotated[list[BaseMessage], add_messages]
+
+    # who is currently driving the turn (set by route_entry / handoff edges)
+    current_speaker: str
+
+    # coordinator DAG plan (last-write-wins; node returns the full plan)
+    dispatch_plan: Annotated[list[dict], replace_value]
+
+    # turn control (reset each invoke_turn; bound handoff chain length + anti-loop)
+    turn_count: int
+    recent_speakers: Annotated[list[str], append_list]
+
+    # group config (injected per invoke_turn from GroupEntity.config)
+    auto_confirm: bool
+    leader_strategy: str
+
+    # shared turn memory (appended across handoffs; checkpointer-persisted)
+    memory: Annotated[list[dict], append_list]
+
+    # the user/system message that kicked off the turn (route_entry injects)
+    incoming_message: str
+    incoming_sender: str
+    incoming_kind: str  # agent_reply | coordinator_task | coordinator_reply | plan_confirm | ...
+    incoming_data: dict | None
