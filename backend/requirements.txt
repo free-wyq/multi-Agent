@@ -5,6 +5,7 @@ sqlalchemy
 aiosqlite
 httpx
 langgraph
+langgraph-swarm
 langchain-openai
 langchain-core
 mcp

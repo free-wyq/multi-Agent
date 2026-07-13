@@ -1,0 +1,43 @@
+- [x] A1 复现「写200字作文」3气泡：起后端+前端，单聊/群聊各发一次，抓 3 条气泡各自 sender_id/type/data，定位每条出自哪行（worker.py:307 `收到，我来` / registry.py:179 `▶开始执行任务` / registry.py:400 `任务完成🎉`），确认是 worker brain 误判 execute 还是 coordinator 误判 dispatch
+- [x] A2 静态核对 coordinator.py:824-895（node_llm_decide→_stream_stats）+ coordinator.py:898-912（node_chat→_unified_reply(data=_stream_stats)）：确认 chat/ask/continue 路径 {reply_id,elapsed_ms,tokens,model,reasoning_tokens,reasoning} 已盖到 agent_reply.data 并落盘（c32de07 的 reasoning 节流/logs 排除不回归）
+- [x] A3 静态核对 worker.py:264-281（node_brain_decide→stats）+ worker.py:284-291（node_chat→_unified_reply(data=_stream_stats)）：确认单聊 worker chat 路径 stats 同形落盘，与协调者一致（前端 extractCoordStats 不区分来源）
+- [x] A4 修(b)根因·brain 误判：llm/prompts.py build_brain_prompt（38-60行）把「写文章/写文案/写总结/翻译/改写等直接生成文本内容」明确归入 chat 而非 execute，execute 收紧为「写代码/改配置/运行命令/调用工具」
+- [x] A5 修(b)根因·coordinator 误判：llm/prompts.py COORDINATOR_SYSTEM（9-23行）+ build_coordinator_prompt action 说明（317-323行）把「直接生成文本内容」归入 chat，dispatch 仅限有步骤的工程任务，避免「写200字作文」被拆 dispatch
+- [x] A6 修(a)兜底·execute 路径无 stats：确认作文改走 chat 后定稿气泡自带 stats；若 execute→task→「任务完成🎉」路径仍可能被命中（brain 仍误判时），评估 registry.py:398-406 `_reply` 是否需透传上一轮 create_react_agent 的 usage（保守不改则记录为已知限制，优先靠 A4/A5 让创作不进该路径）
+- [x] A7 写回归测试 backend/tests/test_vg1_essay_single_chat.py：静态契约锁 build_brain_prompt/COORDINATOR_SYSTEM 把「写文章/写文案」归 chat 不归 execute/dispatch + CHAT_MESSAGE_TYPES 仍只白名单 agent_reply/user_input/task_log/slash_card（task_dispatch/task_complete 不漏成气泡）
+- [x] A8 写回归测试 backend/tests/test_vg2_finalized_stats.py：静态契约锁 coordinator node_llm_decide 对 chat/ask/continue 盖 _stream_stats（含 reply_id/elapsed_ms/tokens/model/reasoning_tokens）+ node_chat 透传 _unified_reply(data=_stream_stats)，定稿气泡 data 必带 elapsed_ms>0
+- [x] A9 跑 `cd backend && for f in tests/test_v*.py; do python3 "$f"; done` 全绿 + `npx tsc --noEmit` 全绿 + commit（fix(essay): 创作请求走单条 chat + 定稿气泡带模型消耗统计）+ 不回归 c32de07
+- [x] A10 `git push origin master`
+- [x] B1 核实 engine/mention.py:228 route_mentions 现状：代码已用 push_notify + 反向清键(234行) + _a2a_turns cap(182行)，对照 plans/composed-doodling-creek.md 核实 plan 是否已落地（用户称「已批未做」与代码不符，先核实避免重复劳动），把核实结论写进 commit message 或记忆
+- [x] B2 补 A2A 来回对话回归测试 backend/tests/test_vh1_a2a_alternation.py：锁 route_mentions 用 push_notify（非 push_task）+ 反向清键允许 A→B→A→B + 同方向 30s 连发被拦 + route_user_message 重置 _a2a_turns
+- [x] B3 engine/worker.py:143-281 node_brain_decide 流式块过长（~110行），抽出 `_stream_brain_decision(config, messages, group_id, agent_id)` 镜像 coordinator._stream_coordinator_decision，单一职责
+- [x] B4 engine/worker.py:81-99 `_build_context` 注释自承「仅旧路径/单聊兜底」，grep 全仓确认无调用方后删除死代码（_build_context_from_db 已接管）
+- [x] B5 engine/worker.py:262 `reasoning_tokens = final_reasoning_tokens` 无 fallback 估值，与 coordinator.py:1466-1469 的 live_reasoning_tokens 兜底不一致，统一加 `if not final_reasoning_tokens: final_reasoning_tokens = live_reasoning_tokens` 或等价
+- [x] B6 engine/coordinator.py:166-206 `_detect_residual_interrupt` 仅可观测且 `except Exception` 静默 debug，要么补结构化日志要么标注为可删，消除「observability-only 但无出口」的模糊
+- [x] B7 engine/coordinator.py:1047-1070 node_summarize 的 `[:200]` 魔数 + summary 拼接重复 dispatcher/coordinator 两处，抽 `format_step_summary(plan)` 共享 helper
+- [x] B8 engine/coordinator.py:1116-1140 route_after_dispatch 的 `wait_confirm` 哨兵注释自承「inert/永不路由」，清理死分支与过时注释，只留 dispatch_next/END
+- [x] B9 engine/coordinator.py 抽出 `_ContentExtractor` 到 engine/json_stream.py 或 llm/，消除 worker.py:20 从 coordinator 反向导入的耦合（两模块互相 import 是坏味道）
+- [x] B10 engine/registry.py:715-735 `_reply` 永远 data=None，与 worker._unified_reply / coordinator._unified_reply 三份近乎相同实现，抽 `engine/reply.py` 统一 reply 落盘+emit+route_mentions
+- [x] B11 engine/registry.py:594-602 coordinator_id 启动缓存「不再二次查库」但 auto_confirm/leader_strategy 每 notify 读库，两者时效口径不一致；若支持群主重选则 coordinator_id 也应每 notify 刷新或文档化「群主不可变」
+- [x] B12 engine/registry.py:678-685 sys_for_invoke 内联拼接「团队互动」串，抽常量 TEAM_INTERACTION_SUFFIX，与 prompts.py 重复的互动语义合并到一处真源
+- [x] B13 engine/dispatcher.py:24-42 apply_fail_fast 嵌套循环 O(n²)，小 plan 无碍但可早退（无 failed step 即 break），并补类型注解 step_num:int
+- [x] B14 engine/dispatcher.py:82 `🚀 步骤 N 派发` 与 coordinator node_dispatch `📋 已制定协作计划` 两类 announce 都 data=None 无 stats，统一判定「announce 类回复不带 stats」并写注释说明（与 A8 的 stats 契约对齐）
+- [x] B15 events/bus.py 全量审计 emit_* 函数：best-effort 的 `except Exception` 是否统一 logger.exception、是否有静默吞没、emit 协程背压是否有兜底
+- [x] B16 src/hooks/useBusEvent.ts:264 `setEvents(prev => [...prev.slice(-499), ev])` 每事件 O(n) 切片，cap 500 高频时（task_token 流式）成本高，改环形缓冲或 chunk 批量 flush
+- [x] B17 src/hooks/useBusEvent.ts:301 `setLogs(prev => [...prev.slice(-200), entry])` 同 B16 问题，日志高频时 O(n)，统一缓冲策略
+- [x] B18 src/hooks/useBusEvent.ts:442-470 coordinator_stats 分支重复 Number()/Number.isFinite 守卫，与 ChatPanel.tsx:138-150 extractCoordStats 重复，抽共享 `parseStats(dd)` 到 services/api.ts 或 utils
+- [x] B19 src/components/ChatPanel.tsx:70-79 getAgentColor 的 ROLE_COLORS 用中文角色名（后端开发工程师）硬编码，与 codebase 其他处 snake_case role（backend_engineer）命名不一致，改按 role snake_case 匹配并兼容旧名
+- [x] B20 src/components/ChatPanel.tsx:138-193 extractCoordStats/extractCoordReasoning/extractFinalizedArtifacts 三个 extractor 的 null-guard+类型守卫模式重复，抽 `safeRecord(data)` 共享入口
+- [x] B21 src/components/ChatPanel.tsx:89-92 dateKey 用 getMonth() 0-index 不 +1（仅比较用）但 dateLabel +1，两函数口径隐式耦合，统一用 Date.toISOString().slice(0,10) 或显式 +1 注释
+- [x] B22 src/components/ChatPanel.tsx:489-517 finalizedBubbles 按 sender+时间戳判 replied，注释自承「fragile」（logs 路径 coerce task_id 丢失），改按 task_id 判定或加 task_id 回填，消除时序依赖
+- [x] B23 src/components/ChatPanel.tsx 全文件审计 useMemo 依赖：finalizedBubbles 依赖 chatMessages 致每次新消息重算，评估按 events 增量更新而非全量重建
+- [x] B24 backend/store/crud.py 审计 _provider_to_model / _select_model / update_provider_model 三个模型解析函数命名与职责边界，确认 VE 锁定的「legacy 列不再外显」无回归 + 补类型注解
+- [x] B25 backend/config.py 审计硬编码默认值与 .env 读取，确认无 OPENAI_API_KEY 外泄路径、无 key 落日志/异常文本
+- [x] B26 全仓命名一致性审计：graph_kind("coordinator"/"worker") 与 single_chat 标志两套平行分类、reply_id/task_id/thread_id 三套 id 命名空间，列清单并统一文档化（不改语义只消歧义）
+- [x] B27 backend/llm/client.py chat_completion_stream 审计超时/重试/usage 缺失分支，确认 reasoning_usage 透传与异常不吞没，与 coordinator/worker 两调用方契约对齐
+- [x] B28 engine/coordinator.py 全文 `except Exception` 清单：emit_coordinator_token/reasoning/stats 三处 best-effort 是否都 logger.exception（非静默），统一错误出口
+- [x] B29 src/components/ChatPanel.tsx HighlightMessage 组件每气泡每渲染都跑 mention 高亮，评估 memo/缓存或按 content 纯函数化降重渲染
+- [x] B30 换角度重巡航·事件管线：从 bus.py emit → useBusEvent onmessage → ChatPanel effect 全链路找重复 setState/重渲染（非 task_token 已知点），修一个 commit
+- [x] B31 换角度重巡航·错误处理：全仓 grep `except Exception` / `except:` / `pass`，逐个判定是静默吞没还是合理兜底，修掉真吞没
+- [x] B32 换角度重巡航·死代码：grep `# TODO`/`# 旧路径`/`# 兼容`/未引用函数，逐个核实删除或文档化保留理由
+- [x] B33 收尾：每个 B 子任务完成后单独跑 `cd backend && python3 tests/test_v*.py` + `npx tsc --noEmit` 全绿才 commit（master 增量），最后 `git push origin master`；记一条记忆总结本轮发现与未决项
