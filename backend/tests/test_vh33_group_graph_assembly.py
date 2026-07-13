@@ -204,7 +204,7 @@ def assert_contract() -> list[str]:
                  _A("agent_back_1", "后端工程师", "backend_engineer"),
                  _A("agent_coord_1", "协调者", "coordinator")]
 
-    async def _run_entry(incoming, find_ret, resolve_ret):
+    async def _run_entry(incoming, find_ret, resolve_ret, kind=""):
         re_fn = build_route_entry(g._legal_handoff_targets)
         with patch("engine.worker.crud") as crud_mock, \
              patch("engine.worker.find_mentions", return_value=find_ret), \
@@ -214,6 +214,7 @@ def assert_contract() -> list[str]:
             return await re_fn({
                 "group_id": "g1", "coordinator_id": "agent_coord_1",
                 "incoming_message": incoming, "incoming_sender": "user",
+                "incoming_kind": kind,
                 "turn_count": 0,
             })
 
@@ -234,7 +235,9 @@ def assert_contract() -> list[str]:
             print("[D11] OK  @mention → goto agent_<peer> + current_speaker/turn_count/recent_speakers 写入")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[D11] @mention 测试异常：{type(e).__name__}: {e}")
-    # D12 无 @mention → END
+    # D12 无 @mention → END（bare chat, no engineering/plan kind — decentralized
+    # path话筒落地; task-11 made route_entry kind-aware, so this case passes an
+    # empty kind to stay on the no-@→END branch).
     try:
         cmd = asyncio.run(_run_entry("大家好", [], None))
         if cmd.goto != _END:

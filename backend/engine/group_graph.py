@@ -13,48 +13,13 @@ graph topology:
   · 顺序乱 / 同一 agent 连发 — handoff is serial (one node runs at a time),
     and ``GroupState.turn_count`` + ``recent_speakers`` guard the same agent
     not driving twice. No inbox-queue race.
-  · 协调者每轮插话 — the coordinator is NOT in the decentralized turn's
-    handoff graph; ``route_entry`` routes @mention/chat turns to the first
-    agent, never invoking the Leader unless the turn is engineering/plan-
-    confirm (the coordinator-sub-node migration is a LATER task; until then
-    ``build_group_graph`` registers agent nodes only, and the coordinator
-    engine continues to handle its turns via its resident graph).
-  · 停不下来 — a turn = one ``graph.ainvoke`` (cancellable task, owned by
-    ``GroupRuntime`` in a later task); ``AGENT_NODE_MAX_HANDOFFS`` caps the
-    handoff chain length in-graph.
-
-Task says「agent 节点用 ``create_handoff`` 注册合法 handoff 边」. The real
-``langgraph_swarm`` API is ``create_handoff_tool`` (task-name shorthand — see
-memory ``langgraph-swarm-dependency-added``: ``create_handoff`` does not exist
-in any released version). ``create_handoff_tool`` returns a ``BaseTool`` whose
-``metadata["__handoff_destination"]`` records the合法 handoff target agent
-name; calling the tool returns ``Command(goto=agent_name, update={...})``.
-
-Our worker agents do NOT use tool-calling for handoff — the brain LLM emits a
-natural-language reply (e.g.「接龙龙 @后端工程师」) and the agent node parses
-the @mention itself (``worker._resolve_handoff_target``) returning
-``Command(goto="agent_<peer>")`` directly. So we use ``create_handoff_tool``
-as the **registry of合法 handoff edges**: each agent node is declared as a
-legal handoff destination via a ``create_handoff_tool`` whose
-``__handoff_destination`` metadata matches the node name
-(``agent_<agent_id>``). This:
-
-  1. Makes the set of合法 handoff targets a single declarative source (the
-     list of handoff tools built at graph-compile time), so an agent can
-     only ``goto`` a node that was registered — no typo-driven ``KeyError``,
-     no handoff to a non-existent agent.
-  2. Lets ``get_handoff_destinations`` introspect the compiled graph for the
-     legal edge set (used by the contract test + future route_entry
-     validation).
-  3. Preserves the option to wire tool-based handoff (binding the handoff
-     tools to a tool-calling agent) in a LATER task without a schema change.
-
-The @mention → ``goto`` resolution lives in ``worker._resolve_handoff_target``
-(single source for @-token scan + three-tier match + the four guards: self-
-skip, coordinator-skip, none→END, first-wins). This module wires that into a
-graph + validates the resolved ``goto`` target is a registered handoff edge
-(else END, defensive — ``_resolve_handoff_target`` already skips unresolvable
-mentions, but this is a belt-and-suspenders against a stale member list).
+  · 协调者每轮插话 — ``route_entry`` forks by message kind: engineering / plan-
+    confirm turns (``coordinator_reply`` / ``plan_resume`` kind, or an explicit
+    plan-confirm cue) go to the Leader's ``classify`` node (centralized path);
+    chat / ``@人`` turns go to the first @mentioned agent node (decentralized
+    path), so the coordinator is NOT reached on a chat turn. A member @mention
+    always wins over the kind — ``@前端工程师 重构登录`` hands the turn to 前端
+    even though it reads like engineering work.
 
 NOTE — coordinator migration is a LATER task. Until ``coordinator.py``'s
 classify/llm_decide/chat/dispatch nodes are ported into the group graph
@@ -155,51 +120,97 @@ def handoff_destinations(handoff_tools: list) -> set[str]:
     return dests
 
 
+# Turn kinds that route_entry fans out to the CENTRALIZED coordinator path
+# (the Leader's classify→llm_decide→dispatch/handle_reply subgraph). The
+# coordinator engine owns engineering-demand + plan-confirm turns; a user who
+# @mentions a member opts into the decentralized path instead (handled below).
+_CENTRAL_KINDS = frozenset({
+    "coordinator_reply",   # user demand with no @mention → Leader
+    "coordinator_task",     # synthetic demand from the execute path → Leader
+    "plan_resume",         # PL-02 resume payload → dispatch node directly
+    "plan_confirm",        # legacy defensive plan-confirm marker
+})
+
+
+def _looks_central(incoming_kind: str, message: str) -> bool:
+    """Decide whether a turn enters the centralized coordinator path.
+
+    ``incoming_kind`` is the primary signal (set by ``route_user_message`` /
+    the registry before invoke): ``coordinator_reply`` / ``coordinator_task``
+    / ``plan_resume`` / ``plan_confirm`` mean the turn is an engineering-demand
+    or a plan-confirmation, which the Leader owns. An ``agent_reply`` kind (a
+    peer's handoff) or an absent kind (a fresh user chat) is decentralized.
+
+    A lightweight heuristic backs up the kind: an explicit engineering/plan cue
+    in the message ("确认执行" / "确认计划" / "修改计划" / "直接执行" + an
+    imperative engineering verb with no @mention) routes to the Leader even when
+    the kind is absent. The heuristic only ADDS central routing — it never
+    overrides a member @mention (the explicit ``@人`` below wins), so a user who
+    ``@前端工程师 重构登录`` still hands the turn to 前端 directly.
+    """
+    if incoming_kind in _CENTRAL_KINDS:
+        return True
+    if incoming_kind == "agent_reply":
+        return False  # a peer handoff is decentralized by definition
+    # heuristic on bare user chat (no kind / "user_input"): plan-confirm cues
+    # + a non-@mentioned engineering imperative route to the Leader. Member
+    # @mention is resolved by the caller BEFORE consulting this flag, so the
+    # explicit ``@人`` always wins (decentralized).
+    m = message or ""
+    if any(cue in m for cue in ("确认执行", "确认计划", "修改计划", "直接执行", "直接干")):
+        return True
+    return False
+
+
 async def route_entry(state: GroupState) -> Command:
-    """Entry node: decide the first speaker for this turn.
+    """Entry node: fork the turn by message kind — centralized vs decentralized.
 
-    Decentralized path (this graph): parse the incoming message's @mention
-    for the first speaker. If a member is @mentioned → ``goto`` that agent
-    node (the turn's first speaker). If no @mention resolves → ``goto END``
-    (no agent to drive the turn in the decentralized graph).
+    Two paths from START (task-11: route_entry 按消息类型分叉):
 
-    Rationale for「no @mention → END」(NOT「→ coordinator」): until the
-    coordinator-sub-node migration lands (later task), the group graph has
-    no coordinator node wired. Engineering / plan-confirm turns are routed
-    to the resident coordinator engine by the registry (``route_user_message``
-    + ``route_after_classify``), NOT through this graph. So when this graph
-    IS invoked, it is the decentralized chat/接龙 path, and a no-@mention
-    user message with no resolvable target genuinely ends (话筒落地) —
-    re-routing to the coordinator here would re-introduce the「协调者每轮
-    插话」defect this graph exists to eliminate.
+      · **Centralized path** (engineering / plan-confirm): ``goto="classify"``
+        — the Leader's coordinator subgraph (classify→llm_decide→dispatch /
+        handle_reply / summarize) owns engineering-demand and plan-confirmation
+        turns. Entered when ``incoming_kind`` is ``coordinator_reply`` /
+        ``coordinator_task`` / ``plan_resume`` / ``plan_confirm``, or a bare
+        user chat carrying a plan-confirm cue. The coordinator sub-nodes read
+        ``GroupState`` (task-6 schema union) exactly as the resident coordinator
+        graph reads ``CoordinatorState``, so the centralized path runs in-graph
+        sharing the same state as the agent nodes.
+      · **Decentralized path** (chat / @mention): ``goto="agent_<id>"`` — a
+        member is @mentioned (or a peer's ``agent_reply`` hands control over),
+        so the first agent node drives the turn and hands off via ``@mention``
+        in its reply. The Leader is NOT reached on this path — exactly the
+        「协调者每轮插话」defect this graph exists to eliminate. No resolvable
+        ``@mention`` on this path → ``goto END`` (话筒落地).
 
-    The resolved first-speaker node name is validated against the graph's
-    legal handoff destinations (declared via ``create_handoff_tool``); an
-    unresolvable or unregistered target falls back to END (defensive).
+    **Member @mention wins over the kind**: a user who ``@前端工程师 重构登录``
+    explicitly hands the turn to 前端 — the ``@人`` opt-in is honored even when
+    the message reads like an engineering demand (mirrors ``route_user_message``
+    first-mention-wins). Only a *bare* (no @mention) engineering/plan cue routes
+    to the Leader. This keeps the coordinator off the decentralized chat path
+    while still funneling real engineering work to it.
 
-    Bumps ``turn_count`` and seeds ``recent_speakers`` so the turn-count cap
-    (``AGENT_NODE_MAX_HANDOFFS``) and the「same agent not driven twice」guard
+    Bumps ``turn_count`` on both paths so the per-turn cap
+    (``AGENT_NODE_MAX_HANDOFFS``) + the「same agent not driven twice」guard
     apply from the very first speaker.
+
+    NOTE: the standalone ``route_entry`` here mirrors ``build_route_entry``'s
+    closure-bound node (used by ``build_group_graph``). It resolves the member
+    @mention itself (via ``_resolve_handoff_target``) and trusts the kind. The
+    closure-bound variant (registered in the compiled graph) additionally
+    validates the resolved goto target against the build-time legal-handoff set.
     """
     group_id = state.get("group_id", "")
     coordinator_id = state.get("coordinator_id", "") or ""
     incoming_message = state.get("incoming_message", "") or ""
     incoming_sender = state.get("incoming_sender", "") or ""
-
-    # The handoff destinations are baked into the compiled graph (set at
-    # build time via _build_handoff_tools). route_entry reads them off the
-    # graph's config-free closure: stash the set on the state lazily? No —
-    # the graph builder passes the legal-target set into route_entry via a
-    # closure (build_route_entry), so route_entry itself is closure-bound
-    # (mirrors build_agent_node binding identity). The default route_entry
-    # here (no closure) resolves + validates against the caller-provided
-    # ``_handoff_targets`` if present, else trusts _resolve_handoff_target's
-    # own guards (it already skips unresolvable + coordinator targets).
+    incoming_kind = state.get("incoming_kind", "") or ""
+    # The handoff destinations are baked into the compiled graph at build time
+    # via _build_handoff_tools. The standalone route_entry reads them off a
+    # caller-provided ``_handoff_targets`` state key if present; the
+    # closure-bound build_route_entry captures the set directly (cleaner —
+    # avoids polluting GroupState with a private key).
     handoff_targets: set[str] = state.get("_handoff_targets") or set()  # type: ignore[assignment]
-
-    next_speaker = await _resolve_handoff_target(
-        group_id, coordinator_id, incoming_sender, incoming_message,
-    )
 
     turn_count = (state.get("turn_count") or 0) + 1
     # Reached the in-graph handoff cap before any agent even spoke? End the
@@ -211,34 +222,46 @@ async def route_entry(state: GroupState) -> Command:
         )
         return Command(goto=END, update={"turn_count": turn_count})
 
-    if next_speaker is None:
-        # No resolvable @mention in the incoming message → decentralized
-        # turn has no first speaker → END (话筒落地). The coordinator engine
-        # handles no-@mention engineering turns on its own resident graph;
-        # this graph is only invoked for the decentralized path.
-        return Command(goto=END, update={"turn_count": turn_count})
-
-    target_node = agent_node_name(next_speaker)
-    if handoff_targets and target_node not in handoff_targets:
-        # Defensive: the resolved speaker is not a registered handoff
-        # destination (stale member list between build + invoke). End rather
-        # than raise — the user's message still landed (route_user_message
-        # persisted it before invoking the graph).
-        logger.debug(
-            "[group_graph] route_entry resolved %s but %s not a registered "
-            "handoff target; end turn",
-            next_speaker, target_node,
-        )
-        return Command(goto=END, update={"turn_count": turn_count})
-
-    return Command(
-        goto=target_node,
-        update={
-            "current_speaker": next_speaker,
-            "turn_count": turn_count,
-            "recent_speakers": [next_speaker],
-        },
+    # Member @mention FIRST — an explicit ``@人`` opts into the decentralized
+    # path even when the message reads like engineering work. ``_resolve_handoff
+    # _target`` already skips self-mentions + the coordinator (workers do not
+    # hand off back to the Leader via @mention on the decentralized path).
+    next_speaker = await _resolve_handoff_target(
+        group_id, coordinator_id, incoming_sender, incoming_message,
     )
+    if next_speaker is not None:
+        target_node = agent_node_name(next_speaker)
+        if handoff_targets and target_node not in handoff_targets:
+            # Defensive: the resolved speaker is not a registered handoff
+            # destination (stale member list between build + invoke). End rather
+            # than raise — the user's message still landed (route_user_message
+            # persisted it before invoking the graph).
+            logger.debug(
+                "[group_graph] route_entry resolved %s but %s not a registered "
+                "handoff target; end turn",
+                next_speaker, target_node,
+            )
+            return Command(goto=END, update={"turn_count": turn_count})
+        return Command(
+            goto=target_node,
+            update={
+                "current_speaker": next_speaker,
+                "turn_count": turn_count,
+                "recent_speakers": [next_speaker],
+            },
+        )
+
+    # No member @mention → route by kind. Centralized kinds + plan-confirm cues
+    # go to the Leader's classify node; everything else (bare chat / agent
+    # handoff with no further @mention) ends the turn (话筒落地).
+    if _looks_central(incoming_kind, incoming_message):
+        return Command(goto="classify", update={"turn_count": turn_count})
+
+    # No @mention + not central → decentralized turn has no first speaker → END.
+    # The coordinator is NOT reached here: a bare chat message with no @mention
+    # and no engineering cue genuinely ends (话筒落地), and re-routing to the
+    # coordinator would re-introduce the「协调者每轮插话」defect.
+    return Command(goto=END, update={"turn_count": turn_count})
 
 
 def build_route_entry(handoff_targets: set[str]):
@@ -255,10 +278,7 @@ def build_route_entry(handoff_targets: set[str]):
         coordinator_id = state.get("coordinator_id", "") or ""
         incoming_message = state.get("incoming_message", "") or ""
         incoming_sender = state.get("incoming_sender", "") or ""
-
-        next_speaker = await _resolve_handoff_target(
-            group_id, coordinator_id, incoming_sender, incoming_message,
-        )
+        incoming_kind = state.get("incoming_kind", "") or ""
 
         turn_count = (state.get("turn_count") or 0) + 1
         if turn_count >= AGENT_NODE_MAX_HANDOFFS:
@@ -268,26 +288,33 @@ def build_route_entry(handoff_targets: set[str]):
             )
             return Command(goto=END, update={"turn_count": turn_count})
 
-        if next_speaker is None:
-            return Command(goto=END, update={"turn_count": turn_count})
-
-        target_node = agent_node_name(next_speaker)
-        if target_node not in handoff_targets:
-            logger.debug(
-                "[group_graph] route_entry resolved %s but %s not a registered "
-                "handoff target; end turn",
-                next_speaker, target_node,
-            )
-            return Command(goto=END, update={"turn_count": turn_count})
-
-        return Command(
-            goto=target_node,
-            update={
-                "current_speaker": next_speaker,
-                "turn_count": turn_count,
-                "recent_speakers": [next_speaker],
-            },
+        # Member @mention FIRST — explicit ``@人`` opts into the decentralized
+        # path even when the message reads like engineering work.
+        next_speaker = await _resolve_handoff_target(
+            group_id, coordinator_id, incoming_sender, incoming_message,
         )
+        if next_speaker is not None:
+            target_node = agent_node_name(next_speaker)
+            if target_node not in handoff_targets:
+                logger.debug(
+                    "[group_graph] route_entry resolved %s but %s not a registered "
+                    "handoff target; end turn",
+                    next_speaker, target_node,
+                )
+                return Command(goto=END, update={"turn_count": turn_count})
+            return Command(
+                goto=target_node,
+                update={
+                    "current_speaker": next_speaker,
+                    "turn_count": turn_count,
+                    "recent_speakers": [next_speaker],
+                },
+            )
+
+        # No member @mention → route by kind (centralized vs decentralized end).
+        if _looks_central(incoming_kind, incoming_message):
+            return Command(goto="classify", update={"turn_count": turn_count})
+        return Command(goto=END, update={"turn_count": turn_count})
 
     _route_entry.__name__ = "route_entry"
     return _route_entry
