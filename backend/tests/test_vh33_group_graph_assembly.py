@@ -92,11 +92,18 @@ def assert_contract() -> list[str]:
         errs.append("[A1] build_group_graph 不可调用")
     else:
         sig = inspect.signature(build_group_graph)
-        for p in ("group_id", "members", "coordinator_id"):
+        # Task-10 widened the signature to ``build_group_graph(group, members=None,
+        # coordinator_id="")`` (polymorphic first arg: Group object OR group_id str).
+        # Accept either the new (group, members, coordinator_id) signature OR the
+        # legacy (group_id, members, coordinator_id) — both forms still build a graph.
+        first_param = next(iter(sig.parameters), "")
+        if first_param not in ("group", "group_id"):
+            errs.append(f"[A1] build_group_graph 首参应 group|group_id，实际 {first_param!r}")
+        for p in ("members", "coordinator_id"):
             if p not in sig.parameters:
                 errs.append(f"[A1] build_group_graph 缺参数 {p}")
         if not any(e.startswith("[A1]") for e in errs):
-            print("[A1] OK  build_group_graph(group_id, members, coordinator_id) -> 编译图")
+            print(f"[A1] OK  build_group_graph({first_param}, members, coordinator_id) -> 编译图（{first_param} 多态：Group 对象 or group_id str）")
     if not callable(route_entry) or not inspect.iscoroutinefunction(route_entry):
         errs.append("[A2] route_entry 应是 async 函数")
     elif not callable(build_route_entry):

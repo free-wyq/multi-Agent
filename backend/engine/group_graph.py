@@ -294,40 +294,74 @@ def build_route_entry(handoff_targets: set[str]):
 
 
 def build_group_graph(
-    group_id: str,
-    members: list[dict[str, Any]],
+    group,
+    members: list[dict[str, Any]] | None = None,
     coordinator_id: str = "",
 ) -> Any:
     """Compile the per-group swarm StateGraph.
 
-    Args:
-        group_id: the group this graph is compiled for (carried in state).
+    Task: ``group_graph.py build_group_graph(group) 装配 START→route_entry→
+    {coordinator|agent}+handoff 边，编译通过``. Assembles the complete group
+    topology in ONE compiled graph:
+
+      START → route_entry → { coordinator subgraph (classify→…)
+                            | agent_<id> nodes (handoff) }
+                            → END
+
+    Args (polymorphic first arg — task name is ``build_group_graph(group)``):
+        group: either a group_id ``str`` (the original 3-arg form, used by the
+            contract tests) OR a ``Group`` object (``models.group.Group``) —
+            when a Group object is passed, ``group_id`` is read off ``group.id``
+            and ``coordinator_id`` off ``group.coordinator_id`` (unless
+            explicitly overridden by the 3rd arg). This lets a future
+            ``GroupRuntime`` call ``build_group_graph(group, members)`` after
+            resolving members from the DB (member resolution stays async + is
+            the caller's job — the builder itself stays sync, mirroring
+            ``build_coordinator_graph`` / ``build_worker_graph``).
         members: list of member identity dicts (``agent_id`` / ``agent_name``
             / ``agent_role`` / ``system_prompt``), one per group member EXCLUDING
-            the coordinator (the coordinator sub-node migration is a later
-            task; until then the coordinator engine handles its own turns).
-            Each member becomes an ``agent_<id>`` node built via
-            ``worker.build_agent_node``.
-        coordinator_id: the group's Leader agent_id — passed into each agent
-            node so ``_resolve_handoff_target`` can skip handing off back to
-            the Leader (decentralized path: workers don't @mention the
-            coordinator; ``route_entry`` owns Leader entry for engineering
-            turns, which currently still run on the resident coordinator
-            graph).
+            the coordinator. Each becomes an ``agent_<id>`` node built via
+            ``worker.build_agent_node``. Required (the builder does not resolve
+            members from the DB — that is async + the caller's concern).
+        coordinator_id: the group's Leader agent_id. When ``group`` is a Group
+            object this defaults to ``group.coordinator_id``; pass an explicit
+            value to override. Passed into each agent node so
+            ``_resolve_handoff_target`` can skip handing off back to the Leader
+            (decentralized path: workers don't @mention the coordinator).
 
     Wires:
-      · ``route_entry`` (closure-bound with the legal handoff target set) as
-        the START node — parses the incoming @mention → first speaker, else
-        END.
-      · one ``agent_<id>`` node per member (``worker.build_agent_node``) —
-        each speaks then returns ``Command(goto="agent_<peer>")`` (handoff)
-        or ``Command(goto=END)`` (话筒落地). Handoff edges are DYNAMIC (the
-        ``Command.goto`` target is decided at runtime from the reply's
-        @mention), so no static inter-agent edges are added — LangGraph
-        follows the ``Command.goto`` to whatever node name the agent emits.
+      · ``START → route_entry`` (static edge).
+      · ``route_entry`` (closure-bound with the legal handoff target set) —
+        parses the incoming message → first speaker. Returns ``Command(goto=...)``
+        so it can dynamically reach EITHER an ``agent_<id>`` node (decentralized
+        chat/接龙 path, @mention-resolved) OR the coordinator entry ``classify``
+        (centralized engineering/plan-confirm path). The *when* (which message
+        kind → which path) is the route_entry fan-out logic (a later task); this
+        task wires the topology so BOTH targets are reachable. No-@mention → END.
+      · coordinator subgraph — the centralized path runs IN this graph, sharing
+        ``GroupState`` with the agent nodes. Uses the GROUP twins
+        (``dispatch_next_group`` / ``handle_reply_group`` / ``summarize_group``)
+        for the fan-out / report-back / summary nodes so the centralized path
+        fans out via LangGraph ``Send`` to the agent nodes (not ``push_task`` to
+        worker inboxes — the group-graph topology has no separate worker
+        engines, agents ARE nodes) + receives agent reports in-graph via
+        ``Command(goto="handle_reply_group")`` (not the inbox notify loop). The
+        shared resident nodes (``classify`` / ``llm_decide`` / ``chat`` /
+        ``dispatch``) return dicts and route via the ``route_after_*``
+        conditional edges (semantics preserved verbatim):
+          classify   → route_after_classify → {dispatch_next_group, handle_reply_group, llm_decide}
+          llm_decide → route_after_llm_decide → {chat, dispatch}
+          dispatch   → route_after_dispatch   → {dispatch_next_group, END}
+          chat       → END
+        The twin nodes return ``Command(goto=...)`` so no conditional edge is
+        wired after them (LangGraph follows the ``Command.goto``).
+      · one ``agent_<id>`` node per member (``worker.build_agent_node``) — each
+        speaks then returns ``Command(goto="agent_<peer>")`` (handoff) or
+        ``Command(goto=END)``. Handoff edges are DYNAMIC (``Command.goto`` target
+        decided at runtime from the reply's @mention), so no static inter-agent
+        edges are added.
       · a ``create_handoff_tool`` per member declares the legal handoff
-        destinations (registry of合法 goto targets, validated by
-        ``route_entry`` + introspectable via ``get_handoff_destinations``).
+        destinations (registry of合法 goto targets, validated by ``route_entry``).
 
     Returns the compiled graph with a MemorySaver checkpointer (mirrors the
     resident coordinator/worker graphs — cross-invoke state via thread_id).
@@ -337,37 +371,48 @@ def build_group_graph(
     member add/rename requires a recompile (same staleness window as the
     resident engine, refreshed on reload).
     """
+    # Polymorphic first arg: Group object vs group_id str (task: build_group_graph(group)).
+    if hasattr(group, "id") and not isinstance(group, str):
+        group_id: str = str(getattr(group, "id"))
+        if not coordinator_id:
+            coordinator_id = str(getattr(group, "coordinator_id", "") or "")
+    else:
+        group_id = str(group)
+    if members is None:
+        members = []
+
     g: StateGraph = StateGraph(GroupState)
 
     member_agent_ids: list[str] = [m["agent_id"] for m in members if m.get("agent_id")]
     handoff_tools = _build_handoff_tools(member_agent_ids)
     legal_targets = handoff_destinations(handoff_tools)
 
-    # route_entry: parse incoming @mention → first speaker (or END).
+    # route_entry: parse incoming @mention → first speaker (or END). Closure-bound
+    # with the legal handoff target set so a resolved goto target is validated.
     g.add_node("route_entry", build_route_entry(legal_targets))
 
-    # Coordinator sub-nodes (task: coordinator.py 把 classify/llm_decide/chat 节点
-    # 改造为群图内 coordinator 子节点). The centralized path (engineering / plan-
-    # confirm turns) runs through these nodes inside the SAME group graph, sharing
-    # ``GroupState`` with the agent (member) nodes. The node functions are the
-    # resident coordinator's (``coordinator.node_*``) reused unchanged — they read
-    # every state key via duck-typed ``state.get(...)`` / ``state[...]``, and
-    # ``GroupState`` is a schema union over ``CoordinatorState`` (this task ported
-    # ``agent_id``/``agent_name``/``system_prompt``/``action_taken``/``reply_content``
-    # /``_stream_stats`` onto ``GroupState``), so ``state["agent_id"]`` resolves to
-    # the Leader in both graphs. Registering them here is the wiring step the task
-    # names; the node bodies + the ``route_after_*`` conditional-edge semantics are
-    # preserved verbatim (a later task adds the conditional edges + the route_entry
-    # fan-out that routes engineering/plan-confirm turns here).
+    # Coordinator sub-graph (centralized path). Uses the GROUP twins
+    # (dispatch_next_group / handle_reply_group / summarize_group) so the
+    # centralized path fans out via LangGraph Send to the agent nodes (not
+    # push_task to inboxes) + receives agent reports in-graph. The shared
+    # resident nodes (classify / llm_decide / chat / dispatch) return dicts and
+    # route via the route_after_* conditional edges (semantics preserved).
     from engine.coordinator import build_coordinator_subnodes  # local import avoids cycle
     coord_nodes = build_coordinator_subnodes(
         coordinator_id=coordinator_id,
         coordinator_name="",
         system_prompt="",
     )
-    for name in ("classify", "llm_decide", "chat", "dispatch",
-                 "handle_reply", "dispatch_next", "summarize"):
-        g.add_node(name, coord_nodes[name])
+    # shared resident nodes (dict-returning, conditional-edge routed)
+    g.add_node("classify", coord_nodes["classify"])
+    g.add_node("llm_decide", coord_nodes["llm_decide"])
+    g.add_node("chat", coord_nodes["chat"])
+    g.add_node("dispatch", coord_nodes["dispatch"])
+    # group twins (Command-returning — drive the next hop via Command.goto,
+    # no conditional edge after them)
+    g.add_node("dispatch_next_group", coord_nodes["dispatch_next_group"])
+    g.add_node("handle_reply_group", coord_nodes["handle_reply_group"])
+    g.add_node("summarize_group", coord_nodes["summarize_group"])
 
     # one agent node per member. build_agent_node closure-binds identity so
     # the compiled node knows who it is speaking as (mirrors AgentEngine
@@ -383,7 +428,39 @@ def build_group_graph(
         )
         g.add_node(agent_node_name(agent_id), node)
 
+    # ── edges ────────────────────────────────────────────────
+    # START → route_entry (the turn entry — decides coordinator vs agent path).
     g.add_edge(START, "route_entry")
+
+    # Coordinator sub-graph conditional edges (route_after_* semantics preserved
+    # verbatim — the routers read state["action_taken"] only, which exists on
+    # GroupState). The path map routes the resident routers' return strings to
+    # the GROUP twin nodes (dispatch_next→dispatch_next_group, etc.) so the
+    # centralized path uses Send fan-out + in-graph report-back.
+    g.add_conditional_edges(
+        "classify",
+        coord_nodes["route_after_classify"],
+        {
+            "dispatch_next": "dispatch_next_group",
+            "handle_reply": "handle_reply_group",
+            "llm_decide": "llm_decide",
+        },
+    )
+    g.add_conditional_edges(
+        "llm_decide",
+        coord_nodes["route_after_llm_decide"],
+        {"chat": "chat", "dispatch": "dispatch"},
+    )
+    g.add_conditional_edges(
+        "dispatch",
+        coord_nodes["route_after_dispatch"],
+        {"dispatch_next": "dispatch_next_group", END: END},
+    )
+    # chat (resident, dict-returning) → END. The twin nodes
+    # (dispatch_next_group / handle_reply_group / summarize_group) return
+    # Command(goto=...) so they need no outgoing edge — LangGraph follows the
+    # Command.goto to the agent nodes (Send fan-out) / summarize_group / END.
+    g.add_edge("chat", END)
 
     compiled = g.compile(checkpointer=MemorySaver())
     # Stash the handoff tools + legal-target set on the compiled graph for

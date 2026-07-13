@@ -143,13 +143,23 @@ def assert_contract() -> list[str]:
         ]
         g = build_group_graph("g1", members, coordinator_id="c1")
         nodes = set(g.get_graph().nodes.keys())
-        coord_nodes = {"classify", "llm_decide", "chat", "dispatch",
-                       "handle_reply", "dispatch_next", "summarize"}
-        missing = coord_nodes - nodes
-        if missing:
-            errs.append(f"[A2] 群图缺 coordinator 子节点 {sorted(missing)}（nodes={sorted(nodes)}）")
+        # Task-10 switched the centralized-path nodes to the GROUP twins
+        # (dispatch_next_group / handle_reply_group / summarize_group) which fan
+        # out via Send + receive agent reports in-graph. The shared resident nodes
+        # (classify / llm_decide / chat / dispatch) remain. Accept either the
+        # twin set (group-graph topology) OR the legacy resident set.
+        twin_nodes = {"classify", "llm_decide", "chat", "dispatch",
+                      "dispatch_next_group", "handle_reply_group", "summarize_group"}
+        legacy_nodes = {"classify", "llm_decide", "chat", "dispatch",
+                        "handle_reply", "dispatch_next", "summarize"}
+        if twin_nodes.issubset(nodes):
+            print(f"[A2] OK  群图含 7 coordinator 子节点（GROUP twins：dispatch_next_group/handle_reply_group/summarize_group + 共享 classify/llm_decide/chat/dispatch，+agent 节点 route_entry，共存一图）")
+        elif legacy_nodes.issubset(nodes):
+            print(f"[A2] OK  群图含 7 coordinator 子节点（resident 命名 + agent 节点 route_entry，共存一图）")
         else:
-            print(f"[A2] OK  群图含 7 coordinator 子节点（+agent 节点 route_entry，共存一图）")
+            missing_twin = twin_nodes - nodes
+            missing_legacy = legacy_nodes - nodes
+            errs.append(f"[A2] 群图缺 coordinator 子节点（twin missing={sorted(missing_twin)} legacy missing={sorted(missing_legacy)}，nodes={sorted(nodes)}）")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[A2] 群图装配异常：{type(e).__name__}: {e}")
 
