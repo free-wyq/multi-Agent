@@ -8,17 +8,43 @@ together — independent steps run concurrently as separate worker engines
 pure query. ``_dispatch_one`` dispatches a single step (mark dispatched, reply,
 push_task, emit). If no step is dispatchable and all are done, the caller
 routes to ``summarize``.
+
+Group-graph fan-out (task: dispatch_next 改 LangGraph Send): ``build_dispatch_sends``
+is the LangGraph-native twin of ``dispatch_ready_steps``. It runs the SAME
+fail-fast + ready-query (``apply_fail_fast`` + ``find_ready_steps``, single
+source of the DAG semantics) then, instead of ``push_task``-ing each ready step
+to a worker inbox (the resident engine's band-out path), it returns one
+``Send`` per ready step — each ``Send`` targets the agent node
+``agent_<agent_id>`` with the step's instruction as ``incoming_message``.
+LangGraph drives the ``Send``s in parallel within one ``ainvoke`` (the group
+graph's in-graph fan-out), so independent steps run concurrently exactly as the
+resident ``dispatch_ready_steps`` runs them as separate asyncio tasks. The step
+status mutation (``pending`` → ``dispatched`` + ``task_id``) is identical so the
+plan reflects the fan-out the same way; the only difference is the transport
+(``Send`` to a node vs ``push_task`` to an inbox). ``build_dispatch_sends`` is
+additive — ``dispatch_ready_steps`` stays untouched for the resident coordinator
+engine until the group-graph migration swaps consumers over.
 """
 from __future__ import annotations
 
 import logging
+import uuid
 from typing import Any
+
+from langgraph.types import Send
 
 from engine.inbox import push_task
 from engine.reply import persist_agent_reply
 from events import emit_task_dispatched
 
 logger = logging.getLogger("multi-agent.dispatcher")
+
+# Node-name convention shared with engine/group_graph + engine/worker: the
+# per-agent node in the group graph is registered as ``agent_<agent_id>`` (the
+# underscore separator — LangGraph forbids ':' and '|' in node names). This
+# constant is the single source for the ``Send`` target so a step's ``agent_id``
+# resolves to the same node name the group graph registered.
+AGENT_NODE_PREFIX = "agent_"
 
 
 def apply_fail_fast(plan: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -138,9 +164,119 @@ async def dispatch_ready_steps(
     their worker engines run concurrently as separate asyncio tasks. Mutates
     ``plan`` in place. Returns the list of dispatched step dicts (empty if none
     were dispatchable — caller checks whether all are done to route to summarize).
+
+    This is the **resident coordinator engine's** fan-out path: each ready step
+    is ``push_task``-ed to the target worker's inbox, waking that AgentEngine's
+    run loop as an independent asyncio task. The group-graph twin
+    (``build_dispatch_sends``) returns ``Send`` objects instead — same fail-fast
+    + ready-query + step mutation, LangGraph-native transport.
     """
     plan = apply_fail_fast(plan)
     ready = find_ready_steps(plan)
     for step in ready:
         await _dispatch_one(group_id, coordinator_id, step)
     return ready
+
+
+def agent_node_target(agent_id: str) -> str:
+    """Canonical group-graph node name for an agent: ``agent_<agent_id>``.
+
+    Single source for the ``Send`` target in ``build_dispatch_sends`` so a step's
+    ``agent_id`` resolves to the same node name the group graph registered
+    (``engine/group_graph.agent_node_name`` + ``engine.worker``'s goto convention).
+    """
+    return f"{AGENT_NODE_PREFIX}{agent_id}"
+
+
+def build_dispatch_sends(
+    group_id: str,
+    coordinator_id: str,
+    plan: list[dict[str, Any]],
+) -> tuple[list[Send], list[dict[str, Any]]]:
+    """LangGraph-native twin of ``dispatch_ready_steps``: return ``Send``s.
+
+    Task: coordinator dispatch_next 节点 — dispatcher.dispatch_ready_steps 输出从
+    ``push_task`` 改为 LangGraph ``Send``/并行 fan-out 到各 agent 节点（保 DAG
+    fail-fast 与 ready_steps 逻辑）.
+
+    Runs the **same** DAG fail-fast cascade + ready-query as
+    ``dispatch_ready_steps`` (``apply_fail_fast(plan)`` + ``find_ready_steps(plan)``
+    — single source of the DAG semantics, so fail-fast cascade + ready-step
+    logic is byte-for-byte identical), then instead of ``push_task``-ing each
+    ready step to a worker inbox, returns one ``Send`` per ready step. Each
+    ``Send`` targets the agent node ``agent_<agent_id>`` (the group graph's
+    per-agent node) with the step's ``instruction`` as ``incoming_message`` and
+    the step's identity in ``incoming_data`` — so the agent node (``worker.
+    make_agent_node``) speaks as that step's owner, exactly as the resident
+    ``_dispatch_one`` set up the worker engine to do.
+
+    Step mutation (``pending`` → ``dispatched`` + ``task_id``) is identical to
+    ``_dispatch_one``: the plan reflects the fan-out the same way, so the
+    coordinator's downstream ``handle_reply`` (MT-15 recovery + MT-14 adjust)
+    matches the report-back to the dispatched step by ``task_id`` regardless of
+    whether the dispatch transport was ``push_task`` (resident) or ``Send``
+    (group graph). ``task_id`` is a fresh UUID per step (the resident path got it
+    from ``push_task``'s return; here we mint it directly since no inbox is
+    involved).
+
+    Returns ``(sends, dispatched_steps)``:
+
+    - ``sends`` — the list of ``Send`` objects for ``dispatch_next`` to return
+      via ``Command(goto=sends, update=...)`` (LangGraph drives them in parallel
+      within one ``ainvoke`` — the in-graph fan-out, each ``Send`` invokes the
+      target agent node with its own state copy seeded by the ``Send``'s payload).
+      Empty when no step is dispatchable (caller routes to ``summarize`` if all
+      done, else ends — same ``dispatch_next`` routing as the resident path).
+    - ``dispatched_steps`` — the dispatched step dicts (status mutated to
+      ``dispatched``, ``task_id`` set), for ``dispatch_next`` to carry onto
+      ``dispatch_plan`` via the ``replace_value`` reducer + re-emit the plan so
+      the frontend PlanStep[] reflects the new statuses (mirrors the resident
+      ``node_dispatch_next`` emit).
+
+    The agent-node payload seeds each ``Send`` with the step's instruction +
+    identity so ``worker.make_agent_node`` can build its brain context + speak as
+    that step's owner without re-deriving from the plan. The payload keys mirror
+    ``GroupState.incoming_*`` (``incoming_message`` / ``incoming_sender`` /
+    ``incoming_kind`` / ``incoming_data``) so the agent node reads them exactly as
+    the resident ``node_brain_decide`` reads ``WorkerState.incoming_*``.
+
+    Additive — ``dispatch_ready_steps`` stays untouched for the resident
+    coordinator engine (its consumers — m12 / mt15 / mt16 / vh10 / vh35 — keep
+    patching + asserting on it unchanged). The group-graph ``dispatch_next``
+    (a later wiring task) switches to ``build_dispatch_sends``.
+    """
+    plan = apply_fail_fast(plan)
+    ready = find_ready_steps(plan)
+    sends: list[Send] = []
+    for step in ready:
+        step["status"] = "dispatched"
+        # fresh task_id — the resident path got this from push_task's return;
+        # here no inbox is involved so mint it directly. Stored on the step so
+        # handle_reply's task_id match (MT-15 recovery + MT-14 adjust) works
+        # regardless of dispatch transport.
+        task_id = f"task_{uuid.uuid4().hex}"
+        step["task_id"] = task_id
+        agent_id = step["agent_id"]
+        sends.append(Send(
+            agent_node_target(agent_id),
+            {
+                "group_id": group_id,
+                "coordinator_id": coordinator_id,
+                "current_speaker": agent_id,
+                "incoming_message": step["instruction"],
+                "incoming_sender": coordinator_id,
+                # incoming_kind="coordinator_task" mirrors the resident path's
+                # push_task semantics (a dispatched step is a coordinator-issued
+                # task for the agent), so the agent node's brain context labels
+                # the sender as the coordinator (not "user").
+                "incoming_kind": "coordinator_task",
+                "incoming_data": {
+                    "step": step["step"],
+                    "agent_id": agent_id,
+                    "agent_name": step["agent_name"],
+                    "instruction": step["instruction"],
+                    "task_id": task_id,
+                },
+            },
+        ))
+    return sends, ready

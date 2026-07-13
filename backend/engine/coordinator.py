@@ -21,8 +21,8 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import interrupt
 
-from engine.dispatcher import dispatch_ready_steps
-from engine.state import CoordinatorState
+from engine.dispatcher import build_dispatch_sends, dispatch_ready_steps
+from engine.state import CoordinatorState, GroupState
 from events import (
     emit_coordinator_plan,
     emit_coordinator_reasoning,
@@ -1097,6 +1097,11 @@ async def node_dispatch_next(state: CoordinatorState) -> dict:
     asyncio tasks. Returns ``action_taken="summarize"`` only if no step was
     dispatchable AND all steps are done; otherwise the graph ends (the engines
     run on, and each worker's report re-enters the coordinator via a notify).
+
+    This is the **resident coordinator engine's** dispatch_next: it calls
+    ``dispatch_ready_steps`` (``push_task`` to worker inboxes, band-out via the
+    engine run loop). The group-graph twin is ``node_dispatch_next_group`` below,
+    which fans out via LangGraph ``Send`` to the agent nodes in-graph.
     """
     group_id = state["group_id"]
     coordinator_id = state["agent_id"]
@@ -1122,6 +1127,110 @@ async def node_dispatch_next(state: CoordinatorState) -> dict:
     except Exception:
         logger.exception("[coordinator] failed to emit plan after dispatch_next")
     return {"dispatch_plan": plan}
+
+
+async def node_dispatch_next_group(state: GroupState) -> Command:
+    """Group-graph dispatch_next: fan out ready steps via LangGraph ``Send``.
+
+    Task: coordinator dispatch_next 节点 — dispatcher.dispatch_ready_steps 输出从
+    ``push_task`` 改为 LangGraph ``Send``/并行 fan-out 到各 agent 节点（保 DAG
+    fail-fast 与 ready_steps 逻辑）.
+
+    The group-graph twin of the resident ``node_dispatch_next``: instead of
+    ``dispatch_ready_steps`` (``push_task`` to worker inboxes, band-out via the
+    engine run loop), it calls ``build_dispatch_sends`` (same fail-fast +
+    ready-query, single source via ``apply_fail_fast`` + ``find_ready_steps``)
+    and returns ``Command(goto=sends, update={"dispatch_plan": plan})``.
+    LangGraph drives the ``Send``s in parallel within one ``ainvoke`` — each
+    ``Send`` invokes the target ``agent_<agent_id>`` node with its own state
+    copy seeded by the ``Send``'s payload (the step's instruction +
+    ``incoming_sender=coordinator_id``), so independent ready steps run
+    concurrently as in-graph agent-node invocations, exactly as the resident
+    path runs them as separate asyncio tasks.
+
+    The DAG fail-fast + ready_steps logic is byte-for-byte identical to the
+    resident path (single source: ``build_dispatch_sends`` calls the same
+    ``apply_fail_fast(plan)`` + ``find_ready_steps(plan)``). Step mutation
+    (``pending`` → ``dispatched`` + ``task_id``) is identical too, so the
+    coordinator's downstream ``handle_reply`` (MT-15 recovery + MT-14 adjust)
+    matches the report-back by ``task_id`` regardless of dispatch transport.
+
+    Routing contract (preserved verbatim from the resident
+    ``route_after_dispatch_next``):
+
+    - no dispatchable step + all done → ``action_taken="summarize"``,
+      ``route_after_dispatch_next`` routes to ``summarize`` (Command goto the
+      summarize sub-node).
+    - no dispatchable step + not all done → END (in-flight steps still running;
+      their report-back re-enters via the next turn — mirrors the resident
+      ``return {"dispatch_plan": plan}`` → ``route_after_dispatch_next`` END).
+    - dispatched steps → the ``Send``s in ``goto`` drive the fan-out;
+      ``route_after_dispatch_next`` is NOT consulted (LangGraph follows
+      ``Command.goto=[Send(...), ...]`` to the agent nodes, then each agent
+      node's own ``Command(goto=...)`` continues/ends the turn).
+
+    Re-emits the plan (mutated statuses ``dispatched``) so the frontend
+    PlanStep[] reflects the fan-out — mirrors the resident ``node_dispatch_next``
+    emit. The plan is carried onto ``dispatch_plan`` via the ``replace_value``
+    reducer (single source: ``GroupState.dispatch_plan``).
+
+    NOTE — this node is the group-graph dispatch_next; the resident
+    ``node_dispatch_next`` (above) stays for the live coordinator engine until
+    the group-graph migration swaps consumers over. Both call the SAME
+    fail-fast + ready-query (single source), so the DAG semantics cannot drift
+    between the two transports.
+    """
+    from langgraph.types import Command as _Command, Send as _Send  # noqa: F401
+    from langgraph.graph import END as _END
+
+    group_id = state["group_id"]
+    coordinator_id = state.get("coordinator_id") or state.get("agent_id") or ""
+    plan = state.get("dispatch_plan") or []
+
+    sends, dispatched = build_dispatch_sends(group_id, coordinator_id, plan)
+
+    if not dispatched:
+        # no dispatchable step; if all done, summarize
+        if plan and all(s.get("status") in ("completed", "failed") for s in plan):
+            return _Command(
+                goto="summarize",
+                update={"action_taken": "summarize", "dispatch_plan": plan},
+            )
+        # not all done + nothing dispatchable → END (in-flight steps running)
+        return _Command(goto=_END, update={"dispatch_plan": plan})
+
+    # Fan-out mutated step status to "dispatched" — re-emit the plan so the
+    # frontend's resident PlanStep[] reflects the new statuses (same emit as the
+    # resident node_dispatch_next — without it the plan card stays on the first
+    # announce and a stray /plan/confirm 409s).
+    try:
+        await emit_coordinator_plan(group_id, coordinator_id, plan)
+    except Exception:
+        logger.exception("[coordinator] failed to emit plan after dispatch_next_group")
+    # LangGraph drives the Send[] in parallel — each agent node gets its own
+    # state copy seeded by the Send payload. The plan carries the dispatched
+    # statuses for downstream handle_reply matching.
+    return _Command(goto=sends, update={"dispatch_plan": plan})
+
+
+def route_after_dispatch_next(state: GroupState) -> str:
+    """Group-graph router after ``dispatch_next`` (preserved verbatim from resident).
+
+    ``node_dispatch_next_group`` returns ``Command(goto=...)`` directly when it
+    fans out (the ``Send``s drive the agent nodes), so this router is only
+    consulted on the no-dispatchable-step branches:
+
+    - ``action_taken == "summarize"`` → ``summarize`` (all done, summarize).
+    - else → END (nothing dispatchable, in-flight steps running — their
+      report-back re-enters the next turn).
+
+    Same routing as the resident ``lambda s: "summarize" if s.get("action_taken")
+    == "summarize" else END``. Kept as a named function (not a lambda) so it is
+    introspectable + contract-testable (vh5-style dead-branch audit).
+    """
+    if state.get("action_taken") == "summarize":
+        return "summarize"
+    return END
 
 
 async def node_summarize(state: CoordinatorState) -> dict:
@@ -1274,14 +1383,21 @@ def build_coordinator_subnodes(coordinator_id: str = "", coordinator_name: str =
             reads ``state["system_prompt"]`` at runtime, so this is only an
             annotation for symmetry with the agent-node factory).
 
-    Returns a dict mapping node name → node callable, plus the four routers, all
+    Returns a dict mapping node name → node callable, plus the routers, all
     importable from this module. The keys mirror the resident graph's node names
-    verbatim so ``add_conditional_edges`` path maps stay identical:
+    verbatim so ``add_conditional_edges`` path maps stay identical. The
+    group-graph dispatch_next twin (``node_dispatch_next_group`` + ``route_after_dispatch_next``)
+    is included so a later wiring task can swap the resident ``dispatch_next``
+    sub-node for the ``Send``-fan-out variant without touching this factory's
+    callers:
 
         {"classify": node_classify_incoming, "llm_decide": node_llm_decide,
          "chat": node_chat, "dispatch": node_dispatch,
          "handle_reply": node_handle_reply, "dispatch_next": node_dispatch_next,
          "summarize": node_summarize,
+         # group-graph dispatch_next twins (LangGraph Send fan-out):
+         "dispatch_next_group": node_dispatch_next_group,
+         "route_after_dispatch_next": route_after_dispatch_next,
          "route_after_classify": route_after_classify,
          "route_after_handle_reply": route_after_handle_reply,
          "route_after_llm_decide": route_after_llm_decide,
@@ -1293,7 +1409,12 @@ def build_coordinator_subnodes(coordinator_id: str = "", coordinator_name: str =
     The routers are returned verbatim too — they read ``state.get("action_taken")``
     only, which exists on BOTH ``CoordinatorState`` and ``GroupState`` (the union
     landed in this task), so ``route_after_*`` conditional-edge semantics are
-    preserved byte-for-byte without modification.
+    preserved byte-for-byte without modification. The group-graph
+    ``dispatch_next_group`` node returns ``Command(goto=...)`` (not a dict), so
+    when it is wired in place of ``dispatch_next`` the conditional-edge router
+    after it is bypassed on the fan-out branch (LangGraph follows the ``Send``s
+    directly) — only consulted on the no-dispatchable-step branches (summarize /
+    END), which ``route_after_dispatch_next`` handles.
     """
     return {
         "classify": node_classify_incoming,
@@ -1303,6 +1424,11 @@ def build_coordinator_subnodes(coordinator_id: str = "", coordinator_name: str =
         "handle_reply": node_handle_reply,
         "dispatch_next": node_dispatch_next,
         "summarize": node_summarize,
+        # group-graph dispatch_next twin (LangGraph Send fan-out, task-8):
+        # a later wiring task swaps ``dispatch_next``→``dispatch_next_group`` +
+        # adds ``route_after_dispatch_next`` for the no-dispatch branches.
+        "dispatch_next_group": node_dispatch_next_group,
+        "route_after_dispatch_next": route_after_dispatch_next,
         "route_after_classify": route_after_classify,
         "route_after_handle_reply": route_after_handle_reply,
         "route_after_llm_decide": route_after_llm_decide,
