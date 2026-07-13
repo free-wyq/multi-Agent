@@ -5,6 +5,14 @@ three-state decision (chat/execute/ask). ``execute`` replies with a preview
 and ``push_task`` to itself (the engine's _handle_task then runs the CLI via
 ``_run_worker_task``). The graph is compiled once with a MemorySaver
 checkpointer and invoked per incoming notify by ``AgentEngine._handle_notify``.
+
+Agent-as-node factory (``make_agent_node`` / ``build_agent_node``): a second,
+parallel entry point that packages the same brain→chat/execute/ask decision
+into ONE LangGraph node returning ``Command(goto=...)`` or ``Command(goto=END)``
+— the building block for the per-group swarm graph (engine/group_graph.py, later
+tasks). The resident ``build_worker_graph`` (4-node + conditional edge) stays
+unchanged and remains the engine's live worker graph until the group-graph
+migration swaps consumers over.
 """
 from __future__ import annotations
 
@@ -14,17 +22,20 @@ import time
 import uuid
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
+from langgraph.types import Command
 
 from engine.inbox import push_task
+from engine.mention import find_mentions, resolve_mention
 from engine.reply import persist_agent_reply
-from engine.state import WorkerState
+from engine.state import GroupState, WorkerState
 from events import emit_coordinator_reasoning, emit_task_token
 from llm.client import chat_completion_stream, get_llm_config
 from llm.extract_json import extract_json
 from llm.json_stream import ContentExtractor
-from llm.prompts import build_brain_prompt
+from llm.prompts import TEAM_INTERACTION_SUFFIX, build_brain_prompt
 from store import crud
 
 logger = logging.getLogger("multi-agent.worker")
@@ -308,12 +319,7 @@ async def node_brain_decide(state: WorkerState) -> dict:
 
 
 async def node_chat(state: WorkerState) -> dict:
-    await _unified_reply(
-        state["group_id"],
-        state["agent_id"],
-        state["decision"]["content"],
-        data=state.get("_stream_stats"),
-    )
+    await _unified_reply(state["group_id"], state["agent_id"], state["decision"]["content"], data=state.get("_stream_stats"))
     return {}
 
 
@@ -329,26 +335,13 @@ async def node_execute(state: WorkerState) -> dict:
     """
     content = state["decision"]["content"]
     preview = content[:30]
-    await _unified_reply(
-        state["group_id"], state["agent_id"], f"收到，我来 {preview}..."
-    )
-    await push_task(
-        state["group_id"],
-        state["agent_id"],
-        state["agent_id"],
-        content,
-        None,
-    )
+    await _unified_reply(state["group_id"], state["agent_id"], f"收到，我来 {preview}...")
+    await push_task(state["group_id"], state["agent_id"], state["agent_id"], content, None)
     return {}
 
 
 async def node_ask(state: WorkerState) -> dict:
-    await _unified_reply(
-        state["group_id"],
-        state["agent_id"],
-        state["decision"]["content"],
-        data=state.get("_stream_stats"),
-    )
+    await _unified_reply(state["group_id"], state["agent_id"], state["decision"]["content"], data=state.get("_stream_stats"))
     return {}
 
 
@@ -392,3 +385,296 @@ def _parse_brain_decision(raw: str) -> dict:
     content = str(v.get("content", ""))
     reasoning = str(v.get("reasoning", ""))
     return {"action": action, "content": content, "reasoning": reasoning}
+
+
+# Per-turn cap on how many handoffs a single user turn may chain (bounds the
+# handoff chain length as an in-graph anti-loop backstop, complementing
+# LangGraph's own ``recursion_limit``). Same default spirit as mention.py's
+# ``_A2A_CAP`` but per-turn (reset each ``invoke_turn`` via GroupState.
+# turn_count), not per-group cumulative — ``recent_speakers`` + ``turn_count``
+# are the per-turn guard.
+#
+# Agent-as-node factory (group-graph migration · building block): packages the
+# same brain→chat/execute/ask decision the resident ``build_worker_graph``
+# runs across 4 nodes into ONE LangGraph node returning ``Command(goto=...)``
+# or ``Command(goto=END)`` — the form the per-group swarm graph
+# (engine/group_graph.py, later task) wires with handoff edges. Worker is
+# still an LLM+LangGraph agent talking to an OpenAI-compatible endpoint
+# directly (``chat_completion_stream``); it does NOT shell out to the Claude
+# Code CLI (see memory ``agent-no-cli-decouple``).
+AGENT_NODE_MAX_HANDOFFS = 8
+
+
+async def _resolve_handoff_target(
+    group_id: str,
+    coordinator_id: str,
+    sender_id: str,
+    content: str,
+) -> str | None:
+    """Resolve the @mention in ``content`` to the next speaker's agent_id.
+
+    Reuses ``mention.find_mentions`` + ``mention.resolve_mention`` (single
+    source for @-token scanning + three-tier agent match), then applies the
+    agent-as-node turn-local guards the resident graph enforced via
+    ``route_mentions``'s 30s anti-loop + A2A cap:
+
+      - skip self-mention (``@自己`` is a no-op handoff);
+      - skip the coordinator as a handoff target — in the decentralized swarm
+        path the coordinator is reached via ``route_entry`` for
+        engineering/plan-confirm turns, NOT via a worker's @mention (returning
+        the coordinator here would re-introduce the「协调者每轮插话」defect
+        the group graph is built to eliminate; a worker that wants the Leader
+        ends its turn with no @mention and the next user turn routes to the
+        Leader).
+      - first resolved mention wins (single next speaker — handoff is serial,
+        one node runs at a time; ``route_user_message``'s first-mention-wins
+        semantics preserved).
+
+    Returns ``None`` when there is no resolvable next speaker → the node ends
+    its turn (``Command(goto=END)``). Member/agent rows are read from the DB
+    (``crud`` single source) so the resolution never goes stale vs the
+    resident ``route_mentions`` path.
+    """
+    mentions = find_mentions(content)
+    if not mentions:
+        return None
+    members = await crud.list_group_members_with_agent(group_id)
+    agents = await crud.list_agents()
+    for mention in mentions:
+        if mention == sender_id:
+            continue  # self-mention: no-op
+        target_id = resolve_mention(members, mention, agents)
+        if not target_id or target_id == sender_id:
+            continue
+        if coordinator_id and target_id == coordinator_id:
+            # decentralized path: workers do not hand off back to the Leader
+            # via @mention (route_entry owns Leader entry). Treat as no handoff.
+            continue
+        return target_id
+    return None
+
+
+def _build_agent_invoke_messages(
+    system_prompt: str,
+    agent_role: str,
+    agent_name: str,
+    context: str,
+    display_msg: str,
+) -> list[dict[str, str]]:
+    """Build the LLM message list for an agent-node brain call.
+
+    Mirrors ``node_brain_decide``'s message construction (system_prompt as an
+    independent ``system`` message so the agent's own persona overrides the
+    brain prompt's generic {role} fallback; the decision prompt as ``user``).
+    Single source of this shape so the agent node and the resident worker
+    graph can't drift.
+    """
+    return [
+        {"role": "system", "content": system_prompt or ""},
+        {"role": "user", "content": build_brain_prompt(
+            agent_role, agent_name, context, display_msg, system_prompt,
+        )},
+    ]
+
+
+async def make_agent_node(
+    state: GroupState,
+    *,
+    agent_id: str,
+    agent_name: str,
+    agent_role: str,
+    system_prompt: str,
+    coordinator_id: str,
+) -> Command:
+    """Agent-as-node: one worker's brain→speak→handoff, returning a ``Command``.
+
+    Collapses the resident worker graph's brain/chat/execute/ask four-node
+    flow into a single node. The node:
+
+      1. Builds context from the messages table (``_build_context_from_db``,
+         same DB-true-source pull as ``node_brain_decide``) + the incoming
+         message.
+      2. Streams the brain LLM decision (``_stream_brain_decision`` — unchanged,
+         still ``chat_completion_stream`` + ``emit_task_token`` /
+         ``emit_coordinator_reasoning`` per-token WS, best-effort) and parses
+         it (``_parse_brain_decision``).
+      3. Speaks the reply (``_unified_reply`` — persist + emit + the engine's
+         reply callback for @mention routing, single source shared with the
+         resident graph). For ``execute`` it replies with the templated
+         ``收到，我来 …`` announce + ``push_task`` to self (the engine's
+         ``_handle_task`` then runs the agentic loop), exactly as
+         ``node_execute`` does.
+      4. Resolves the next speaker from the reply's @mention
+         (``_resolve_handoff_target``). If a peer is mentioned →
+         ``Command(goto="agent_<peer_id>", update=...)`` hands control to
+         that agent node (LangGraph handoff: serial, one node at a time →
+         kills the「顺序乱/同一 agent 连发」defect). No @mention →
+         ``Command(goto=END, update=...)`` ends the turn (话筒落地).
+
+    The ``update`` payload always carries the agent's appended ``AIMessage``
+    (so ``GroupState.messages`` accumulates the turn's dialogue across
+    handoffs via the ``add_messages`` reducer), bumps ``turn_count`` (in-graph
+    handoff-chain-length backstop, capped by ``AGENT_NODE_MAX_HANDOFFS``),
+    and appends ``agent_id`` to ``recent_speakers`` (per-turn「same agent not
+    driven twice」guard, complementing handoff's natural serial-only-one-node).
+
+    Identity (``agent_id``/``agent_name``/``agent_role``/``system_prompt``) is
+    closed-over by ``build_agent_node`` so the compiled node knows who it is
+    speaking as without re-deriving from ``current_speaker``.
+
+    The worker does NOT call the Claude Code CLI — it is a framework-internal
+    LLM+LangGraph agent hitting the OpenAI-compatible endpoint directly via
+    ``chat_completion_stream`` (memory ``agent-no-cli-decouple`` /
+    ``engines-use-frameworks-not-handrolled``). ``execute`` still pushes a task
+    to itself; the agentic loop (``_run_worker_task``) is the only CLI-adjacent
+    path and is owned by the engine, not this node.
+    """
+    group_id = state.get("group_id", "")
+
+    # 1. context + display message (DB true source, same as node_brain_decide).
+    context = await _build_context_from_db(group_id, coordinator_id)
+    display_msg = _format_display_msg(
+        state.get("incoming_sender", ""), state.get("incoming_message", "")
+    )
+
+    # 2. stream brain decision (per-token WS emit best-effort) + parse.
+    config = get_llm_config()
+    # group-chat members get the team-interaction suffix appended to their
+    # persona (same as the resident worker graph's ``sys_for_invoke`` in
+    # registry.py:729-733 — single source via TEAM_INTERACTION_SUFFIX).
+    sys_for_invoke = system_prompt or ""
+    if coordinator_id:  # group chat (has a Leader) → append team-interaction
+        sys_for_invoke = (system_prompt or "") + "\n\n" + TEAM_INTERACTION_SUFFIX
+    messages = _build_agent_invoke_messages(
+        sys_for_invoke, agent_role, agent_name, context, display_msg,
+    )
+    try:
+        reply_id, raw, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = (
+            await _stream_brain_decision(config, messages, group_id, agent_id)
+        )
+        decision = _parse_brain_decision(raw)
+        stats: dict[str, Any] | None = {
+            "reply_id": reply_id,
+            "elapsed_ms": elapsed_ms,
+            "tokens": tokens,
+            "model": model,
+            "reasoning_tokens": reasoning_tokens,
+        }
+        if reasoning_text:
+            stats["reasoning"] = reasoning_text
+        reached_failure = False
+    except Exception as e:
+        logger.warning("[worker %s] agent-node brain failed: %s", agent_name, e)
+        decision = {
+            "action": "chat",
+            "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
+            "reasoning": "llm_error",
+        }
+        stats = None
+        reached_failure = True
+        reply_id = ""  # unbound on failure; set so the downstream msg_id fallback trips
+
+    content = str(decision.get("content", ""))
+    action = decision.get("action", "chat")
+    # reply_id is only meaningful for chat/ask (the streamed brain text that
+    # the persisted bubble renders). execute's ack is a templated announce with
+    # no matching brain token stream, so it gets a synthetic id (avoids the
+    # AIMessage id being unset / colliding). On the LLM-failure branch reply_id
+    # is unbound — fall back to a fresh uuid so the AIMessage id is always set.
+    msg_id = reply_id if action in ("chat", "ask") and not reached_failure else f"exe_{uuid.uuid4().hex}"
+
+    # 3. speak (persist + emit + reply-callback @mention routing, single source).
+    if action == "execute":
+        # templated announce + push_task to self (engine runs the agentic loop).
+        preview = content[:30]
+        await _unified_reply(group_id, agent_id, f"收到，我来 {preview}...")
+        await push_task(group_id, agent_id, agent_id, content, None)
+        # execute ack ends the turn (no @mention handoff — the work continues
+        # out-of-band via the task, not via the group graph).
+        next_speaker: str | None = None
+    else:
+        # chat / ask — the streamed reply IS the persisted content; carry stats.
+        await _unified_reply(group_id, agent_id, content, data=stats)
+        # 4. resolve next speaker from the reply's @mention.
+        next_speaker = await _resolve_handoff_target(
+            group_id, coordinator_id, agent_id, content,
+        )
+
+    # 5. decide turn end vs handoff. Cap the handoff chain length as an
+    # in-graph anti-loop backstop (recent_speakers+turn_count are the per-turn
+    # guards; this is the hard ceiling so a runaway @mention loop can't burn
+    # the whole recursion budget before LangGraph's own limit trips).
+    turn_count = (state.get("turn_count") or 0) + 1
+    recent_speakers = [agent_id]  # appended via reducer to the running list
+    reached_cap = turn_count >= AGENT_NODE_MAX_HANDOFFS
+    if reached_cap:
+        logger.debug(
+            "[worker %s] agent-node turn_count=%d reached cap=%d, end turn",
+            agent_name, turn_count, AGENT_NODE_MAX_HANDOFFS,
+        )
+        next_speaker = None
+
+    update: dict[str, Any] = {
+        "messages": [AIMessage(content=content, name=agent_name, id=msg_id)],
+        "turn_count": turn_count,
+        "recent_speakers": recent_speakers,
+        "current_speaker": agent_id,
+    }
+    # The memory reducer appends; emit nothing if this turn produced no memo.
+    # (Kept minimal: agent nodes don't push memory in the first cut; the
+    # field exists on GroupState for future per-turn memos without a schema
+    # change.)
+
+    if next_speaker is None:
+        return Command(goto=END, update=update)
+    # handoff to the peer agent node. The group graph registers agent nodes
+    # under the key ``agent_<agent_id>`` (see build_group_graph, later task),
+    # so the goto target is that node name — NOT the agent_id directly (avoids
+    # collisions with coordinator sub-node names like "classify"/"llm_decide").
+    # NOTE: LangGraph forbids ':' and '|' in node names (reserved), so the
+    # convention is ``agent_<id>`` (underscore separator), not ``agent:<id>``.
+    update["current_speaker"] = next_speaker
+    return Command(goto=f"agent_{next_speaker}", update=update)
+
+
+def build_agent_node(
+    agent_id: str,
+    agent_name: str,
+    agent_role: str,
+    system_prompt: str,
+    coordinator_id: str,
+):
+    """Bind an agent's identity into a zero-arg LangGraph node function.
+
+    ``StateGraph.add_node`` takes ``(name, fn)`` where ``fn(state) -> dict|Command``.
+    This factory closes over the agent's identity (id/name/role/system_prompt/
+    the group's coordinator_id) so the compiled node knows who it is speaking
+    as — mirroring how ``AgentEngine`` caches ``self.agent_id`` / ``self.name``
+    / ``self.role`` / ``self.system_prompt`` / ``self.coordinator_id`` on the
+    resident worker graph.
+
+    Returns a ``functools.partial`` over ``make_agent_node`` — a callable that
+    LangGraph accepts as a node (it calls ``node(state)`` positionally, and
+    ``partial`` injects the bound identity kwargs). Identity is captured at
+    build time (group-graph compilation), so a later agent rename requires a
+    graph recompile — same staleness window as the resident engine (which
+    caches ``self.name`` at ``__init__``; reload refreshes it).
+    """
+    import functools
+
+    node = functools.partial(
+        make_agent_node,
+        agent_id=agent_id,
+        agent_name=agent_name,
+        agent_role=agent_role,
+        system_prompt=system_prompt,
+        coordinator_id=coordinator_id,
+    )
+    # name it for readability in LangGraph traces (not used for routing —
+    # the group graph registers the node under its own ``agent_<id>`` key).
+    try:
+        node.__name__ = f"agent_node_{agent_id}"  # type: ignore[attr-defined]
+    except (AttributeError, TypeError):
+        # functools.partial exposes __name__ on Py3.10+; if not, skip (cosmetic).
+        pass
+    return node
