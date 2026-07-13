@@ -1255,6 +1255,153 @@ async def node_summarize(state: CoordinatorState) -> dict:
     return {"dispatch_plan": []}
 
 
+async def node_handle_reply_group(state: GroupState) -> Command:
+    """Group-graph handle_reply: receive an agent node's report in-graph.
+
+    Task: coordinator handle_reply + summarize 节点迁移到群图 — handle_reply 接收
+    agent 节点报告（MT-15 失败恢复 + MT-14 步骤调整），不再走 inbox notify 回路.
+
+    The group-graph twin of the resident ``node_handle_reply``. In the resident
+    coordinator engine, a worker's report-back arrives as an ``agent_reply``
+    inbox notify (``registry._run_worker_task`` → ``push_notify("agent_reply",
+    ...)`` → the coordinator engine's run loop → ``_handle_notify`` → fresh-input
+    ainvoke with ``incoming_kind="agent_reply"`` + ``incoming_data={task_id,
+    success}`` → ``classify`` → ``route_after_classify`` → ``handle_reply``).
+    That is the **inbox notify loop** the task retires for the group graph.
+
+    In the group graph, the dispatched step's agent node (``worker.make_agent_node``,
+    fanned out via ``node_dispatch_next_group``'s ``Send``s) speaks its reply and
+    ends its turn with ``Command(goto=END)`` — but before ENDing it can route the
+    report back to this coordinator sub-node by emitting a ``Command(goto=
+    "handle_reply_group", update={...})`` instead of ``Command(goto=END)``. This
+    node then runs the SAME MT-15 (``_maybe_handle_step_failure``) + MT-14
+    (``_maybe_adjust_remaining_steps``) recovery logic as the resident
+    ``node_handle_reply`` — the only difference is the transport (in-graph
+    ``Command(goto=...)`` vs out-of-band ``push_notify``), not the recovery logic.
+
+    **Why a Command return, not a dict**: the resident ``node_handle_reply``
+    returns a dict (``{dispatch_plan, action_taken}``) and the resident
+    ``route_after_handle_reply`` (conditional edge) routes to summarize /
+    dispatch_next / llm_decide. The group-graph twin returns a ``Command(goto=...)``
+    so it can directly fan out to the next agent nodes (via
+    ``node_dispatch_next_group``'s ``Send``s) OR goto summarize, without going
+    through a conditional-edge router — the routing decision is made in-node
+    (the same decision the resident ``route_after_handle_reply`` makes, just
+    expressed as a ``Command.goto`` target rather than a router return string).
+    This keeps the MT-15/MT-14 branching identical (matched task_id → mark
+    completed/failed → MT-15 recovery on failure / MT-14 adjust on success →
+    all_done? summarize : dispatch_next) while letting the group graph fan out
+    in-graph via ``Send``.
+
+    The resident ``node_handle_reply`` + ``route_after_handle_reply`` are kept
+    verbatim for the resident coordinator engine (its consumers — mt13/mt14/mt15/
+    mt16/mt17 — keep patching + asserting on them unchanged). This twin is
+    additive.
+
+    Routing contract (preserved verbatim from ``route_after_handle_reply``):
+
+    - matched_idx is None (no dispatched step for this task_id — e.g. a stray
+      report) → ``llm_decide`` (fall back to the Leader LLM, same as resident).
+    - all steps done after marking + recovery → ``summarize``.
+    - failed step reset to pending (retry/reassign) → ``dispatch_next_group``
+      (re-fan-out the ready step).
+    - otherwise (more pending steps, possibly MT-14-adjusted) →
+      ``dispatch_next_group`` (fan out the now-ready steps).
+    """
+    from langgraph.types import Command as _Command
+    from langgraph.graph import END as _END
+
+    # Reuse the resident handle_reply body for the mark + MT-15 + MT-14 logic:
+    # it reads state.get(...) (duck-typed), and GroupState has every key it
+    # touches (incoming_data/incoming_message/dispatch_plan/agent_id/group_id/
+    # system_prompt/memory/leader_strategy — the task-6 schema union). We inline
+    # the same steps rather than calling node_handle_reply (which returns a dict
+    # + sets action_taken for a conditional-edge router) so we can translate the
+    # dict result into a Command.goto target here.
+    data = state.get("incoming_data") or {}
+    task_id = data.get("task_id")
+    success = data.get("success", True)
+    content = state.get("incoming_message", "")
+    plan = list(state.get("dispatch_plan") or [])
+
+    matched_idx = None
+    for i, step in enumerate(plan):
+        if step.get("task_id") == task_id and step.get("status") == "dispatched":
+            matched_idx = i
+            break
+
+    if matched_idx is None:
+        # no matching dispatched step -> fall back to LLM decision (same as
+        # resident route_after_handle_reply's default → llm_decide).
+        return _Command(goto="llm_decide", update={"dispatch_plan": plan})
+
+    plan[matched_idx]["status"] = "completed" if success else "failed"
+    plan[matched_idx]["result"] = content
+
+    # MT-15: on a worker failure, ask the LLM whether to retry or degrade
+    # BEFORE the all-done check (same ordering + cap as the resident path).
+    if not success:
+        plan = await _maybe_handle_step_failure(state, plan, matched_idx)
+        # after retry/reassign the step may be pending again (re-dispatched);
+        # skip may have marked it completed (degraded). Re-evaluate all_done.
+        if all(s.get("status") in ("completed", "failed") for s in plan):
+            return _Command(goto="summarize", update={"dispatch_plan": plan,
+                                                      "action_taken": "summarize"})
+        # if the failed step was reset to pending (retry/reassign), skip the
+        # MT-14 success-side adjustment — there are no fresh results to adjust
+        # on. dispatch_next_group will fan out the ready (re-dispatched) step.
+        if plan[matched_idx].get("status") == "pending":
+            return _Command(goto="dispatch_next_group", update={"dispatch_plan": plan})
+
+    all_done = all(s.get("status") in ("completed", "failed") for s in plan)
+    if all_done:
+        return _Command(goto="summarize", update={"dispatch_plan": plan,
+                                                  "action_taken": "summarize"})
+
+    # MT-14: only ask the LLM to revise the remaining pending steps when this
+    # report completed successfully (same gate as the resident path).
+    pending_steps = [s for s in plan if s.get("status") == "pending"]
+    if success and pending_steps:
+        plan = await _maybe_adjust_remaining_steps(state, plan)
+
+    # Fan out the now-possibly-revised ready steps via the group-graph
+    # dispatch_next (Send fan-out). The plan carries the completed/failed +
+    # possibly-adjusted pending steps.
+    return _Command(goto="dispatch_next_group", update={"dispatch_plan": plan})
+
+
+async def node_summarize_group(state: GroupState) -> Command:
+    """Group-graph summarize: all steps done → reply + clear plan, in-graph end.
+
+    The group-graph twin of the resident ``node_summarize``. Runs the SAME
+    summary reply (``format_step_summary``) + emit empty plan + clear plan logic,
+    then returns ``Command(goto=END)`` to end the turn in-graph (the resident
+    ``node_summarize`` returns ``{"dispatch_plan": []}`` and the resident graph's
+    ``summarize → END`` edge ends it — the group graph expresses the same as a
+    ``Command.goto=END``).
+
+    The summary reply goes through ``_unified_reply`` (persist + emit + the reply
+    callback) exactly as the resident path — single source for the agent_reply
+    shape + the Leader's summary bubble.
+    """
+    from langgraph.types import Command as _Command
+    from langgraph.graph import END as _END
+
+    plan = state.get("dispatch_plan") or []
+    summary = format_step_summary(plan)
+    await _unified_reply(
+        state["group_id"],
+        state["agent_id"],
+        f"🎉 全部完成！协作结果汇总：\n{summary}",
+    )
+    try:
+        await emit_coordinator_plan(state["group_id"], state["agent_id"], [])
+    except Exception:
+        logger.exception("[coordinator] failed to emit empty plan on summarize_group")
+    # clear the plan + end the turn in-graph.
+    return _Command(goto=_END, update={"dispatch_plan": []})
+
+
 # ── routing ───────────────────────────────────────────────────────────────
 
 
@@ -1429,6 +1576,12 @@ def build_coordinator_subnodes(coordinator_id: str = "", coordinator_name: str =
         # adds ``route_after_dispatch_next`` for the no-dispatch branches.
         "dispatch_next_group": node_dispatch_next_group,
         "route_after_dispatch_next": route_after_dispatch_next,
+        # group-graph handle_reply + summarize twins (task-9): receive an agent
+        # node's report in-graph (no inbox notify loop), run the same MT-15 +
+        # MT-14 recovery, then Command(goto=...) to dispatch_next_group /
+        # summarize / llm_decide.
+        "handle_reply_group": node_handle_reply_group,
+        "summarize_group": node_summarize_group,
         "route_after_classify": route_after_classify,
         "route_after_handle_reply": route_after_handle_reply,
         "route_after_llm_decide": route_after_llm_decide,
