@@ -73,6 +73,8 @@ import asyncio
 import logging
 from typing import TYPE_CHECKING, Any
 
+from engine.group_graph import build_group_graph
+
 if TYPE_CHECKING:
     from models.group import Group
 
@@ -82,10 +84,11 @@ logger = logging.getLogger("multi-agent.group_runtime")
 class GroupRuntime:
     """Per-group turn controller: owns the compiled group graph's turn lifecycle.
 
-    Holds the **stop signal** (``asyncio.Event``) + the **current turn task**
-    handle (``asyncio.Task``, filled by a later ``invoke_turn``). This skeleton
-    implements the stop-signal contract only; graph compilation + ``invoke_turn``
-    are filled by later .task.md lines.
+    Holds the **compiled group graph** (``self._graph``) + the **current turn
+    task** handle (``self._current_task``) + the **stop signal**
+    (``asyncio.Event``). This is the去中心化群图的回合边界 + 可中止性 owner — a
+    turn is one ``graph.ainvoke`` wrapped as a cancellable ``asyncio.Task``
+    (mirrors the resident ``AgentEngine._worker_task``).
 
     Args:
         group: the ``Group`` (``models.group.Group``) — captures ``id`` /
@@ -101,23 +104,35 @@ class GroupRuntime:
         _stop_event: ``asyncio.Event``, default *clear*. The cooperative stop
             signal. **Not** on ``GroupState`` — a runtime object,游离于图状态外
             (never serialized by the checkpointer).
+        _graph: the compiled per-group swarm graph (``build_group_graph`` output),
+            or ``None`` until ``compile_graph`` runs. Holds the route_entry +
+            coordinator sub-nodes + agent nodes + handoff edges in ONE graph.
+        _members: the member identity dicts (``agent_id``/``agent_name``/
+            ``agent_role``/``system_prompt``) the graph was compiled with, or
+            ``None`` until ``compile_graph`` runs. Stashed so ``invoke_turn`` (later
+            task) can inject the group config / identity without re-resolving.
         _current_task: the current turn's ``asyncio.Task`` handle, or ``None``
             when no turn is active. Filled by ``invoke_turn`` (later task);
             ``cancel_turn`` cancels it. ``None`` → ``cancel_turn`` returns
             ``False`` (idempotent no-op).
+        thread_id: the MemorySaver checkpointer key for this group's graph
+            thread (``group_id`` — one thread per group, cross-invoke state via
+            checkpointer). Mirrors ``AgentEngine.thread_id``'s stable-key choice.
 
     Lifecycle:
-        · A turn = one ``graph.ainvoke`` (the later ``invoke_turn`` wraps it as
-          a cancellable ``asyncio.Task`` stored on ``_current_task``).
+        · ``compile_graph()`` (async) — resolve members from the DB + compile the
+          group graph once (startup / on member change). Stored on ``_graph``.
+        · A turn = one ``graph.ainvoke`` (the later ``invoke_turn`` wraps it as a
+          cancellable ``asyncio.Task`` stored on ``_current_task``).
         · ``request_stop()`` sets the event so node entries yield (current
           speaker finishes its step, then the next node ENDs the turn).
         · ``cancel_turn()`` sets the event THEN cancels the task (hard backstop).
         · On turn end (normal or cancelled), ``_current_task`` is cleared +
           ``emit_agent_status(idle)`` fires (later ``invoke_turn`` task).
 
-    Thread-safety: ``asyncio`` single-thread — the event + task handle are
-    touched only from the event loop, so no lock is needed. ``request_stop`` /
-    ``cancel_turn`` are safe to call from any coroutine in the loop.
+    Thread-safety: ``asyncio`` single-thread — the event + task handle + graph
+    are touched only from the event loop, so no lock is needed. ``request_stop``
+    / ``cancel_turn`` are safe to call from any coroutine in the loop.
     """
 
     def __init__(self, group: "Group | str") -> None:
@@ -139,22 +154,108 @@ class GroupRuntime:
         # ends gracefully.
         self._stop_event: asyncio.Event = asyncio.Event()
 
+        # ── compiled group graph (filled by compile_graph, this task) ──
+        # The per-group swarm graph (build_group_graph output): route_entry +
+        # coordinator sub-nodes (classify/llm_decide/chat/dispatch + GROUP twins)
+        # + one agent_<id> node per member + handoff edges. One compiled graph per
+        # group, reused across invoke_turn calls. None until compile_graph runs.
+        self._graph: Any = None
+        # The member identity dicts the graph was compiled with (one per group
+        # member EXCLUDING the coordinator). Stashed so invoke_turn (later task)
+        # can inject group config / identity without re-resolving from the DB.
+        self._members: list[dict[str, Any]] | None = None
+
         # ── current turn task handle (filled by invoke_turn, later task) ──
-        # One ainvoke = one turn = one cancellable asyncio.Task. cancel_turn
-        # cancels this so CancelledError propagates into the streaming LLM's
-        # async for (mid-stream hard stop). None when no turn is active.
+        # One ainvoke = one turn = one cancellable asyncio.Task (mirrors the
+        # resident AgentEngine._worker_task). cancel_turn cancels this so
+        # CancelledError propagates into the streaming LLM's async for (mid-stream
+        # hard stop). None when no turn is active.
         self._current_task: asyncio.Task[Any] | None = None
 
-        # The compiled group graph is set by a later task (build_group_graph +
-        # invoke_turn). Held here so invoke_turn/cancel_turn operate on it. None
-        # until the later wiring task compiles it.
-        self._graph: Any = None
+        # MemorySaver checkpointer key for this group's graph thread. One thread
+        # per group (the whole group shares ONE graph + ONE thread, vs the
+        # resident per-agent {group}:{agent} keys). Cross-invoke state (the
+        # coordinator's interrupt + dispatch_plan, turn_count/recent_speakers)
+        # persists via the checkpointer + this thread_id.
+        self.thread_id: str = self.group_id
 
         logger.debug(
-            "[group_runtime] constructed for group=%s coordinator=%s (skeleton; "
-            "graph + invoke_turn filled by later tasks)",
+            "[group_runtime] constructed for group=%s coordinator=%s (graph via "
+            "compile_graph; invoke_turn filled by later task)",
             self.group_id, self.coordinator_id or "(unset)",
         )
+
+    # ── graph compilation ─────────────────────────────────────
+    async def compile_graph(self, members: list[dict[str, Any]] | None = None) -> Any:
+        """Compile (or recompile) the per-group swarm graph once.
+
+        Resolves the group's members from the DB (``crud.list_group_members_with
+        _agent`` joined with ``crud.list_agents`` for system_prompt) when
+        ``members`` is not passed, then compiles ``build_group_graph(group,
+        members, coordinator_id)`` and stashes it on ``self._graph`` + the member
+        dicts on ``self._members``. Idempotent: re-calling recompiles (a member
+        add/rename should recompile so the new agent node + handoff edge are
+        registered — same staleness window as the resident engine, refreshed on
+        reload / member change).
+
+        Member resolution is async (DB I/O) + is THIS method's concern (unlike
+        ``build_group_graph`` which stays sync + takes members as a required
+        arg). Each member dict carries ``agent_id`` / ``agent_name`` /
+        ``agent_role`` / ``system_prompt`` — the identity ``worker.build_agent
+        _node`` closure-binds at compile time.
+
+        Returns the compiled graph (also stashed on ``self._graph``). A later
+        ``invoke_turn`` task reads ``self._graph`` to run turns; ``cancel_turn``
+        does NOT touch the graph (only the turn task).
+
+        Args:
+            members: optional pre-resolved member identity dicts (used by tests
+                / callers that already have them). When ``None``, resolved from
+                the DB. Each dict: ``agent_id`` / ``agent_name`` / ``agent_role``
+                / ``system_prompt``.
+        """
+        if members is None:
+            members = await self._resolve_members()
+        self._members = list(members)
+        self._graph = build_group_graph(
+            self.group_id, self._members, coordinator_id=self.coordinator_id,
+        )
+        logger.info(
+            "[group_runtime] compiled group graph for group=%s members=%d "
+            "coordinator=%s",
+            self.group_id, len(self._members), self.coordinator_id or "(none)",
+        )
+        return self._graph
+
+    async def _resolve_members(self) -> list[dict[str, Any]]:
+        """Resolve the group's member identity dicts from the DB.
+
+        Joins ``crud.list_group_members_with_agent`` (agent_id / agent_name /
+        agent_role) with ``crud.list_agents`` (system_prompt) so each member dict
+        carries the full identity ``worker.build_agent_node`` closure-binds. The
+        coordinator is EXCLUDED (it is a sub-node, not an ``agent_<id>`` node) —
+        members are the group's普通成员 only, matching ``build_group_graph``'s
+        ``members`` contract.
+        """
+        from store import crud  # local import avoids a module-load DB touch
+
+        member_rows = await crud.list_group_members_with_agent(self.group_id)
+        agents = {a.id: a for a in await crud.list_agents()}
+        members: list[dict[str, Any]] = []
+        for m in member_rows:
+            agent_id = getattr(m, "agent_id", "") or ""
+            if not agent_id or agent_id == self.coordinator_id:
+                # skip empty + the coordinator (coordinator is a sub-node, not
+                # an agent_<id> node — route_entry owns the Leader entry).
+                continue
+            agent = agents.get(agent_id)
+            members.append({
+                "agent_id": agent_id,
+                "agent_name": getattr(m, "agent_name", "") or "",
+                "agent_role": getattr(m, "agent_role", "") or "",
+                "system_prompt": getattr(agent, "system_prompt", "") or "" if agent else "",
+            })
+        return members
 
     # ── cooperative stop (soft) ───────────────────────────────
     def request_stop(self) -> None:
@@ -257,7 +358,48 @@ class GroupRuntime:
             self.group_id,
         )
 
-    # NOTE: invoke_turn / _compile_graph / the node-entry stop check wiring
-    # are later .task.md tasks (lines 14-17). This skeleton locks the stop
-    # contract (request_stop / cancel_turn / is_stopped / reset_stop) + the
-    # attribute shape (_stop_event, _current_task, _graph) they target.
+    # ── turn task handle (cancellable ainvoke, mirrors _worker_task) ──
+    def _start_turn_task(self, coro: Any) -> asyncio.Task[Any]:
+        """Wrap a turn coroutine as a cancellable ``asyncio.Task`` + stash it.
+
+        Mirrors the resident ``AgentEngine._worker_task`` pattern: one turn =
+        one ``asyncio.Task`` stored on ``self._current_task`` so ``cancel_turn``
+        can cancel it (CancelledError → streaming LLM ``async for`` mid-stream
+        break). The handle is cleared in ``_end_turn`` (called by the later
+        ``invoke_turn``'s ``finally``) so the slot is clean for the next turn.
+
+        This method is the stable home for the「ainvoke 包成 cancellable task」
+        contract the task names: the later ``invoke_turn`` builds its ainvoke
+        coroutine and passes it here; ``cancel_turn`` (this skeleton) cancels the
+        stashed handle. Stashing is the contract THIS task locks; the full
+        invoke_turn (state injection + emit idle + finally cleanup) is the next
+        task.
+
+        Args:
+            coro: the turn coroutine (typically ``self._graph.ainvoke(...,
+                config=...)``). NOT awaited here — wrapped in a Task the caller
+                awaits separately so cancel can interrupt it mid-await.
+
+        Returns:
+            the ``asyncio.Task`` (also stashed on ``self._current_task``).
+        """
+        task = asyncio.create_task(coro)
+        self._current_task = task
+        return task
+
+    def _end_turn(self) -> None:
+        """Clear the current turn task handle (turn done — normal or cancelled).
+
+        Called by the later ``invoke_turn``'s ``finally`` so the slot is clean
+        for the next turn (``cancel_turn`` on a cleared slot returns ``False`` —
+        the idempotent no-active-turn contract). Does NOT clear the stop event
+        (``invoke_turn`` calls ``reset_stop`` at the NEXT turn's start; clearing
+        here would let a just-cancelled turn's stop intent leak into a turn that
+        hasn't started yet — reset_stop is per-turn-start, not per-turn-end).
+        """
+        self._current_task = None
+
+    # NOTE: the full invoke_turn (state injection + ainvoke + emit idle + finally
+    # _end_turn) is the next .task.md task (line 15). This task locks the compiled
+    # graph ownership (compile_graph) + the cancellable turn-task wrapper
+    # (_start_turn_task / _end_turn) that invoke_turn builds on.
