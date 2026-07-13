@@ -649,6 +649,7 @@ def _splice_amended_steps(plan: list[dict], amended: list[dict]) -> list[dict]:
 
 
 def _parse_plan_adjust_decision(raw: str) -> dict | None:
+    v = extract_json(raw)
     if v is None:
         return None
     adjust = bool(v.get("adjust", False))
