@@ -508,8 +508,14 @@ async def make_agent_node(
          (``_resolve_handoff_target``). If a peer is mentioned →
          ``Command(goto="agent_<peer_id>", update=...)`` hands control to
          that agent node (LangGraph handoff: serial, one node at a time →
-         kills the「顺序乱/同一 agent 连发」defect). No @mention →
+         kills the「顺序乱/抢序」defect). No @mention →
          ``Command(goto=END, update=...)`` ends the turn (话筒落地).
+
+    **图内防连发守卫**（节点入口，先于 brain）：若 ``agent_id`` 已在 ``state["recent_speakers"]``
+    里（本回合已发过言），直接 ``Command(goto=END)`` 不重复发言。handoff 串行只消除「两个
+    节点同时跑」的抢序，但 LLM 仍可把话筒 @回已发言者形成 A→B→A→A 连发；本守卫把「同一
+    agent 一回合不被驱动两次」做成图内硬约束（顺序乱根因①/②的图内兜底）。
+    ``recent_speakers`` 由 ``append_list`` reducer 累加，跨 handoff 在 GroupState 单一真源。
 
     The ``update`` payload always carries the agent's appended ``AIMessage``
     (so ``GroupState.messages`` accumulates the turn's dialogue across
@@ -530,6 +536,27 @@ async def make_agent_node(
     path and is owned by the engine, not this node.
     """
     group_id = state.get("group_id", "")
+
+    # ── 图内防连发守卫（顺序乱根因①/②）────────────────────────
+    # handoff 天然串行只一节点在跑，但「同一 agent 一回合被驱动两次」仍可能发生：
+    # ① LLM 把话筒 @回刚发过言的人（"@前端 接着说" 而前端刚说完）；
+    # ② route_entry/agent 节点解析到已在本回合发言的 agent 作为 next_speaker。
+    # handoff 串行消除了「两个节点同时跑」的抢序，但单线程内 LLM 仍可把控制权交回
+    # 已发言者形成 A→B→A→A 的连发。本守卫在节点入口查 recent_speakers：若本 agent
+    # 已在本回合发过言，不再发言（不再调 brain / 不再 _unified_reply），直接 END
+    # 结束回合（话筒落地），把「同一 agent 一回合不被驱动两次」做成图内硬约束。
+    #
+    # 守卫位置（节点入口，先于 brain 调用）：避免一次无谓 LLM 调用 + 持久化重复发言。
+    # recent_speakers 由 append_list reducer 累加，跨 handoff 在 GroupState 单一真源，
+    # checkpointer 跨 invoke_turn 不会串台（invoke_turn 注入 recent_speakers=[] 重置）。
+    already_spoke = agent_id in (state.get("recent_speakers") or [])
+    if already_spoke:
+        logger.debug(
+            "[worker %s] agent-node 防连发守卫命中：本回合已发言（recent_speakers=%s），"
+            "不重复发言，回合 END",
+            agent_name, state.get("recent_speakers"),
+        )
+        return Command(goto=END, update={"current_speaker": agent_id})
 
     # 1. context + display message (DB true source, same as node_brain_decide).
     context = await _build_context_from_db(group_id, coordinator_id)

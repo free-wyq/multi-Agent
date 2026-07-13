@@ -242,12 +242,17 @@ async def route_entry(state: GroupState) -> Command:
                 next_speaker, target_node,
             )
             return Command(goto=END, update={"turn_count": turn_count})
+        # route_entry picks the first speaker but does NOT seed recent_speakers:
+        # the agent node appends itself to recent_speakers when it speaks (its own
+        # update), so the防连发守卫 sees an empty list on the first speaker's
+        # FIRST invocation (allows speech) and the speaker's id only on a SECOND
+        # invocation (suppresses). Seeding recent_speakers here would make the
+        # guard fire on the first speaker's very first call (false positive).
         return Command(
             goto=target_node,
             update={
                 "current_speaker": next_speaker,
                 "turn_count": turn_count,
-                "recent_speakers": [next_speaker],
             },
         )
 
@@ -302,12 +307,16 @@ def build_route_entry(handoff_targets: set[str]):
                     next_speaker, target_node,
                 )
                 return Command(goto=END, update={"turn_count": turn_count})
+            # route_entry picks the first speaker but does NOT seed recent_speakers:
+            # the agent node appends itself when it speaks, so the防连发守卫 sees an
+            # empty list on the first speaker's FIRST invocation (allows speech) and
+            # the speaker's id only on a SECOND invocation (suppresses). Seeding here
+            # would make the guard fire on the first speaker's very first call.
             return Command(
                 goto=target_node,
                 update={
                     "current_speaker": next_speaker,
                     "turn_count": turn_count,
-                    "recent_speakers": [next_speaker],
                 },
             )
 

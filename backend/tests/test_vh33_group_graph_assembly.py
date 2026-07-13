@@ -196,10 +196,10 @@ def assert_contract() -> list[str]:
     # ── D. 路由语义 ──────────────────────────────────────────
     # D11/D12/D14: route_entry with @mention / without
     class _M:
-        def __init__(self, aid): self.agent_id = aid
+        def __init__(self, aid, name): self.agent_id = aid; self.agent_name = name
     class _A:
         def __init__(self, aid, name, role): self.id = aid; self.name = name; self.role = role
-    db_members = [_M("agent_front_1"), _M("agent_back_1")]
+    db_members = [_M("agent_front_1", "前端工程师"), _M("agent_back_1", "后端工程师")]
     db_agents = [_A("agent_front_1", "前端工程师", "frontend_engineer"),
                  _A("agent_back_1", "后端工程师", "backend_engineer"),
                  _A("agent_coord_1", "协调者", "coordinator")]
@@ -229,10 +229,12 @@ def assert_contract() -> list[str]:
             errs.append(f"[D11] current_speaker 应 agent_back_1，实际 {cmd.update.get('current_speaker')!r}")
         elif cmd.update.get("turn_count") != 1:
             errs.append(f"[D11] turn_count 应 1，实际 {cmd.update.get('turn_count')}")
-        elif cmd.update.get("recent_speakers") != ["agent_back_1"]:
-            errs.append(f"[D11] recent_speakers 应 [agent_back_1]，实际 {cmd.update.get('recent_speakers')}")
         else:
-            print("[D11] OK  @mention → goto agent_<peer> + current_speaker/turn_count/recent_speakers 写入")
+            # task-12: route_entry does NOT seed recent_speakers (the agent node
+            # appends itself when it speaks, so the防连发守卫 sees an empty list on
+            # the first speaker's FIRST invocation). current_speaker + turn_count
+            # are still written; recent_speakers is left to the agent node.
+            print("[D11] OK  @mention → goto agent_<peer> + current_speaker/turn_count 写入（recent_speakers 由 agent 节点发言时追加，task-12 route_entry 不预置）")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[D11] @mention 测试异常：{type(e).__name__}: {e}")
     # D12 无 @mention → END（bare chat, no engineering/plan kind — decentralized
@@ -296,7 +298,13 @@ def assert_contract() -> list[str]:
                     "incoming_message": "开始接龙 @后端工程师", "incoming_sender": "user",
                 }, config={"configurable": {"thread_id": "vh33-e15"}})
         r = asyncio.run(_run_e15())
-        # route_entry(@后端) → back speaks → no mention → END (1 agent)
+        # route_entry(@后端) → back speaks → no mention → END (1 agent).
+        # task-12 防连发守卫：route_entry does NOT seed recent_speakers (only
+        # bumps turn_count + current_speaker) — the agent node appends itself
+        # when it speaks. So the first speaker's FIRST invocation sees an empty
+        # recent_speakers (guard allows speech), speaks once, appends itself,
+        # then no @mention → END. Single-hop chain: 2 msgs (user + back reply),
+        # turn_count=2 (route_entry=1 + back=1), recent_speakers=[back].
         if len(r["messages"]) != 2:
             errs.append(f"[E15] messages 应 2（user + back），实际 {len(r['messages'])}")
         elif r["turn_count"] != 2:
@@ -341,10 +349,18 @@ def assert_contract() -> list[str]:
                     "incoming_message": "开始 @前端工程师", "incoming_sender": "user",
                 }, config={"configurable": {"thread_id": "vh33-e16"}})
         r = asyncio.run(_run_e16())
-        if r["turn_count"] < AGENT_NODE_MAX_HANDOFFS:
-            errs.append(f"[E16] 多跳应达 cap={AGENT_NODE_MAX_HANDOFFS}，实际 turn_count={r['turn_count']}")
-        else:
+        # task-12 防连发守卫：A→B→A 中 front 第二次被 goto 时守卫命中即 END，
+        # 故多跳链在 front→back→front(guarded)→END 就停。原断言「达 cap=8」假设
+        # 无防连发守卫——task-12 守卫把 A→B→A 的连发堵死后，链长被防连发守卫
+        # 先于 cap 兜底截断（turn_count=2，front 不被二调，recent_speakers 不重复）。
+        # 接受两种截断：cap 兜底（turn_count>=8）或防连发守卫（turn_count>=2 且
+        # recent_speakers 不重复追加）。
+        if r["turn_count"] >= AGENT_NODE_MAX_HANDOFFS:
             print(f"[E16] OK  多跳 handoff 链达 cap={AGENT_NODE_MAX_HANDOFFS} → END（图内 anti-loop 兜底）")
+        elif r["turn_count"] >= 2 and r.get("recent_speakers") == ["agent_front_1", "agent_back_1"]:
+            print(f"[E16] OK  多跳链被防连发守卫截断（turn_count={r['turn_count']}，front 不被二调，recent_speakers 不重复）→ END")
+        else:
+            errs.append(f"[E16] 多跳链应被 cap 或防连发守卫截断，实际 turn_count={r['turn_count']} recent_speakers={r.get('recent_speakers')}")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[E16] multi-hop cap 测试异常：{type(e).__name__}: {e}")
 

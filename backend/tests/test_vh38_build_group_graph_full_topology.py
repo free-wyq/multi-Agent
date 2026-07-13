@@ -234,8 +234,8 @@ def assert_contract() -> list[str]:
                  patch.object(worker_mod, "find_mentions", side_effect=lambda c: ["后端工程师"] if "前端接" in c or "开始" in c else []), \
                  patch.object(worker_mod, "resolve_mention", return_value="w2"):
                 class _M:
-                    def __init__(self, aid): self.agent_id = aid; self.agent_name = aid; self.agent_role = "r"
-                crud_mock.list_group_members_with_agent = AsyncMock(return_value=[_M("w1"), _M("w2")])
+                    def __init__(self, aid, name): self.agent_id = aid; self.agent_name = name; self.agent_role = "r"
+                crud_mock.list_group_members_with_agent = AsyncMock(return_value=[_M("w1", "前端工程师"), _M("w2", "后端工程师")])
                 crud_mock.list_agents = AsyncMock(return_value=[])
                 gg = build_group_graph("g1", members, coordinator_id="c1")
                 return await gg.ainvoke({
@@ -245,6 +245,9 @@ def assert_contract() -> list[str]:
                     "incoming_message": "开始接龙 @后端工程师", "incoming_sender": "user",
                 }, config={"configurable": {"thread_id": "vh38-e13"}})
         r = asyncio.run(_run_e13())
+        # task-12 防连发守卫：route_entry seeds recent_speakers=[w2]，w2 节点首调发言
+        # （守卫未命中——w2 是本回合首发言者），发言后无 @→END。chain: route_entry→w2→END.
+        # 产 2 msgs（user + w2 reply），turn_count=2. 守卫只在 agent 二调时命中，首调不误伤.
         if len(r.get("messages", [])) < 2:
             errs.append(f"[E13] route_entry handoff 链应产 ≥2 msgs（vh33 E15 不破），实际 {len(r.get('messages', []))}")
         else:
