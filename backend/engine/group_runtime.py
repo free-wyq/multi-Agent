@@ -702,6 +702,14 @@ class GroupRuntime:
         reply_cb = self._reply_cb_factory()
         coord_mod.set_reply_callback(reply_cb)
         worker_mod.set_reply_callback(reply_cb)
+        # Task-17: install this runtime as the turn's GroupRuntime contextvar so
+        # the group graph's route_entry + every agent node (make_agent_node) can
+        # consult ``self.is_stopped()`` at entry (cooperative soft stop — on hit
+        # return Command(goto=END) instead of speaking). Cleared in ``finally``
+        # so the slot doesn't leak into the next turn (paired with the _REPLY_CB
+        # clear; per-task contextvar copy so concurrent group turns each see
+        # their own runtime — a request_stop on group A never bleeds into B).
+        worker_mod.set_group_runtime(self)
 
         async def _ainvoke():
             return await self._graph.ainvoke(turn_input, config=config)
@@ -723,6 +731,7 @@ class GroupRuntime:
         finally:
             coord_mod.set_reply_callback(None)
             worker_mod.set_reply_callback(None)
+            worker_mod.set_group_runtime(None)
             self._end_turn()
 
         # Normal END: sync the dispatch_plan back from the graph result (the
@@ -799,6 +808,10 @@ class GroupRuntime:
         reply_cb = self._reply_cb_factory()
         coord_mod.set_reply_callback(reply_cb)
         worker_mod.set_reply_callback(reply_cb)
+        # Task-17: install this runtime so route_entry + agent nodes consult
+        # ``is_stopped()`` at entry during the resume turn too (a resume is still
+        # a turn — a request_stop mid-resume should yield at the next node).
+        worker_mod.set_group_runtime(self)
 
         async def _aresume():
             return await self._graph.ainvoke(Command(resume=payload or {}), config=config)
@@ -814,6 +827,7 @@ class GroupRuntime:
         finally:
             coord_mod.set_reply_callback(None)
             worker_mod.set_reply_callback(None)
+            worker_mod.set_group_runtime(None)
             self._end_turn()
 
         if result and isinstance(result, dict):

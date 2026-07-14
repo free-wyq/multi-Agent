@@ -50,6 +50,24 @@ _REPLY_CB: contextvars.ContextVar = contextvars.ContextVar(
     "worker_reply_cb", default=None
 )
 
+# The per-group ``GroupRuntime`` whose cooperative stop event this node should
+# consult at entry (task-17: route_entry + each agent node先查 ``is_stopped()``
+# 命中即不发言直接返回 END，协作式停止). A contextvar (not a module global) for
+# the same reason as ``_REPLY_CB``: the group graph runs ONE ainvoke per turn per
+# group, but multiple groups' turns run concurrently as separate asyncio tasks
+# (each a ``GroupRuntime.invoke_turn``), so a module global would let group A's
+# ``request_stop`` bleed into group B's agent nodes. Each ``invoke_turn`` task
+# copies the context at creation, so the runtime it set is the one its own agent
+# nodes see. Mirrors the coordinator's ``_GRAPH_INSTANCE`` / ``_PENDING_PLAN_VIEW``
+# contextvars (per-task copy, concurrent engines don't cross-talk). Default
+# ``None`` (the resident worker graph path / a group graph invoked outside a
+# ``GroupRuntime`` turn) → ``get_group_runtime()`` returns ``None`` + the
+# stop-check guard is skipped (no runtime → no cooperative stop, the node runs as
+# before — backward compatible with the resident engine).
+_GROUP_RUNTIME: contextvars.ContextVar = contextvars.ContextVar(
+    "group_runtime", default=None
+)
+
 
 def set_reply_callback(cb: Any) -> None:
     """Install the engine's unified reply callable for the duration of one invoke.
@@ -59,6 +77,36 @@ def set_reply_callback(cb: Any) -> None:
     their own cb — not a shared global that the last writer wins.
     """
     _REPLY_CB.set(cb)
+
+
+def set_group_runtime(rt: Any) -> None:
+    """Install the per-group ``GroupRuntime`` for the duration of one turn.
+
+    Task-17: ``GroupRuntime.invoke_turn`` / ``resume_plan`` call this right
+    before ``ainvoke`` so the group graph's ``route_entry`` + every agent node
+    (``make_agent_node``) can consult ``rt.is_stopped()`` at entry (cooperative
+    soft stop — on hit return ``Command(goto=END)`` instead of speaking).
+    Sets it in the *current task's* context (contextvars), so concurrent group
+    turns (each its own ``invoke_turn`` task) each see their own runtime.
+    ``GroupRuntime.invoke_turn``'s ``finally`` clears it (``set_group_runtime
+    (None)``) so the slot doesn't leak into the next turn (paired with the
+    ``_REPLY_CB`` clear, mirroring the resident engine's per-invoke lifecycle).
+    """
+    _GROUP_RUNTIME.set(rt)
+
+
+def get_group_runtime() -> Any:
+    """Return the current turn's ``GroupRuntime`` (or ``None``).
+
+    Called by ``make_agent_node`` / ``route_entry`` entry guards to decide
+    whether to yield (``is_stopped()`` True → ``Command(goto=END)``). ``None``
+    (no runtime installed — the resident worker graph path, or a group graph
+    invoked outside a ``GroupRuntime`` turn) → the guard is skipped (no
+    cooperative stop; the node runs as before). The resident engine path never
+    installs a runtime, so the stop-check is a pure no-op there (backward
+    compatible).
+    """
+    return _GROUP_RUNTIME.get()
 
 
 async def _unified_reply(
@@ -555,6 +603,27 @@ async def make_agent_node(
             "[worker %s] agent-node 防连发守卫命中：本回合已发言（recent_speakers=%s），"
             "不重复发言，回合 END",
             agent_name, state.get("recent_speakers"),
+        )
+        return Command(goto=END, update={"current_speaker": agent_id})
+
+    # ── 协作式停止守卫（StopSignal·task-17）────────────────
+    # ``GroupRuntime.request_stop()``（用户喊「停/stop/中断」）只 set 一个
+    # ``asyncio.Event``（软停·不强切）。本节点入口查 ``is_stopped()``：命中即不发言
+    # （不调 brain / 不 _unified_reply），直接 ``Command(goto=END)`` 结束回合——当前
+    # 发言者已把当前 step 跑完（流式话说完），本节点是「下一个」发言者，命中 stop
+    # 即话筒落地，不 mid-stream 强切、不留半截消息。这是双层停止的软停层；硬停层
+    # ``cancel_turn``（先 set 再 task.cancel）由 UI 停止按钮走，与本守卫正交。
+    #
+    # runtime 经 ``get_group_runtime()`` 从 contextvar 取（``GroupRuntime.invoke_turn``
+    # 在 ainvoke 前 set，finally 清）。``None``（驻留 worker 图 / 群图在 GroupRuntime
+    # 之外被 invoke）→ 无协作停止信号，守卫跳过（向后兼容驻留引擎，其停止走
+    # ``AgentEngine.request_cancel`` 强切路径，不经此 contextvar）。
+    rt = get_group_runtime()
+    if rt is not None and rt.is_stopped():
+        logger.debug(
+            "[worker %s] agent-node 协作式停止守卫命中：stop_event 已 set（"
+            "用户喊停），不发言，回合 END（当前发言者已说完，不 mid-stream 强切）",
+            agent_name,
         )
         return Command(goto=END, update={"current_speaker": agent_id})
 

@@ -41,6 +41,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
 from engine.state import GroupState
+from engine import worker as worker_mod
 from engine.worker import (
     AGENT_NODE_MAX_HANDOFFS,
     _resolve_handoff_target,
@@ -212,6 +213,21 @@ async def route_entry(state: GroupState) -> Command:
     # avoids polluting GroupState with a private key).
     handoff_targets: set[str] = state.get("_handoff_targets") or set()  # type: ignore[assignment]
 
+    # ── 协作式停止守卫（StopSignal·task-17）────────────────
+    # Same cooperative-stop check as the closure-bound ``build_route_entry``:
+    # ``GroupRuntime.request_stop()`` set the event (soft stop), so this entry
+    # node does NOT pick a speaker + returns ``Command(goto=END)`` (current
+    # speaker already finished, the turn ends gracefully). ``None`` runtime →
+    # skip (backward compatible — the standalone route_entry is used by tests
+    # that don't install a runtime). Kept in sync with the closure-bound twin.
+    rt = worker_mod.get_group_runtime()
+    if rt is not None and rt.is_stopped():
+        logger.debug(
+            "[group_graph] route_entry 协作式停止守卫命中（standalone）：stop_event 已 set，"
+            "不选发言者，回合 END",
+        )
+        return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
+
     turn_count = (state.get("turn_count") or 0) + 1
     # Reached the in-graph handoff cap before any agent even spoke? End the
     # turn (defensive — route_entry itself counts as one handoff step).
@@ -284,6 +300,24 @@ def build_route_entry(handoff_targets: set[str]):
         incoming_message = state.get("incoming_message", "") or ""
         incoming_sender = state.get("incoming_sender", "") or ""
         incoming_kind = state.get("incoming_kind", "") or ""
+
+        # ── 协作式停止守卫（StopSignal·task-17）────────────────
+        # ``GroupRuntime.request_stop()``（用户喊「停/stop/中断」）只 set 一个
+        # ``asyncio.Event``（软停·不强切）。route_entry 是回合入口节点，命中 stop
+        # 即不选发言者、直接 ``Command(goto=END)`` 结束回合——上一发言者已把当前
+        # step 跑完，本回合话筒落地，不 mid-stream 强切、不留半截消息。
+        # 这是双层停止的软停层；硬停层 ``cancel_turn``（先 set 再 task.cancel）由 UI
+        # 停止按钮走，与本守卫正交。runtime 经 ``worker.get_group_runtime()`` 从
+        # contextvar 取（``GroupRuntime.invoke_turn`` 在 ainvoke 前 set，finally 清）。
+        # ``None``（群图在 GroupRuntime 之外被 invoke / 测试直调）→ 守卫跳过，
+        # route_entry 按原逻辑分叉（向后兼容）。
+        rt = worker_mod.get_group_runtime()
+        if rt is not None and rt.is_stopped():
+            logger.debug(
+                "[group_graph] route_entry 协作式停止守卫命中：stop_event 已 set"
+                "（用户喊停），不选发言者，回合 END（上一发言者已说完，不 mid-stream 强切）",
+            )
+            return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
 
         turn_count = (state.get("turn_count") or 0) + 1
         if turn_count >= AGENT_NODE_MAX_HANDOFFS:
