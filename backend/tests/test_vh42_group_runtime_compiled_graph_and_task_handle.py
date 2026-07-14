@@ -64,7 +64,7 @@ def _read(p: Path) -> str:
     return p.read_text(encoding="utf-8")
 
 
-def assert_contract() -> list[str]:
+async def assert_contract() -> list[str]:
     errs: list[str] = []
     src = _read(GROUP_RUNTIME_PY)
 
@@ -103,7 +103,7 @@ def assert_contract() -> list[str]:
     # A2 + A3 显式 members → 编译 + stash
     try:
         rt = GroupRuntime(_FakeGroup())
-        g = asyncio.run(rt.compile_graph(members))
+        g = await rt.compile_graph(members)
         if rt._graph is None:
             errs.append("[A2] compile_graph 后 _graph 仍 None")
         elif rt._members != members:
@@ -117,7 +117,7 @@ def assert_contract() -> list[str]:
     try:
         from langgraph.pregel import Pregel
         rt = GroupRuntime(_FakeGroup())
-        asyncio.run(rt.compile_graph(members))
+        await rt.compile_graph(members)
         if not isinstance(rt._graph, Pregel):
             errs.append(f"[A3] _graph 应为编译图（Pregel/CompiledStateGraph），实际 {type(rt._graph).__name__}")
         elif getattr(rt._graph, "_group_id", None) != "g1":
@@ -152,7 +152,7 @@ def assert_contract() -> list[str]:
         db_agents = [_A("w1", "sp1"), _A("w2", "sp2"), _A("c1", "spCoord")]
         with patch("store.crud.list_group_members_with_agent", AsyncMock(return_value=db_members)), \
              patch("store.crud.list_agents", AsyncMock(return_value=db_agents)):
-            resolved = asyncio.run(rt._resolve_members())
+            resolved = await rt._resolve_members()
         ids = [m["agent_id"] for m in resolved]
         if "c1" in ids:
             errs.append(f"[B6] coordinator 应被 EXCLUDE（是 sub-node 非 agent_<id> 节点），实际 members={ids}")
@@ -172,7 +172,7 @@ def assert_contract() -> list[str]:
     try:
         rt = GroupRuntime(_FakeGroup())
         with patch.object(rt, "_resolve_members", AsyncMock(return_value=members)) as mock_resolve:
-            asyncio.run(rt.compile_graph())
+            await rt.compile_graph()
             if not mock_resolve.called:
                 errs.append("[B7] members=None 调 compile_graph 未调 _resolve_members")
             else:
@@ -195,7 +195,7 @@ def assert_contract() -> list[str]:
         elif rt._current_task is not task:
             errs.append("[C8] _start_turn_task 应 stash task 到 _current_task（镜像 _worker_task）")
         else:
-            r = asyncio.run(_await_task(task))
+            r = await _await_task(task)
             if r != {"ok": True}:
                 errs.append(f"[C8] task 结果应 {{'ok':True}}，实际 {r}")
             else:
@@ -242,7 +242,7 @@ def assert_contract() -> list[str]:
     try:
         async def _run_d12():
             rt = GroupRuntime(_FakeGroup())
-            asyncio.run(rt.compile_graph(members))
+            await rt.compile_graph(members)
 
             async def long_ainvoke():
                 try:
@@ -259,7 +259,7 @@ def assert_contract() -> list[str]:
                 cancelled = True
             return r, cancelled
 
-        r, cancelled = asyncio.run(_run_d12())
+        r, cancelled = await _run_d12()
         if r is not True:
             errs.append(f"[D12] 有活跃回合 cancel_turn 应返 True，实际 {r}")
         elif not cancelled:
@@ -287,7 +287,7 @@ def assert_contract() -> list[str]:
     # F15 vh41 停止契约不破（compile_graph 是新增能力，不改停止契约）
     try:
         rt = GroupRuntime(_FakeGroup())
-        asyncio.run(rt.compile_graph(members))
+        await rt.compile_graph(members)
         # request_stop / is_stopped / reset_stop / cancel_turn 仍工作
         if not rt.is_stopped():
             rt.request_stop()
@@ -313,7 +313,7 @@ async def _await_task(task):
 
 def main() -> int:
     print("=== VH42 回归：GroupRuntime 编译群图持有 + 当前回合 asyncio.Task 句柄 ===\n")
-    errs = assert_contract()
+    errs = asyncio.run(assert_contract())
     if errs:
         print("\nFAIL:")
         for e in errs:
