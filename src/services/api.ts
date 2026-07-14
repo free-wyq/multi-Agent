@@ -361,6 +361,33 @@ export const groupApi = {
     }
     return resp.blob()
   },
+  /**
+   * StopSignal UI 停止：POST /api/groups/{id}/stop-turn（task-23 后端端点）。
+   *
+   * 群图回合级停止——经后端 GroupRuntime.cancel_turn 双层停止：
+   *  ① ``_stop_event.set()`` 协作让步（任何将启动的节点 yield Command(goto=END)）；
+   *  ② ``_current_task.cancel()`` 硬切断流（CancelledError 传入流式 LLM async for
+   *     mid-stream 断流）。
+   * cancel 后后端 emit agent_status(idle) 给 Leader，UI 自动从「执行中」归位（cancelled
+   * 回合自己的 invoke_turn cancel 分支重抛不 emit idle，故本端点 owns 终端 UI 状态）。
+   *
+   * 区别 taskApi.stop（PL-11 驻留引擎 per-task 经 stop_task_by_id/request_cancel）——
+   * 本方法是群图整回合停止（StopTaskButton / busy-input 打断走它）。返回的 message
+   * 字段供 UI toast（task-26 StopTaskButton 保留 message 契约），cancelled 诊断字段
+   * 区分「真停了活跃回合」vs「无活跃回合 no-op」（不与自然完成竞态，两者都 200）。
+   */
+  stopTurn: (groupId: string) =>
+    http<GroupStopTurnResponse>('POST', `/api/groups/${groupId}/stop-turn`),
+}
+
+/** POST /api/groups/{id}/stop-turn 响应（StopSignal UI 停止，task-23）。 */
+export interface GroupStopTurnResponse {
+  ok: boolean
+  group_id: string
+  /** true=有活跃回合且已硬切（cancel_turn issued task.cancel）；false=无活跃回合 no-op。 */
+  cancelled: boolean
+  /** 人类可读结果文案，前端可直接 toast 提示（保留 message 字段契约供 StopTaskButton）。 */
+  message: string
 }
 
 // ── Plan API (M12 PL-02/PL-03 计划确认闭环) ─────────────────
