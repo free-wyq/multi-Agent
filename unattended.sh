@@ -122,6 +122,11 @@ main_loop() {
   TOTAL=${TOTAL:-0}
   COMPLETED=0
   LOOP_COUNT=0
+  # 防假完成状态（跨轮保持）：STALL_TASK/STALL_COUNT 跟踪同任务连续空转；
+  # HAD_ANY_COMMIT 标记全程是否至少有一次真 commit（无则疑假完成不退出）。
+  STALL_TASK=""
+  STALL_COUNT=0
+  HAD_ANY_COMMIT=""
 
   # 会话 id：首轮用 `claude -p`（无 --continue）开一个全新会话，从 stream-json 的
   # init 事件抓 session_id 落盘；后续轮次用 `claude --resume <id> -p` 续接这个会话。
@@ -140,6 +145,32 @@ main_loop() {
     COMPLETED=$((TOTAL - REMAINING))
 
     if [ "$REMAINING" -eq 0 ]; then
+      # 【防假完成·2026-07-14】REMAINING==0 不一定是真完成——worker「已完成检测」
+      # 误判会把骨架当实现完整，连轮空转假打勾到底（见 unattended-false-completion-bug）。
+      # 双重校验：只看 [~] 阻塞标记存在 = 之前有空转被跳过的任务，说明 .task.md 被假推进过，
+      # 此时 [ ] 归零是假的，不能退出，应报警让人工核实。
+      local BLOCKED_COUNT
+      BLOCKED_COUNT=$(grep -c '\[~\]' "$TASK_FILE" 2>/dev/null || true)
+      BLOCKED_COUNT=${BLOCKED_COUNT:-0}
+      if [ "$BLOCKED_COUNT" -gt 0 ]; then
+        log "⚠️ 检测到 $BLOCKED_COUNT 个 [~] 阻塞任务 + REMAINING=0：疑假完成，不退出，人工核实"
+        log "⚠️ 阻塞任务清单："
+        grep '\[~\]' "$TASK_FILE" 2>/dev/null | head -10 | while IFS= read -r line; do
+          log "   $line"
+        done
+        write_status "blocked" "疑假完成·$BLOCKED_COUNT 任务空转阻塞" 0 "$TOTAL"
+        # 不退出，挂起等待人工——看门狗会因无心跳在 60min 后判假死重启，
+        # 但重启后仍到此分支继续挂起，不会假退出。人工介入清理 [~] 后重跑。
+        sleep 300
+        continue
+      fi
+      # 进一步：要求最近若干轮有实质 commit 才信（无 commit 记录则疑空转假完成）
+      if [ -z "${HAD_ANY_COMMIT:-}" ]; then
+        log "⚠️ REMAINING=0 但全程零 commit：疑假完成（worker 全程空转打勾），不退出"
+        write_status "blocked" "疑假完成·全程零commit" 0 "$TOTAL"
+        sleep 300
+        continue
+      fi
       log "✅ 全部完成！共 $TOTAL 个任务"
       write_status "completed" "全部完成" 0 "$TOTAL"
       rm -f "$MAIN_PID_FILE"
@@ -190,6 +221,14 @@ main_loop() {
 5. 基于最佳实践自行推断，绝不索要任何额外信息。宁可基于合理假设推进，也不要停下来等。
 6. 遇到报错或失败，自己排查、自己修，不要向用户求助。
 
+## 已完成检测（防假完成铁律·2026-07-14 加）
+「该任务对应的代码可能已存在」≠「已实现完整」。必须区分：
+- ✅ 实现完整：目标函数/方法有**真实业务逻辑**（函数体非 pass / 非 raise NotImplementedError / 非 `return None` 占位 / 非纯 docstring+pass / 非 `_xxx = None` 占位 / 非 """TODO 后续任务填"""）。可调可跑、能产生预期效果。
+- ❌ 不算完成（必须继续实现）：只有**骨架/占位/TypedDict 或 class 声明/方法签名 + pass / `_graph = None` 占位 / docstring 说「由后续任务填」**。
+判定「已存在且完整」前，必须用 Read 打开函数体看**是不是真实逻辑**，不是看函数名是否存在。
+若发现只有骨架/占位 → 必须按任务要求**补完真实实现**，不能直接结束本轮空退（空退会被脚本判空转标 [~] 阻塞）。
+若任务依赖的前置真的没做（如要调的下游函数还不存在）→ 在本轮内创建该前置的最小可用实现，或调整到不依赖它的等价实现，自己拍板，不要空退。
+
 ## 本轮任务（只做这一个）
 任务：$CURRENT_TASK
 
@@ -237,11 +276,47 @@ main_loop() {
     # 【C 方案】脚本侧自动打勾：把第一个 [ ] 改成 [x]
     # 这样即使 claude 压缩会话后忘记打勾，进度也能推进
     # 注意：不用 && 串联，避免 set -e 在 sed 无匹配时（返回非0）误杀脚本
-    local TICK_RESULT
-    if sed -i '0,/^- \[ \]/s/^- \[ \]/- [x]/' "$TASK_FILE" 2>/dev/null; then
-      TICK_RESULT=ok
+    #
+    # 【防假完成·2026-07-14】打勾前先看本轮有没有真改动。worker「已完成检测」常把
+    # 骨架/占位误判成「实现完整」直接退，git diff 空 → 若照常打勾，会连轮空转把
+    # 整个 .task.md 假打勾到底，脚本判「全部完成」误退（见 unattended-false-completion-bug）。
+    # 修法：零改动时不打勾，连续 N 轮空转同任务 → 标 [~] 阻塞，避免无限空转 + 假完成退出。
+    local TICK_RESULT="skip-nochange"
+    local HAD_CHANGES=0
+    if [ -d .git ]; then
+      git add -A 2>/dev/null || true
+      if ! git diff --cached --quiet 2>/dev/null; then
+        HAD_CHANGES=1
+      fi
+    fi
+
+    if [ "$HAD_CHANGES" -eq 1 ]; then
+      # 有真改动 → 正常打勾
+      if sed -i '0,/^- \[ \]/s/^- \[ \]/- [x]/' "$TASK_FILE" 2>/dev/null; then
+        TICK_RESULT="ok"
+      else
+        TICK_RESULT="fail"
+      fi
     else
-      TICK_RESULT=fail
+      # 零改动：worker 判了「已完成」但没写代码。记录空转，不打勾，不退出。
+      # 连续 3 轮同任务空转 → 标 [~] 阻塞跳过该任务（避免无限空转 + 假完成）
+      local task_key
+      task_key=$(printf '%s' "$CURRENT_TASK" | head -c 120)
+      if [ -z "${STALL_TASK:-}" ] || [ "${STALL_TASK:-}" != "$task_key" ]; then
+        STALL_TASK="$task_key"
+        STALL_COUNT=1
+      else
+        STALL_COUNT=$((STALL_COUNT + 1))
+      fi
+      log "⏸️ 零改动空转 #$STALL_COUNT: $task_key"
+      if [ "${STALL_COUNT:-0}" -ge 3 ]; then
+        # 同任务连续空转 3 次 → 判定 worker 卡死，标 [~] 阻塞跳过，推进到下一任务
+        sed -i "0,/^${task_key//\//\\/}/s/^- \[ \]/- [~]/" "$TASK_FILE" 2>/dev/null || \
+          sed -i '0,/^- \[ \]/s/^- \[ \]/- [~]/' "$TASK_FILE" 2>/dev/null
+        TICK_RESULT="stalled-blocked"
+        log "🚧 任务连续空转 3 次已标 [~] 阻塞跳过，推进下一任务（避免无限空转）"
+        STALL_TASK=""; STALL_COUNT=0
+      fi
     fi
 
     # 打勾后重新计算剩余，写准确的完成状态
@@ -256,8 +331,9 @@ main_loop() {
 
     # 每轮结束自动 commit（仅本地，不 push）
     # 由脚本提交而非 Claude，保证提交信息统一、不误提交运行产物
-    if [ -d .git ]; then
-      git add -A 2>/dev/null || true
+    # 【防假完成·2026-07-14】HAD_CHANGES 已在打勾阶段算过，复用之，避免重复 git add
+    if [ "$HAD_CHANGES" -eq 1 ] && [ -d .git ]; then
+      # git add -A 已在打勾阶段执行过，此处直接判 staged
       if ! git diff --cached --quiet 2>/dev/null; then
         # 从任务行提取编号 [CF-01] 作为 scope，提取描述作 message
         # ⚠️ 命令替换必须 || true 兜底：无 [XX-NN] tag 的任务会让 grep 无匹配返回非0，
@@ -274,12 +350,15 @@ main_loop() {
         fi
         if git commit -m "$commit_msg" -m "Co-Authored-By: Claude <noreply@anthropic.com>" --no-verify --quiet 2>>"$LOG_FILE"; then
           log "📦 已提交: $commit_msg"
+          HAD_ANY_COMMIT=1  # 防假完成校验：全程至少有一次真 commit 才允许判完成
         else
           log "⚠️ 提交失败"
         fi
       else
-        log "📦 无改动，跳过提交"
+        log "📦 有改动但 staged 为空，跳过提交"
       fi
+    else
+      log "📦 无改动，跳过提交（空转 #$STALL_COUNT）"
     fi
 
     # 每 5 轮普通压缩一次；压缩后下一轮 Prompt 会强制重读 .task.md（见上）
