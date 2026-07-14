@@ -1,13 +1,19 @@
 {
   "permissions": {
     "allow": [
-      "Read(//home/wyq/.local/**)"
+      "Read(//home/wyq/.local/**)",
+      "Bash(python3 -c \"from engine.registry import AgentRegistry, AgentEngine, registry; print\\('registry imports OK'\\); print\\('has _runtimes:', hasattr\\(registry, '_runtimes'\\)\\); print\\('has ensure_runtime:', hasattr\\(registry, 'ensure_runtime'\\)\\); print\\('has get_runtime:', hasattr\\(registry, 'get_runtime'\\)\\)\")",
+      "Bash(python3 tests/test_vh42_group_runtime_compiled_graph_and_task_handle.py)",
+      "Bash(python3 tests/test_vh43_group_runtime_invoke_turn.py)",
+      "Bash(python3 tests/test_vh41_group_runtime_skeleton.py)",
+      "Bash(python3 tests/test_vh33_group_graph_assembly.py)",
+      "Bash(python3 tests/test_vh38_build_group_graph_full_topology.py)"
     ],
     "defaultMode": "bypassPermissions"
   },
+  "skipDangerousModePermissionPrompt": true,
   "thinking": {
     "type": "disabled"
   },
-  "skipDangerousModePermissionPrompt": true,
   "skipDangerousModePrompt": true
 }
