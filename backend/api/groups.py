@@ -10,6 +10,8 @@ Routes map to frontend `groupApi`:
   GET    /api/groups/{groupId}/members        → group_list_members   (flat: +agent_name/role)
   POST   /api/groups/{groupId}/members        → group_add_member     (body = {agentId, alias?})
   DELETE /api/groups/{groupId}/members/{mid}  → group_remove_member
+  POST   /api/groups/{groupId}/reset-session  → reset_session       (BE-02 /new)
+  POST   /api/groups/{groupId}/stop-turn       → stop_turn           (StopSignal UI stop)
   GET    /api/groups/{groupId}/files           → group_list_files
   GET    /api/groups/{groupId}/files/{name}   → download_file       (PL-12 artifact download)
 """
@@ -26,7 +28,7 @@ from pydantic import BaseModel
 
 from engine.registry import registry
 from engine.workspace import safe_path
-from events import emit_coordinator_plan, emit_message_added
+from events import emit_agent_status, emit_coordinator_plan, emit_message_added
 from llm import build_group_name_desc_prompt, chat_completion, extract_json, get_llm_config
 from models import Group, GroupCreatePayload, GroupFile, GroupMember
 from store import crud
@@ -305,6 +307,90 @@ async def reset_session(group_id: str) -> dict[str, Any]:
 @router.get("/{group_id}/files")
 async def list_files(group_id: str) -> list[GroupFile]:
     return await crud.list_files(group_id)
+
+
+@router.post("/{group_id}/stop-turn")
+async def stop_turn(group_id: str) -> dict[str, Any]:
+    """StopSignal UI stop: cancel the group's current decentralized turn.
+
+    ``POST /api/groups/{id}/stop-turn`` is the hard-stop backstop for the
+    decentralized swarm-graph turn (the StopTaskButton / busy-input interrupt
+    path). It resolves the group's ``GroupRuntime`` (lazily building it if
+    missing via ``registry.ensure_runtime``) and calls ``cancel_turn`` — the
+    TWO-layer stop from ``stop-signal-cooperative-cancel-design``:
+
+      1. ``_stop_event.set()`` — cooperative: any node about to START yields
+         (returns ``Command(goto=END)`` instead of speaking), so the current
+         speaker finishes its step.
+      2. ``self._current_task.cancel()`` — hard: ``CancelledError`` propagates
+         into the streaming LLM's ``async for`` and breaks the stream mid-stream
+         (the backstop for a long LLM call with no node boundary in sight).
+
+    This is distinct from the per-task PL-11 ``POST /api/tasks/{id}/stop``
+    (which cancels a *resident engine's* executing task via
+    ``request_cancel``). The decentralized group-graph turn is owned by
+    ``GroupRuntime`` (one ``graph.ainvoke`` = one turn), so its stop goes
+    through the runtime's ``cancel_turn``, not the per-task path.
+
+    After the cancel, emits ``agent_status(idle)`` for the group's Leader so
+    the UI retires the「执行中」state automatically — the cancelled turn does
+    NOT emit idle itself (``invoke_turn``'s cancel branch re-raises
+    ``CancelledError`` without emitting, so the stop-button path owns the
+    terminal UI state, mirroring PL-11's ``_on_task_cancelled``). A group with
+    no coordinator (decentralized-only) still cancels the turn; the idle emit
+    is skipped (no Leader agent_id to attribute it to).
+
+    Returns ``{ok, message, cancelled, group_id}``:
+      · ``cancelled=True`` — a turn was active + a hard cancel was issued
+        (the cooperative ``set()`` always happens first).
+      · ``cancelled=False`` — no active turn (``_current_task is None``);
+        idempotent no-op (the event is still set so a turn starting later
+        yields). Not an error — the stop already took effect (the turn ended
+        / never started), so callers don't need to race natural completion.
+
+    Never raises on a cold/unknown group: a group row that's gone or has no
+    built runtime returns ``cancelled=False`` + a「no active turn」message
+    (the event is the only state mutated; nothing to cancel).
+    """
+    # Resolve the runtime (lazy-build if missing — a group created after the
+    # last reload). ``None`` → group row gone or compile failed; degrade to a
+    # no-op stop (no turn to cancel, nothing to emit).
+    rt = await registry.ensure_runtime(group_id)
+    if rt is None:
+        logger.debug("[groups] stop-turn: group %s has no runtime (cold/gone)", group_id)
+        return {
+            "ok": True,
+            "group_id": group_id,
+            "cancelled": False,
+            "message": "无活跃回合可停止（群组未运行或已结束）",
+        }
+
+    cancelled = rt.cancel_turn()
+
+    # Emit agent_status(idle) for the Leader so the UI auto-updates — the
+    # cancelled turn's own invoke_turn branch re-raises without emitting idle
+    # (the stop-button path owns the terminal UI state). Resolve the Leader's
+    # display name for the status card (best-effort: a missing agent row → ""
+    # agent_name, the emit still fires so the status transitions to idle).
+    leader_name = ""
+    if rt.coordinator_id:
+        coord = await crud.get_agent(rt.coordinator_id)
+        if coord:
+            leader_name = coord.name
+        await emit_agent_status(
+            group_id, rt.coordinator_id, leader_name, "idle", None,
+        )
+
+    return {
+        "ok": True,
+        "group_id": group_id,
+        "cancelled": cancelled,
+        "message": (
+            "已停止当前回合（执行中已中断）"
+            if cancelled
+            else "无活跃回合可停止（可能已结束）"
+        ),
+    }
 
 
 @router.get("/{group_id}/files/{file_name:path}")
