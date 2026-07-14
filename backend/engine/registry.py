@@ -18,6 +18,7 @@ from typing import Any
 from engine import coordinator as coord_mod
 from engine import worker as worker_mod
 from engine.coordinator import build_coordinator_graph
+from engine.group_runtime import GroupRuntime
 from engine.inbox import (
     complete_task,
     get_inbox,
@@ -930,10 +931,80 @@ class AgentEngine:
 
 
 class AgentRegistry:
-    """group_id -> agent_id -> AgentEngine."""
+    """group_id -> agent_id -> AgentEngine  +  group_id -> GroupRuntime.
+
+    Dual-track (task-18 通电点):
+      · ``_engines`` (group_id -> agent_id -> ``AgentEngine``) — the *resident
+        per-agent* engines that own the task inbox + the single-agent LangGraph
+        graphs. The **execute path** stays here: ``_run_worker_task`` runs the
+        agentic loop (``execute_agent_task`` / ``create_react_agent`` + bind_tools)
+        with a cancellable ``_worker_task`` + the MT-17 timeout watchdog — mature
+        code that is not worth re-platforming onto the group graph. Retiring
+        ``AgentEngine`` would break execution's home + the task report-back
+        closure (the coordinator's ``node_handle_reply_group`` waits for an
+        ``agent_reply`` turn driven by the executor's completion), so the
+        residual engine keeps that role.
+      · ``_runtimes`` (group_id -> ``GroupRuntime``) — the *per-group turn
+        controller* for the decentralized swarm graph. Owns the compiled
+        ``build_group_graph`` + the cancellable turn ``asyncio.Task`` + the
+        cooperative stop signal. The **orchestration path** (chat / @mention /
+        plan-confirm / stop) moves here: ``GroupRuntime.invoke_turn`` /
+        ``resume_plan`` replace the resident ``_handle_notify`` three-ainvoke
+        site (task-19/20/22), and ``request_stop`` / ``cancel_turn`` replace
+        ``AgentEngine.request_cancel`` for the「停不下来」defect (task-23/24).
+
+    The two tracks are additive, not a flag: ``load_from_store`` builds BOTH a
+    ``GroupRuntime`` (compile_graph) per group AND the per-agent ``AgentEngine``
+    set, so execute (engine) + orchestration (runtime) are both live. The
+    resident engines are kept idle w.r.t. their inbox-driven notify loop for the
+    orchestration kinds that moved to the runtime (the runtime's
+    ``invoke_turn`` is the single inbound entry for those); they stay active for
+    ``task`` items (the execute path) + the resident notify kinds the runtime
+    does not yet own. This keeps every existing test (which drives the resident
+    ``AgentEngine._handle_notify`` / ``_run_worker_task`` directly) green while
+    wiring the runtime as the production inbound path — no test changes needed.
+    """
 
     def __init__(self) -> None:
         self._engines: dict[str, dict[str, AgentEngine]] = {}
+        self._runtimes: dict[str, GroupRuntime] = {}
+
+    async def ensure_runtime(self, group_id: str) -> GroupRuntime | None:
+        """Resolve (or lazily build) the per-group ``GroupRuntime``.
+
+        The runtime owns the compiled group graph + the turn task handle + the
+        stop signal. ``load_from_store`` pre-builds one per group at startup;
+        this is the lazy on-demand path for a group whose runtime is missing
+        (e.g. a race: a group created after startup, before the next reload).
+        Reads the group row to resolve ``coordinator_id`` + compiles the graph.
+        Returns ``None`` when the group row is gone (caller degrades to the
+        resident engine path). Idempotent: a second call returns the cached
+        runtime without recompiling.
+        """
+        rt = self._runtimes.get(group_id)
+        if rt is not None:
+            return rt
+        group = await crud.get_group(group_id)
+        if not group:
+            return None
+        rt = GroupRuntime(group)
+        await rt.compile_graph()
+        self._runtimes[group_id] = rt
+        logger.info(
+            "[registry] lazily built GroupRuntime for group=%s (coordinator=%s)",
+            group_id, rt.coordinator_id or "(none)",
+        )
+        return rt
+
+    def get_runtime(self, group_id: str) -> GroupRuntime | None:
+        """Return the group's ``GroupRuntime`` if built, else ``None``.
+
+        The synchronous accessor for the inbound-path wiring (route_user_message
+        etc.). Does NOT lazily build (that is async, ``ensure_runtime``); a
+        ``None`` return means ``load_from_store`` has not run for this group yet
+        (cold / new group) — callers fall back to the resident engine path.
+        """
+        return self._runtimes.get(group_id)
 
     async def add_engine(
         self,
@@ -972,9 +1043,17 @@ class AgentRegistry:
         # stop() flips status to offline + unregisters inbox but leaves the entry;
         # drop the whole group now that every engine is offline.
         self._engines.pop(group_id, None)
+        # dual-track (task-18): also tear down the per-group GroupRuntime so a
+        # disband reclaims the compiled graph + any in-flight turn task. The
+        # runtime has no inbox loop to cancel (a turn is one ``graph.ainvoke``),
+        # so ``cancel_turn`` drains any active turn; the compiled graph is
+        # dropped by the pop. Safe on a group with no runtime (no-op pop).
+        rt = self._runtimes.pop(group_id, None)
+        if rt is not None:
+            rt.cancel_turn()
         logger.info(
-            "[registry] stopped %d engine(s) for group %s (disband)",
-            stopped, group_id,
+            "[registry] stopped %d engine(s) for group %s (disband) runtime=%s",
+            stopped, group_id, "dropped" if rt else "absent",
         )
         return stopped
 
@@ -1044,6 +1123,19 @@ class AgentRegistry:
 
         同一群组内所有引擎共享同一个 coordinator_id，引擎据此判定谁是群主
         （谁 == coordinator_id 谁就是协调者），不依赖 role 字符串。
+
+        Dual-track (task-18): builds BOTH the per-agent ``AgentEngine`` set
+        (the execute path's home — ``_run_worker_task`` runs the agentic loop)
+        AND a per-group ``GroupRuntime`` (the orchestration path — the compiled
+        group graph + turn task handle + stop signal). The two tracks are
+        additive: keeping the engines intact means every existing execute-path
+        test stays green, while wiring the runtime as the production inbound
+        path for chat/@mention/plan-confirm/stop (the inbound entries swap to
+        ``GroupRuntime.invoke_turn`` / ``resume_plan`` in task-19/20/22). A
+        runtime whose group has no coordinator (single_chat / cold) still
+        compiles — the decentralized path (agent nodes) runs without a
+        coordinator subgraph branch, mirroring the resident engine's
+        single-chat = worker-graph degradation.
         """
         groups = await crud.list_groups()
         for g in groups:
@@ -1060,16 +1152,41 @@ class AgentRegistry:
                 agent = await crud.get_agent(m.agent_id)
                 if agent:
                     await self.add_engine(g.id, agent.model_dump(), coord_id, single)
+            # Build the per-group GroupRuntime (orchestration track) + compile
+            # its group graph. Lazy-member resolution happens inside
+            # compile_graph (reads the roster + system_prompts from the DB) so
+            # a member added after this loop is picked up on the next reload,
+            # same staleness window as the resident engines. A failure to
+            # compile degrades to the resident engine path (logged) rather than
+            # aborting the whole load — the engines for that group are still
+            # live for execute.
+            try:
+                rt = GroupRuntime(g)
+                await rt.compile_graph()
+                self._runtimes[g.id] = rt
+            except Exception:
+                logger.exception(
+                    "[registry] GroupRuntime compile failed for group=%s "
+                    "(degrading to resident-engine-only path)",
+                    g.id,
+                )
         logger.info(
-            "[registry] loaded %d group(s) with engines",
-            len(self._engines),
+            "[registry] loaded %d group(s) with engines, %d with group runtime",
+            len(self._engines), len(self._runtimes),
         )
 
     async def shutdown_all(self) -> None:
+        # dual-track (task-18): drain any in-flight group-graph turn first
+        # (cancel_turn is a no-op when no turn is active) so the compiled
+        # graphs are not left with a dangling task, then stop the resident
+        # engines + clear both maps.
+        for rt in list(self._runtimes.values()):
+            rt.cancel_turn()
         for group in list(self._engines.values()):
             for engine in list(group.values()):
                 await engine.stop()
         self._engines.clear()
+        self._runtimes.clear()
 
     def list_group_status(self, group_id: str) -> list[dict[str, Any]]:
         """Return agent statuses for a group (used by GET /api/status/{groupId})."""
@@ -1108,32 +1225,49 @@ class AgentRegistry:
         }
 
     async def reset_group_session(self, group_id: str) -> dict[str, int]:
-        """BE-02: clear cross-invoke state on every engine in a group.
+        """BE-02: clear cross-invoke state on every engine + the group runtime.
 
         Iterates every resident engine (coordinator + workers) in ``group_id``
         and calls :meth:`AgentEngine.reset_session` on each — wiping
         ``_memory`` / ``_dispatch_plan`` / ``_recent_routes`` / ``_pending_tasks``
-        without stopping the engines or touching the LangGraph graphs. Returns
-        ``{"reset": <count>}`` so the API layer can confirm how many engines were
-        affected (0 = group has no live engines, e.g. never started — the route
-        still clears persisted messages, so a reset on a cold group is a no-op on
-        the engine side but not an error).
+        without stopping the engines or touching the LangGraph graphs. Also
+        resets the per-group ``GroupRuntime`` (task-18): its ``reset_session``
+        resolves a dangling interrupt on the group graph's last turn thread +
+        wipes ``_memory`` / ``_dispatch_plan`` (the runtime's resident
+        cross-turn mirrors). Returns ``{"reset": <engine count>}`` so the API
+        layer can confirm how many engines were affected (0 = group has no live
+        engines, e.g. never started — the route still clears persisted messages,
+        so a reset on a cold group is a no-op on the engine side but not an
+        error).
 
         This is the registry-side counterpart of ``POST
         /api/groups/{id}/reset-session``: the route clears persisted messages
         (``crud.clear_messages_by_group``) + emits a cleared-plan bus event, then
-        calls this to clear the in-memory engine state. Safe on an unknown /
-        stopped group (returns ``{"reset": 0}``).
+        calls this to clear the in-memory engine + runtime state. Safe on an
+        unknown / stopped group (returns ``{"reset": 0}``).
         """
         group = self._engines.get(group_id)
         if not group:
+            # Still reset the runtime if one exists (a group with no engines but
+            # a compiled runtime — unusual but defensive): the runtime owns the
+            # group graph's cross-turn state + any dangling interrupt.
+            rt = self._runtimes.get(group_id)
+            if rt is not None:
+                await rt.reset_session()
             return {"reset": 0}
         count = 0
         for eng in list(group.values()):
             await eng.reset_session()
             count += 1
+        # dual-track (task-18): reset the group runtime's cross-turn mirrors +
+        # resolve its dangling interrupt alongside the engines. ``reset_session``
+        # cancels an in-flight turn first so it can't repopulate state as it
+        # unwinds (mirrors the engine-side cancel-then-clear).
+        rt = self._runtimes.get(group_id)
+        if rt is not None:
+            await rt.reset_session()
         logger.info(
-            "[registry] reset session on %d engine(s) in group %s",
+            "[registry] reset session on %d engine(s) + runtime in group %s",
             count, group_id,
         )
         return {"reset": count}
