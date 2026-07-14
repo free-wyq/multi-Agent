@@ -223,8 +223,8 @@ main_loop() {
 
 ## 已完成检测（防假完成铁律·2026-07-14 加）
 「该任务对应的代码可能已存在」≠「已实现完整」。必须区分：
-- ✅ 实现完整：目标函数/方法有**真实业务逻辑**（函数体非 pass / 非 raise NotImplementedError / 非 `return None` 占位 / 非纯 docstring+pass / 非 `_xxx = None` 占位 / 非 """TODO 后续任务填"""）。可调可跑、能产生预期效果。
-- ❌ 不算完成（必须继续实现）：只有**骨架/占位/TypedDict 或 class 声明/方法签名 + pass / `_graph = None` 占位 / docstring 说「由后续任务填」**。
+- ✅ 实现完整：目标函数/方法有**真实业务逻辑**（函数体非 pass / 非 raise NotImplementedError / 非 return-None 占位 / 非纯 docstring+pass / 非 _xxx=None 占位 / 非 TODO-docstring）。可调可跑、能产生预期效果。
+- ❌ 不算完成（必须继续实现）：只有**骨架/占位/TypedDict 或 class 声明/方法签名 + pass / _graph=None 占位 / docstring 说由后续任务填**。
 判定「已存在且完整」前，必须用 Read 打开函数体看**是不是真实逻辑**，不是看函数名是否存在。
 若发现只有骨架/占位 → 必须按任务要求**补完真实实现**，不能直接结束本轮空退（空退会被脚本判空转标 [~] 阻塞）。
 若任务依赖的前置真的没做（如要调的下游函数还不存在）→ 在本轮内创建该前置的最小可用实现，或调整到不依赖它的等价实现，自己拍板，不要空退。
