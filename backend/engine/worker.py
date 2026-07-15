@@ -27,6 +27,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Command
 
+from engine.agent_executor import _compose_system_prompt as _compose_skill_prompt
 from engine.inbox import push_task
 from engine.mention import find_mentions, resolve_mention
 from engine.reply import persist_agent_reply
@@ -558,6 +559,7 @@ async def make_agent_node(
     agent_role: str,
     system_prompt: str,
     coordinator_id: str,
+    mounted_skills: list[str] | None = None,
 ) -> Command:
     """Agent-as-node: one worker's brain→speak→handoff, returning a ``Command``.
 
@@ -666,6 +668,36 @@ async def make_agent_node(
     sys_for_invoke = system_prompt or ""
     if coordinator_id:  # group chat (has a Leader) → append team-interaction
         sys_for_invoke = (system_prompt or "") + "\n\n" + TEAM_INTERACTION_SUFFIX
+    # ── 技能注入（PL-06 · 修 handoff 断层）────────────────────────
+    # handoff 迁移后群聊路径 worker 走 ``make_agent_node``，不像驻留引擎的
+    # ``agent_executor.execute_agent_task`` 那样注入挂载技能 → 群聊 handoff 路径
+    # 发言时 worker 不带技能知识（断层）。这里镜像 agent_executor 的注入方式：
+    # 从 DB 解析 ``mounted_skills`` id 列表 → ``crud.resolve_skill_contents`` 取
+    # 全文 → ``_compose_skill_prompt``（即 agent_executor._compose_system_prompt，
+    # 单一真源·加「## 已挂载技能」头 + 编号技能块）拼进 ``sys_for_invoke``。
+    # 本任务只做全文注入（阶段二改渐进式披露：manifest 常驻 + 全文按需 load）。
+    # mounted_skills 优先用闭包绑的（build_agent_node 编译期从 DB 拉的 agent 定义，
+    # 与 system_prompt 同款 staleness 窗口）；为 None 时运行时从 DB 兜底拉一次
+    # （防御性·让 make_agent_node 单测直接构造节点也能命中技能注入）。
+    skill_ids = list(mounted_skills) if mounted_skills else []
+    if not skill_ids:
+        try:
+            agent_def = await crud.get_agent(agent_id)
+        except Exception:  # noqa: BLE001
+            agent_def = None
+        if agent_def is not None:
+            skill_ids = list(getattr(agent_def, "mounted_skills", None) or [])
+    if skill_ids:
+        try:
+            skill_contents = await crud.resolve_skill_contents(skill_ids)
+        except Exception:  # noqa: BLE001
+            skill_contents = []
+            logger.debug(
+                "[worker %s] resolve_skill_contents failed (skills dropped "
+                "this turn): mounted=%s", agent_name, skill_ids,
+            )
+        if skill_contents:
+            sys_for_invoke = _compose_skill_prompt(sys_for_invoke, skill_contents)
     messages = _build_agent_invoke_messages(
         sys_for_invoke, agent_role, agent_name, context, display_msg,
     )
@@ -764,15 +796,19 @@ def build_agent_node(
     agent_role: str,
     system_prompt: str,
     coordinator_id: str,
+    mounted_skills: list[str] | None = None,
 ):
     """Bind an agent's identity into a zero-arg LangGraph node function.
 
     ``StateGraph.add_node`` takes ``(name, fn)`` where ``fn(state) -> dict|Command``.
     This factory closes over the agent's identity (id/name/role/system_prompt/
-    the group's coordinator_id) so the compiled node knows who it is speaking
-    as — mirroring how ``AgentEngine`` caches ``self.agent_id`` / ``self.name``
-    / ``self.role`` / ``self.system_prompt`` / ``self.coordinator_id`` on the
-    resident worker graph.
+    the group's coordinator_id / mounted_skills) so the compiled node knows who it
+    is speaking as — mirroring how ``AgentEngine`` caches ``self.agent_id`` /
+    ``self.name`` / ``self.role`` / ``self.system_prompt`` / ``self.coordinator_id``
+    on the resident worker graph. ``mounted_skills`` is closure-bound at build
+    time (PL-06 group-graph skill injection · handoff 断层修复) — same staleness
+    window as ``system_prompt``: a skill mount/unmount after compile needs a
+    graph recompile (reload refreshes it).
 
     Returns a ``functools.partial`` over ``make_agent_node`` — a callable that
     LangGraph accepts as a node (it calls ``node(state)`` positionally, and
@@ -790,6 +826,7 @@ def build_agent_node(
         agent_role=agent_role,
         system_prompt=system_prompt,
         coordinator_id=coordinator_id,
+        mounted_skills=mounted_skills,
     )
     # name it for readability in LangGraph traces (not used for routing —
     # the group graph registers the node under its own ``agent_<id>`` key).

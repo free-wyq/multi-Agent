@@ -317,6 +317,12 @@ class GroupRuntime:
                 "agent_name": getattr(m, "agent_name", "") or "",
                 "agent_role": getattr(m, "agent_role", "") or "",
                 "system_prompt": getattr(agent, "system_prompt", "") or "" if agent else "",
+                # PL-06 group-graph skill injection (handoff 断层修复): carry
+                # mounted_skills so build_agent_node closure-binds them (same
+                # staleness window as system_prompt). agent_executor injected
+                # skills only on the resident execute path; the group-graph
+                # agent node now mirrors it.
+                "mounted_skills": list(getattr(agent, "mounted_skills", None) or []) if agent else [],
             })
         return members
 

@@ -495,6 +495,7 @@ def build_group_graph(
             agent_role=m.get("agent_role", ""),
             system_prompt=m.get("system_prompt", "") or "",
             coordinator_id=coordinator_id,
+            mounted_skills=m.get("mounted_skills") or None,
         )
         g.add_node(agent_node_name(agent_id), node)
 
