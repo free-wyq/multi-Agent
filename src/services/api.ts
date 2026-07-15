@@ -555,7 +555,7 @@ export const skillApi = {
   unmount: (id: string, agentId: string) =>
     http<AgentDefinition>('POST', `/api/skills/${id}/unmount`, { agentId }),
   /**
-   * SK-05: 上传 SKILL.md 文件作为技能入库。multipart/form-data：
+   * SK-05: 上传 SKILL.md 文件（或技能目录 zip）作为技能入库。multipart/form-data：
    * file（文件本体）+ name/description/source/tags（元数据 form 字段）。
    *
    * 不走通用 http<T> —— http 设 Content-Type: application/json 并
@@ -563,8 +563,13 @@ export const skillApi = {
    * 的 multipart Content-Type（手动设会缺 boundary 导致后端解析失败，与
    * downloadFile 同理：二进制/非 JSON 交互需独立 fetch）。
    *
+   * 两种上传形态（task34 起后端按文件扩展名自动分派，签名不变·加性兼容）：
+   *  - 单文件 SKILL.md：file content → Skill.content（原行为）
+   *  - 技能目录 zip（.zip）：解包 SKILL.md→content + scripts/+templates/→assets
+   *    （Claude Skills 一技能一目录自包含布局）
+   *
    * tags 是 string[]，后端 form 字段扁平需 JSON 编码字符串（后端 json.loads 解析）；
-   * 空数组不 append（后端缺省 []）。name 缺省时后端回退文件 stem（去 .md 扩展名），
+   * 空数组不 append（后端缺省 []）。name 缺省时后端回退文件 stem（去 .md/.zip 扩展名），
    * 故 name/description/source/tags 皆可选，仅 file 必填。
    */
   upload: async (
