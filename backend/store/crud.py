@@ -623,6 +623,10 @@ async def list_files(group_id: str) -> list[GroupFile]:
 
 
 def _skill_to_model(s: SkillEntity, mounted_to: list[str] | None = None) -> Skill:
+    # assets（阶段三·task33）：运行时从文件系统扫描，不落 DB。旧 content-only 技能
+    # 无 assets 目录 → list_skill_assets 返 []。import 在函数内避免循环依赖。
+    from store import skill_assets
+
     return Skill.model_validate(
         {
             "id": s.id,
@@ -639,6 +643,7 @@ def _skill_to_model(s: SkillEntity, mounted_to: list[str] | None = None) -> Skil
             "triggers": s.triggers or [],
             "outputs": s.outputs or [],
             "mounted_to": mounted_to or [],
+            "assets": skill_assets.list_skill_assets(s.id),
             "created_at": s.created_at,
             "updated_at": s.updated_at,
         }
@@ -729,6 +734,7 @@ async def update_skill(skill_id: str, payload: Any) -> Skill | None:
 
 async def delete_skill(skill_id: str) -> bool:
     from store.database import SessionLocal
+    from store import skill_assets
 
     async with SessionLocal() as db:
         row = await db.get(SkillEntity, skill_id)
@@ -742,7 +748,10 @@ async def delete_skill(skill_id: str) -> bool:
             a.mounted_skills = [s for s in (a.mounted_skills or []) if s != skill_id]
         await db.delete(row)
         await db.commit()
-        return True
+    # 阶段三·task33：DB 行删掉后清磁盘资产目录（scripts/templates）。best-effort：
+    # rmtree 失败只 log 不 raise，不阻塞 DB 删除（skill_assets.delete_skill_assets 已兜底）。
+    skill_assets.delete_skill_assets(skill_id)
+    return True
 
 
 async def mount_skill(agent_id: str, skill_id: str) -> AgentDefinition | None:

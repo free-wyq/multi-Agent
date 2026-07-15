@@ -38,6 +38,10 @@ class Skill(BaseModel):
     outputs: list[str] = []
     # agent ids this skill is mounted on (computed at read time, not stored)
     mounted_to: list[str] = []
+    # on-disk assets (scripts/ + templates/) under DATA_DIR/skills/{id}/ —
+    # computed at read time from the filesystem, not stored in DB (stage 3 · task33).
+    # Empty for old content-only skills with no assets dir.
+    assets: list[str] = []
     created_at: str = ""
     updated_at: str = ""
 
