@@ -5,7 +5,7 @@ import type { ComponentRef } from 'react'
 import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
-  taskApi,
+  groupApi,
   parseStats,
   safeRecord,
   type AgentDefinition,
@@ -491,11 +491,39 @@ export default function ChatPanel({
     getMemberDisplayName(m).toLowerCase().includes(mentionQuery.toLowerCase()),
   )
 
-  // PL-11：当前群组中正在 executing 的智能体（群聊头部停止按钮入口）。
+  // PL-11 + task-25：当前群组中「活跃」的智能体——停止按钮入口。
+  // 去中心化回合（闲聊/@人/成语接龙）下，发言人不走驻留引擎的 executing 状态机，
+  // 而是经 GroupRuntime 群图跑 handoff，活跃信号体现在流式缓冲：
+  //   - worker 流式：streaming[task_id] 有内容（但去中心化回合 worker 无 task_id，靠下条）
+  //   - 协调者流式：coordStreaming[reply_id] 有内容（协调者发言时按 reply_id 累积）
+  // 故活跃判定放宽为：status==='executing'（驻留引擎路径，有 current_task_id）
+  //   OR coordStreaming 当前群组有任一 reply_id 正在累积（去中心化协调者/worker发言）。
+  // 任一命中即渲染停止按钮（调 groupApi.stopTurn 硬停整个回合，见 task-26）。
+  // 注意：coordStreaming 是全局 Map（跨群组 reply_id），需按当前群组发言者过滤——
+  // reply_id 编码含 group_id（coordinator_reply:{group_id}:{ts}，见后端 emit_coordinator_token），
+  // 但为稳妥这里只判「本群有活跃流式」：取本群协调者 id 对照 coordStreaming key 前缀。
+  const coordinatorId = group?.coordinator_id
+  const hasActiveStream =
+    !!chatGroupId &&
+    (Object.keys(coordStreaming).length > 0 ||
+      Object.values(agentStatuses).some(
+        (a) => a.status === 'executing' && a.current_task_id,
+      ))
   const executingAgent = chatGroupId
     ? Object.values(agentStatuses).find(
         (a) => a.status === 'executing' && a.current_task_id,
-      )
+      ) ??
+      // 去中心化回合：无 executing agent 但有活跃流式 → 取协调者作为停止按钮的代理发言人
+      // （stopTurn 是回合级停止，不依赖具体 task_id，用协调者 id 作展示锚点即可）。
+      (hasActiveStream && coordinatorId
+        ? {
+            id: coordinatorId,
+            name: agentStatuses[coordinatorId]?.name || '协调者',
+            role: agentStatuses[coordinatorId]?.role || 'coordinator',
+            status: 'executing' as const,
+            current_task_id: null,
+          }
+        : undefined)
     : undefined
 
   // 计划含 pending 步骤 → 展示计划确认卡片（M12-PL02）。
@@ -794,16 +822,17 @@ export default function ChatPanel({
     // 发送即跟到底：用户主动发消息必然想看回复，强制贴底，回复/流式自动滚入视野。
     stickToBottomRef.current = true
 
-    // SH-08 busy_input_mode：若有 agent 正在 executing，回车发送前先 interrupt 当前任务
-    // （taskApi.stop）。语义：用户在智能体忙碌时回车输入 = 想打断它说新话，而非排队。
-    // stop 是 best-effort——失败不阻断发送（可能任务恰好刚结束 / 后端 no-op 200），
-    // 仅 toast 告知打断结果。stop 成功后引擎回 idle 会推 agent_status(idle) WS 事件，
+    // SH-08 busy_input_mode：若当前群组有活跃发言人（executing 或去中心化流式），
+    // 回车发送前先 interrupt 当前回合（task-26 起改调 groupApi.stopTurn——群图整回合
+    // 硬停，去中心化闲聊回合无 task_id，旧 taskApi.stop 打不中）。语义：用户在智能体
+    // 忙碌时回车输入 = 想打断它说新话，而非排队。
+    // stop 是 best-effort——失败不阻断发送（可能回合恰好刚结束 / 后端 no-op 200），
+    // 仅 toast 告知打断结果。stopTurn 成功后 stop-turn 端点 emit agent_status(idle)，
     // useBusEvent 自动刷新 agentStatuses。
-    const interrupting = executingAgent?.current_task_id
-    if (interrupting) {
+    if (executingAgent && chatGroupId) {
       try {
-        const resp = await taskApi.stop(interrupting, chatGroupId)
-        message.info(resp.message || `已打断 ${executingAgent!.name} 的任务`)
+        const resp = await groupApi.stopTurn(chatGroupId)
+        message.info(resp.message || `已打断 ${executingAgent.name} 的回合`)
       } catch (e) {
         // 打断失败不阻断发送——用户消息优先级高于打断结果
         message.warning(`打断失败（仍发送消息）：${e instanceof Error ? e.message : String(e)}`)
@@ -1055,7 +1084,6 @@ export default function ChatPanel({
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             {executingAgent && chatGroupId && (
               <StopTaskButton
-                taskId={executingAgent.current_task_id!}
                 groupId={chatGroupId}
                 agentName={executingAgent.name}
               />

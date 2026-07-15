@@ -27,7 +27,7 @@ const { Text } = Typography
  */
 export default function ChatView() {
   const { agents, activeGroup, refreshAll } = useSelection()
-  const { groupId, agentStatuses } = useBusEventContext()
+  const { groupId, agentStatuses, coordStreaming } = useBusEventContext()
   const { tts, updateTts } = useSettings()
 
   const [members, setMembers] = useState<GroupMember[]>([])
@@ -63,9 +63,34 @@ export default function ChatView() {
     ? agents.find((a) => a.id === activeGroup.coordinator_id)
     : null
 
-  // 执行中 agent（StopTaskButton 入口，群聊头部）。
+  // 执行中 agent（StopTaskButton 入口，群聊头部）。task-25：放宽为识别去中心化回合的
+  // 活跃发言人——闲聊/@人/成语接龙回合发言人不走驻留引擎 executing 状态机（无
+  // current_task_id），活跃信号体现在协调者流式缓冲 coordStreaming。任一命中即渲染停止按钮
+  // （task-26 起按钮调 groupApi.stopTurn 群图整回合硬停，不依赖 task_id）。coordStreaming
+  // 是全局 Map（跨群组 reply_id），但 useBusEvent 按当前 groupId 订阅 WS，非本群事件不会进
+  // 该 Map，故 length>0 即「本群有活跃流式」。
+  const coordinatorId = activeGroup.coordinator_id
+  const hasActiveStream =
+    !!groupId &&
+    (Object.keys(coordStreaming).length > 0 ||
+      Object.values(agentStatuses).some(
+        (a) => a.status === 'executing' && a.current_task_id,
+      ))
   const executingAgent = groupId
-    ? Object.values(agentStatuses).find((a) => a.status === 'executing' && a.current_task_id)
+    ? Object.values(agentStatuses).find(
+        (a) => a.status === 'executing' && a.current_task_id,
+      ) ??
+      // 去中心化回合：无 executing agent 但有活跃流式 → 取协调者作停止按钮的代理发言人
+      // （stopTurn 是回合级停止，不依赖具体 task_id，用协调者 id 作展示锚点即可）。
+      (hasActiveStream && coordinatorId
+        ? {
+            id: coordinatorId,
+            name: agentStatuses[coordinatorId]?.name || '协调者',
+            role: agentStatuses[coordinatorId]?.role || 'coordinator',
+            status: 'executing' as const,
+            current_task_id: null,
+          }
+        : undefined)
     : undefined
 
   return (
@@ -114,7 +139,6 @@ export default function ChatView() {
           </Tooltip>
           {executingAgent && groupId && !isSingleChat && (
             <StopTaskButton
-              taskId={executingAgent.current_task_id!}
               groupId={groupId}
               agentName={executingAgent.name}
             />

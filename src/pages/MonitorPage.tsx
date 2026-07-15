@@ -108,12 +108,14 @@ export default function MonitorPage() {
               </span>
             }
             extra={
-              /* PL-11：协调者 executing 时展示停止按钮（停止其当前 dispatch/handle_reply 任务） */
+              /* PL-11 / task-26：协调者 executing 时展示停止按钮。task-26 起按钮调
+                 groupApi.stopTurn 群图整回合硬停，不依赖 current_task_id——但监控页是
+                 per-agent 视图，协调者作为 Leader 卡片仍按 executing+current_task_id 判定
+                 （驻留 dispatch/handle_reply 路径有 task_id），保持原精确入口。 */
               coordinatorId &&
               agentStatuses[coordinatorId]?.status === 'executing' &&
               agentStatuses[coordinatorId]?.current_task_id ? (
                 <StopTaskButton
-                  taskId={agentStatuses[coordinatorId].current_task_id}
                   groupId={selectedGroup}
                   agentName={agentStatuses[coordinatorId]?.name}
                 />
@@ -152,7 +154,9 @@ export default function MonitorPage() {
                         <Tag color={statusInfo.color} style={{ marginInlineStart: 4, fontSize: 10 }}>
                           {statusInfo.label}
                         </Tag>
-                        {/* PL-11：执行中 Tab 标签内联停止按钮，点击直接停止该 worker 当前任务 */}
+                        {/* PL-11 / task-26：执行中 Tab 标签内联停止按钮。task-26 起调
+                            groupApi.stopTurn 群图整回合硬停（去中心化闲聊回合也能停），
+                            按 isExecuting+currentTaskId 判定保持 per-worker 精确入口。 */}
                         {isExecuting && currentTaskId && (
                           <span
                             // 阻止点击停止按钮时冒泡到 Tabs 切换
@@ -160,7 +164,6 @@ export default function MonitorPage() {
                             onMouseDown={(e) => e.stopPropagation()}
                           >
                             <StopTaskButton
-                              taskId={currentTaskId}
                               groupId={selectedGroup}
                               agentName={m.alias || m.agent_name}
                             />
