@@ -419,13 +419,38 @@ def build_worker_graph():
 
 
 def _parse_brain_decision(raw: str) -> dict:
-    """Parse the worker LLM JSON response into action/content/reasoning (Rust parse_brain_decision)."""
+    """Parse the worker LLM JSON response into action/content/reasoning (Rust parse_brain_decision).
+
+    先走严格 ``extract_json``（balanced-brace + ``json.loads``）。LLM 偶发吐出
+    非严格 JSON——``content`` 字段值里夹了未转义的双引号（如 ``"users"``）、
+    输出被截断没闭合、或在 ``}`` 后拖了散文——``extract_json`` 此时返 ``None``，
+    旧实现一律兜底成「抱歉，我这边有点卡壳」。但同一段 raw 在流式期已由
+    ``ContentExtractor`` 增量解码出完整可见正文并逐字推给前端气泡（``ContentExtractor``
+    只盯 ``content`` 字符串值、到尾引号即收，对骨架/截断/拖尾散文天然容忍）。结果是
+    **流式气泡渲染了真实回复、定稿回复却是兜底道歉**——前后端不同源（vb3「流式拼接
+    == 定稿回复」等式偶发 FAIL 的根因）。
+
+    修复：``extract_json`` 失败时，用 ``ContentExtractor.extract_final(raw)`` 兜底
+    恢复 ``content`` 字段值（与流式增量同源同机，逐字相等），只在连 ``content`` 都
+    提不到（真无 JSON / 空响应）时才退回道歉文案。``action``/``reasoning`` 在恢复
+    路径上取默认 ``chat``/``"parse_failed_recovered"``（标记走的是容错恢复而非严格解析，
+    便于审计；content 已是真值可正常发言 + handoff 解析，不阻断对话）。
+    """
     v = extract_json(raw)
     if v is None:
+        # 容错恢复：用流式同款 ContentExtractor 取 content 字段值（chunk-invariant，
+        # 与流式气泡逐字同源）。提取不到（真无 JSON / 空响应）才退回道歉。
+        recovered = ContentExtractor().extract_final(raw)
+        if not recovered:
+            return {
+                "action": "chat",
+                "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
+                "reasoning": "parse_failed",
+            }
         return {
             "action": "chat",
-            "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
-            "reasoning": "parse_failed",
+            "content": recovered,
+            "reasoning": "parse_failed_recovered",
         }
     action = str(v.get("action", "chat"))
     if action not in ("chat", "execute", "ask"):

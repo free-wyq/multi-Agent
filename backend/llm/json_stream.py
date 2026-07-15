@@ -167,5 +167,28 @@ class ContentExtractor:
         self._out = ""
         return out
 
+    def extract_final(self, raw: str) -> str:
+        """Recover the decoded ``content`` field from a *complete* raw LLM blob.
+
+        Best-effort recovery used when the stricter ``extract_json`` fails to parse
+        the whole envelope (e.g. the LLM emitted an unescaped quote inside
+        ``content``, truncated the output before the closing brace, or appended
+        trailing prose after ``}``). ``extract_json`` then returns ``None`` and the
+        caller would otherwise fall back to a generic apology — discarding the
+        real reply that was already streamed token-by-token via the same
+        ``ContentExtractor`` machine.
+
+        This feeds ``raw`` through a *fresh* machine (no interaction with the
+        streaming instance's state) and returns whatever content it recovered —
+        identical to what incremental ``feed``/``take`` would have produced on the
+        same bytes (the machine is chunking-invariant), so the persisted reply
+        stays byte-identical to the streamed bubbles. Returns ``""`` only when no
+        ``"content"`` string value was found at all (genuinely empty / no JSON).
+        Non-mutating on the streaming instance: it builds its own extractor.
+        """
+        ex = ContentExtractor()
+        ex.feed(raw)
+        return ex.take()
+
 
 __all__ = ["ContentExtractor"]
