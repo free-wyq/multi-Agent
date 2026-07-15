@@ -592,12 +592,19 @@ async def make_agent_node(
     agent 一回合不被驱动两次」做成图内硬约束（顺序乱根因①/②的图内兜底）。
     ``recent_speakers`` 由 ``append_list`` reducer 累加，跨 handoff 在 GroupState 单一真源。
 
-    The ``update`` payload always carries the agent's appended ``AIMessage``
-    (so ``GroupState.messages`` accumulates the turn's dialogue across
-    handoffs via the ``add_messages`` reducer), bumps ``turn_count`` (in-graph
-    handoff-chain-length backstop, capped by ``AGENT_NODE_MAX_HANDOFFS``),
-    and appends ``agent_id`` to ``recent_speakers`` (per-turn「same agent not
-    driven twice」guard, complementing handoff's natural serial-only-one-node).
+    The ``update`` payload carries the agent's appended ``AIMessage`` (so
+    ``GroupState.messages`` accumulates the turn's dialogue across handoffs via
+    the ``add_messages`` reducer) and appends ``agent_id`` to
+    ``recent_speakers`` (per-turn「same agent not driven twice」guard,
+    complementing handoff's natural serial-only-one-node).
+
+    ``turn_count`` is NOT bumped here — ``route_entry`` owns the handoff-chain
+    cap end-to-end (it bumps + checks ``AGENT_NODE_MAX_HANDOFFS`` on every
+    entry). The agent node writing the reducer-less ``turn_count`` /
+    ``current_speaker`` last-value channels would collide with a concurrent
+    ``Send``-fan-out sibling (``InvalidUpdateError: Can receive only one value
+    per step``). ``current_speaker`` is only advanced on the serial handoff
+    branch (single writer this superstep).
 
     Identity (``agent_id``/``agent_name``/``agent_role``/``system_prompt``) is
     closed-over by ``build_agent_node`` so the compiled node knows who it is
@@ -753,26 +760,37 @@ async def make_agent_node(
             group_id, coordinator_id, agent_id, content,
         )
 
-    # 5. decide turn end vs handoff. Cap the handoff chain length as an
-    # in-graph anti-loop backstop (recent_speakers+turn_count are the per-turn
-    # guards; this is the hard ceiling so a runaway @mention loop can't burn
-    # the whole recursion budget before LangGraph's own limit trips).
-    turn_count = (state.get("turn_count") or 0) + 1
+    # 5. decide turn end vs handoff. ``turn_count`` (the in-graph handoff-chain
+    # cap backstop, ``AGENT_NODE_MAX_HANDOFFS``) + ``current_speaker`` are
+    # last-value (no-reducer) channels — LangGraph forbids two nodes writing
+    # them in the SAME superstep (``InvalidUpdateError: Can receive only one
+    # value per step``). The peer-handoff path is serial (one agent node per
+    # superstep → each bump lands in its own superstep → last-write-wins merges
+    # cleanly), so it owns both. The dispatch fan-out path
+    # (``incoming_kind == "coordinator_task"`` — a ``Send`` from
+    # ``node_dispatch_next_group``) runs N agent nodes in ONE superstep; there
+    # each agent executes→END and writes NEITHER (the per-step owner is already
+    # on ``dispatch_plan`` step.agent_id + the appended ``recent_speakers``).
+    is_dispatch_fanout = state.get("incoming_kind", "") == "coordinator_task"
     recent_speakers = [agent_id]  # appended via reducer to the running list
-    reached_cap = turn_count >= AGENT_NODE_MAX_HANDOFFS
-    if reached_cap:
-        logger.debug(
-            "[worker %s] agent-node turn_count=%d reached cap=%d, end turn",
-            agent_name, turn_count, AGENT_NODE_MAX_HANDOFFS,
-        )
-        next_speaker = None
-
     update: dict[str, Any] = {
         "messages": [AIMessage(content=content, name=agent_name, id=msg_id)],
-        "turn_count": turn_count,
         "recent_speakers": recent_speakers,
-        "current_speaker": agent_id,
     }
+    if not is_dispatch_fanout:
+        # serial peer path: own the cap + the speaker baton (single writer this
+        # superstep). route_entry pre-bumped turn_count for the first speaker;
+        # subsequent hops bump here. ``current_speaker`` defaults to self on
+        # END, advances to next_speaker on handoff (set below).
+        turn_count = (state.get("turn_count") or 0) + 1
+        if turn_count >= AGENT_NODE_MAX_HANDOFFS:
+            logger.debug(
+                "[worker %s] agent-node turn_count=%d reached cap=%d, end turn",
+                agent_name, turn_count, AGENT_NODE_MAX_HANDOFFS,
+            )
+            next_speaker = None
+        update["turn_count"] = turn_count
+        update["current_speaker"] = agent_id
     # The memory reducer appends; emit nothing if this turn produced no memo.
     # (Kept minimal: agent nodes don't push memory in the first cut; the
     # field exists on GroupState for future per-turn memos without a schema
@@ -786,6 +804,9 @@ async def make_agent_node(
     # collisions with coordinator sub-node names like "classify"/"llm_decide").
     # NOTE: LangGraph forbids ':' and '|' in node names (reserved), so the
     # convention is ``agent_<id>`` (underscore separator), not ``agent:<id>``.
+    # ``current_speaker`` advances to the next speaker ONLY on this serial
+    # handoff path (single writer this superstep → no last-value collision).
+    # The fan-out dispatch path above never reaches here (execute → END).
     update["current_speaker"] = next_speaker
     return Command(goto=f"agent_{next_speaker}", update=update)
 

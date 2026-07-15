@@ -65,43 +65,66 @@ class PlanModifyBody(BaseModel):
     steps: list[PlanModifyStep] = Field(default_factory=list)
 
 
-async def _require_coordinator_engine(group_id: str):
-    """Resolve the group + its coordinator engine, 404 if either is missing."""
+async def _require_coordinator_runtime(group_id: str):
+    """Resolve the group + its per-group ``GroupRuntime`` (the plan host).
+
+    task-19③: the plan endpoints now read/resume against the per-group
+    ``GroupRuntime`` (the decentralized swarm graph's turn controller) instead
+    of the resident per-agent ``AgentEngine``. The plan's source of truth — the
+    paused ``dispatch`` interrupt + the ``dispatch_plan`` mirror — lives on the
+    runtime (``rt._dispatch_plan`` + the runtime's checkpointer thread), so the
+    pending guards + the modify patch source read ``rt``. 404 if the group row
+    is gone; 409 if it has no coordinator or the runtime won't resolve/build
+    (cold race that ``ensure_runtime`` couldn't satisfy, or a compile failure).
+    """
     group = await crud.get_group(group_id)
     if not group:
         raise HTTPException(status_code=404, detail="group not found")
     if not group.coordinator_id:
         raise HTTPException(status_code=409, detail="group has no coordinator")
-    engine = registry.get_engine(group_id, group.coordinator_id)
-    if engine is None:
-        raise HTTPException(status_code=409, detail="coordinator engine not running")
-    return group, engine
+    try:
+        rt = await registry.ensure_runtime(group_id)
+    except Exception:
+        # ensure_runtime only returns None when the group row is gone (already
+        # 404'd above); a real failure here is a compile error — degrade to 409
+        # rather than 500-ing a plan-confirm click (B31 错误处理重巡航：降级语义
+        # 保留 + debug 可观测，与 _read_resident_plan 的 checkpointer 降级同款).
+        logger.debug(
+            "[plan] ensure_runtime failed for group %s — degrading to 409",
+            group_id, exc_info=True,
+        )
+        rt = None
+    if rt is None:
+        raise HTTPException(status_code=409, detail="coordinator runtime not running")
+    return group, rt
 
 
 @router.get("/{group_id}/plan")
 async def plan_get(group_id: str) -> dict[str, Any]:
     """Return the coordinator's resident plan (PL-10 重连后重拉历史).
 
-    The plan lives in the coordinator graph's MemorySaver checkpointer — the
-    source of truth since the M12 interrupt migration (``node_dispatch``
-    checkpoints the plan on the interrupt turn via the ``replace_value``
-    reducer). On a frontend WS reconnect the bus may have dropped
-    ``coordinator_plan`` events, so this endpoint lets the client re-fetch the
-    authoritative current plan by reading the checkpointer thread state
-    (``graph.get_state(thread_id).values.get("dispatch_plan")``). If the
-    coordinator engine isn't running (group fresh, or backend just restarted
-    and hasn't re-seeded) — or its graph thread has no checkpoint yet (never
-    reached ``node_dispatch``) — returns an empty plan; an absent engine or
-    empty thread is not an error condition here.
+    task-19③: the plan lives on the per-group ``GroupRuntime`` (the
+    decentralized group graph's turn controller) — the source of truth since
+    the handoff migration. The runtime's checkpointer thread holds the
+    ``dispatch`` interrupt + the ``dispatch_plan`` state (the same thread a
+    prior ``invoke_turn`` paused at ``node_dispatch``'s ``interrupt()``). On a
+    frontend WS reconnect the bus may have dropped ``coordinator_plan``
+    events, so this endpoint lets the client re-fetch the authoritative current
+    plan by reading the runtime's checkpointer thread state
+    (``rt._graph.get_state(thread_id).values.get("dispatch_plan")``). If the
+    runtime isn't built (group fresh / backend just restarted and hasn't
+    re-seeded via ``load_from_store``) — or its thread has no checkpoint yet
+    (never reached ``node_dispatch``) — returns an empty plan; an absent
+    runtime or empty thread is not an error condition here.
     """
     group = await crud.get_group(group_id)
     if not group:
         raise HTTPException(status_code=404, detail="group not found")
     plan: list[dict[str, Any]] = []
     if group.coordinator_id:
-        engine = registry.get_engine(group_id, group.coordinator_id)
-        if engine is not None:
-            plan = await _read_resident_plan(engine)
+        rt = registry.get_runtime(group_id)
+        if rt is not None:
+            plan = await _read_resident_plan(rt)
     return {
         "ok": True,
         "group_id": group_id,
@@ -110,42 +133,58 @@ async def plan_get(group_id: str) -> dict[str, Any]:
     }
 
 
-async def _read_resident_plan(engine) -> list[dict[str, Any]]:
-    """Read the coordinator's resident plan from the checkpointer (source of truth).
+async def _read_resident_plan(rt) -> list[dict[str, Any]]:
+    """Read the resident plan from the runtime's checkpointer (source of truth).
 
-    Prefers the graph's checkpointer thread state
-    (``get_state(thread_id).values.get("dispatch_plan")``) — the single source
-    of truth since the M12 interrupt migration — falling back to the engine's
-    ``_dispatch_plan`` mirror only if the checkpointer read fails (best-effort:
-    a checkpointer error degrades to the mirror rather than 500-ing the read).
-    A coordinator thread that never reached ``node_dispatch`` (cold / idle /
-    auto_confirm-only that went straight to chat) has no ``dispatch_plan`` in
-    its checkpointed state → returns ``[]``. Worker graphs hold no plan (no
-    dispatch node), so a worker engine returns ``[]`` — but this helper is only
-    called on the group's coordinator (see ``plan_get``), so the worker case is
-    defensive only.
+    Prefers the group graph's checkpointer thread state
+    (``rt._graph.get_state(thread_id).values.get("dispatch_plan")``) — the
+    single source of truth since the handoff migration — falling back to the
+    runtime's ``_dispatch_plan`` mirror only if the checkpointer read fails
+    (best-effort: a checkpointer error degrades to the mirror rather than
+    500-ing the read).
+
+    Thread-id key (the坑 task-19③ carries over from ``resume_plan``):
+    ``GroupRuntime`` mints a FRESH thread per ``invoke_turn``
+    (``{thread_id}:{seq}``); the thread a dispatch paused on is the runtime's
+    last turn's thread — read with the same key ``resume_plan`` uses
+    (``group_runtime.py:811``): ``f"{rt.thread_id}:{rt._turn_seq}"`` if a turn
+    has run, else ``rt.thread_id`` (a cold runtime with ``_turn_seq==0`` that
+    never invoked → no checkpoint → returns ``[]``, matching a cold
+    coordinator's behavior).
     """
     try:
-        snapshot = engine.graph.get_state(
-            config={"configurable": {"thread_id": engine.thread_id}}
+        thread_id = (
+            f"{rt.thread_id}:{rt._turn_seq}" if getattr(rt, "_turn_seq", 0) else rt.thread_id
+        )
+        graph = getattr(rt, "_graph", None) or getattr(rt, "graph", None)
+        snapshot = graph.get_state(
+            config={"configurable": {"thread_id": thread_id}}
         )
         cp_plan = (snapshot.values or {}).get("dispatch_plan")
         if cp_plan:
             return [dict(s) for s in cp_plan]
+        # No ``dispatch_plan`` in the checkpointed thread state — fall through to
+        # the mirror (a runtime that reached dispatch syncs it; a cold/idle
+        # runtime has [] there too). Returning [] here would mask a populated
+        # mirror on a thread that checkpointed no dispatch_plan (e.g. a fresh
+        # thread for an agent_reply peer-handoff turn), so prefer the mirror.
+        mirror = getattr(rt, "_dispatch_plan", None)
+        if mirror:
+            return [dict(s) for s in mirror]
         return []
     except Exception:
         # best-effort: degrade to the mirror rather than 500-ing the read.
         # Logged at debug (not exception): a checkpointer read miss on a
-        # cold/idle/auto_confirm-only coordinator is the documented normal path
+        # cold/idle/auto_confirm-only runtime is the documented normal path
         # (no dispatch_plan checkpointed), so exception-level logging would flag
         # normal traffic as errors (B31 错误处理重巡航——原裸 `return` 吞掉异常
         # 不可观测；降级语义保留，补 debug + exc_info 让真 checkpointer 故障可查).
         logger.debug(
             "[plan] checkpointer state read failed for group %s — "
-            "degrading to in-memory mirror", getattr(engine, "group_id", "?"),
+            "degrading to in-memory mirror", getattr(rt, "group_id", "?"),
             exc_info=True,
         )
-        return [dict(s) for s in engine._dispatch_plan]
+        return [dict(s) for s in rt._dispatch_plan]
 
 
 @router.post("/{group_id}/plan/confirm")
@@ -158,8 +197,8 @@ async def plan_confirm(group_id: str) -> dict[str, Any]:
     returns the payload and the graph fans out the pending steps via
     ``dispatch_next``, skipping the LLM. The plan is *not* mutated.
     """
-    group, engine = await _require_coordinator_engine(group_id)
-    if not any(s.get("status") == "pending" for s in engine._dispatch_plan):
+    group, rt = await _require_coordinator_runtime(group_id)
+    if not any(s.get("status") == "pending" for s in rt._dispatch_plan):
         raise HTTPException(status_code=409, detail="no pending plan to confirm")
     await route_plan_resume(group_id, {"mode": "confirm"})
     return {
@@ -180,7 +219,7 @@ async def plan_direct(group_id: str) -> dict[str, Any]:
     ``interrupt()`` returns the payload and the graph fans out the pending
     steps. The mode persists in the group config across engine restarts.
     """
-    group, engine = await _require_coordinator_engine(group_id)
+    group, rt = await _require_coordinator_runtime(group_id)
     # flip the config flag (merge so we don't clobber a co-existing leader_strategy
     # — crud.update_group now merges config keys additively, but build the merged
     # dict here too so the in-memory view stays consistent before the DB write)
@@ -189,7 +228,7 @@ async def plan_direct(group_id: str) -> dict[str, Any]:
     await crud.update_group(group_id, _GroupConfigUpdate(config=config))
     # resume the resident plan if any
     resumed = False
-    if any(s.get("status") == "pending" for s in engine._dispatch_plan):
+    if any(s.get("status") == "pending" for s in rt._dispatch_plan):
         await route_plan_resume(group_id, {"mode": "direct"})
         resumed = True
     return {
@@ -216,11 +255,11 @@ async def plan_modify(group_id: str, body: PlanModifyBody) -> dict[str, Any]:
     re-announced with the patched plan so the card reflects the edit before
     the resume fans out.
     """
-    group, engine = await _require_coordinator_engine(group_id)
-    if not engine._dispatch_plan:
+    group, rt = await _require_coordinator_runtime(group_id)
+    if not rt._dispatch_plan:
         raise HTTPException(status_code=409, detail="no resident plan to modify")
 
-    plan = [dict(s) for s in engine._dispatch_plan]
+    plan = [dict(s) for s in rt._dispatch_plan]
     by_step = {s.get("step"): s for s in plan}
     for patch in body.steps:
         target = by_step.get(patch.step)

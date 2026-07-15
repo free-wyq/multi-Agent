@@ -116,7 +116,7 @@ BASE = "http://localhost:8000"
 BACKEND_MAIN = "/home/wyq/work/project/multi-Agent/backend/main.py"
 DATA_DIR = str(Path.home() / ".local" / "share" / "multi-agent")
 
-TIMEOUT = 20.0
+TIMEOUT = 120.0
 RELOAD_WAIT = 45.0
 SUMMARY_TIMEOUT = 300.0  # 等完整串行链路（步骤1执行+report-back+调整+剩余步骤派发执行+汇总）；LLM 可能据结果新增步骤，链路变长需足量窗口
 

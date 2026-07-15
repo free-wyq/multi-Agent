@@ -26,8 +26,11 @@
        ——反例防退化：不能只反向清键不查同方向（那样 A 连发两次 @B 会无限路由）；也不能只查
        同方向不反向清键（那样来回只能 2 轮就死）。两者必须同在。
 
-  D. route_user_message 重置 _a2a_turns + cap 兜底
-    9. route_user_message 入口 ``_a2a_turns[group_id] = 0``——用户每发新消息重置预算。
+  D. route_user_message 不再依赖 _a2a_turns（task-19 去中心化路径）
+    9. route_user_message 切 GroupRuntime.invoke_turn 后，不再清 ``_a2a_turns[group_id]=0``
+       （入站话筒交给群图 handoff 边 + GroupState.turn_count / recent_speakers 防连发，
+       旧 _a2a_turns 预算重置只服务 route_mentions 的 legacy 防循环——双轨期保留）。
+       断言锁定：route_user_message 函数体不含 ``_a2a_turns[group_id] = 0``。
    10. _A2A_CAP env 可调 + 默认 50（``os.environ.get("MULTI_AGENT_A2A_TURNS", "50")``）。
    11. route_mentions 达 cap 不再 push（``if _a2a_turns.get(group_id,0) >= _A2A_CAP: return``）。
    12. route_mentions push 后 ``_a2a_turns[group_id] += 1``（计数累加，cap 才有依据）。
@@ -166,15 +169,18 @@ def assert_contract() -> list[str]:
         else:
             print("[C8] OK  30s 过期清理 stale + recent_routes.pop(k)（防循环计数不堆积）")
 
-    # ── D. route_user_message 重置 _a2a_turns + cap 兜底 ──
-    # [9] route_user_message 入口 _a2a_turns[group_id] = 0
+    # ── D. route_user_message 不再依赖 _a2a_turns（task-19 去中心化路径）──
+    # [9] route_user_message 切 GroupRuntime.invoke_turn 后不再清 _a2a_turns[group_id]=0
+    # （入站话筒交给群图 handoff 边 + GroupState.turn_count / recent_speakers 防连发；
+    # 旧 _a2a_turns 只服务 route_mentions 的 legacy 防循环，双轨期保留——不再由
+    # route_user_message 入口重置）。
     rum_body = _fn_body(mention, "route_user_message", indent_opts=("", "    "))
     if not rum_body:
         errs.append("[D9] route_user_message 函数体未找到")
-    elif "_a2a_turns[group_id] = 0" not in rum_body:
-        errs.append("[D9] route_user_message 入口未重置 _a2a_turns[group_id]=0（上轮触顶后新消息卡住）")
+    elif "_a2a_turns[group_id] = 0" in rum_body:
+        errs.append("[D9] route_user_message 仍含 _a2a_turns[group_id]=0（task-19 切群图后应移除）")
     else:
-        print("[D9] OK  route_user_message 入口 _a2a_turns[group_id]=0（用户新消息重置预算）")
+        print("[D9] OK  route_user_message 不再重置 _a2a_turns（话筒交群图 handoff，legacy cap 双轨保留）")
 
     # [10] _A2A_CAP env 可调 + 默认 50
     m_cap = re.search(
@@ -242,8 +248,8 @@ def main() -> int:
         "群级共享 dict（None→_get_recent_routes），允许 A→B→A→B 持续交替（非 per-engine 打不中对方）；\n"
         "  · C 同方向 30s 连发被拦（if key in recent_routes: continue）+ 30s 过期清理 stale+pop——"
         "防死循环（A 连发两次 @B 挡掉），与反向清键同在（缺任一=退化）；\n"
-        "  · D route_user_message 入口 _a2a_turns[group_id]=0（用户新消息重置预算）+ "
-        "_A2A_CAP env 可调默认 50 + 达 cap 不 push + push 后计数累加——兜底防无限刷屏；\n"
+        "  · D route_user_message 不再重置 _a2a_turns（task-19 切群图 handoff 边）+ "
+        "_A2A_CAP env 可调默认 50 + 达 cap 不 push + push 后计数累加——route_mentions 双轨防循环保留；\n"
         "  · E dispatcher._dispatch_one 仍直调 push_task（DAG 调度不经 route_mentions）——"
         "工程任务仍走 execute 重路径，A2A 改 push_notify 只影响 @mention 路由层。"
     )

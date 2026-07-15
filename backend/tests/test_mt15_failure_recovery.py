@@ -107,7 +107,7 @@ BASE = "http://localhost:8000"
 BACKEND_MAIN = "/home/wyq/work/project/multi-Agent/backend/main.py"
 DATA_DIR = str(Path.home() / ".local" / "share" / "multi-agent")
 
-TIMEOUT = 20.0
+TIMEOUT = 120.0
 RELOAD_WAIT = 45.0
 SUMMARY_TIMEOUT = 200.0  # 等失败→恢复决策→(可能重派再失败)→summarate 完整链路
 

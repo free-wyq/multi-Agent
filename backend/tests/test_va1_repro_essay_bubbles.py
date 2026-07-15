@@ -124,7 +124,14 @@ async def all_idle(group_id: str) -> bool:
 
 
 async def send_message(group_id: str, content: str) -> dict:
-    async with httpx.AsyncClient() as c:
+    # group-chat coordinator turns run the whole group-graph ainvoke inside the
+    # POST handler (route_user_message → GroupRuntime.invoke_turn blocks until
+    # the turn ends, 13–42s for a coordinator plan+dispatch+summary chain).
+    # httpx's default 5s read timeout raises ReadTimeout on the group-chat
+    # scenario while single-chat (worker brain, ~2s) is unaffected. The
+    # coordinator ainvoke is the real blocking work — give it the full turn
+    # window (mirrors mt14/mt15's SUMMARY_TIMEOUT posture).
+    async with httpx.AsyncClient(timeout=300.0) as c:
         r = await c.post(
             f"{BASE}/api/messages",
             json={

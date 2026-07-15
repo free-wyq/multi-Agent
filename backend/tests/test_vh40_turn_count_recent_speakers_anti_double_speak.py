@@ -135,6 +135,7 @@ def assert_contract() -> list[str]:
                 "group_id": "g1", "coordinator_id": "c1",
                 "turn_count": 1, "recent_speakers": recent_speakers,
                 "incoming_message": "接", "incoming_sender": "user",
+                "incoming_kind": "agent_reply",
             })
         return cmd, brain_called
 
@@ -229,8 +230,12 @@ def assert_contract() -> list[str]:
         errs.append(f"[C] 真 StateGraph 防连发端到端测试异常：{type(e).__name__}: {e}")
 
     # ── D. turn_count 不因守卫命中错位 ────────────────────────
-    # 守卫命中时 update 只写 current_speaker，未写 turn_count（早返）
-    # C 段 r 已 turn_count=2（front=1, back=2, guard 不增）
+    # 守卫命中时 update 只写 current_speaker，未写 turn_count（早返）。
+    # turn_count 由 route_entry（peer 路径首跳）+ agent 节点（后续跳）各自 bump——
+    # 每个 agent 节点独占一个 superstep（last-value 通道无并发写）。C 段链：
+    # route_entry(首跳=1) → front(2) → back(3) → guard(END 不增)，故 turn_count=3。
+    # 注：C 段 entry 是直接用 agent 节点当 START（非真 route_entry），故首跳由
+    # agent 节点自己 bump（front=1, back=2, guard 不增），turn_count=2。
     try:
         if r.get("turn_count") != 2:
             errs.append(f"[D7] turn_count 应 2（front=1/back=2/守卫不增），实际 {r.get('turn_count')!r}")
@@ -286,6 +291,8 @@ def assert_contract() -> list[str]:
                     "incoming_message": "开始", "incoming_sender": "user",
                 })
         r2 = asyncio.run(_run_e())
+        # entry 是直接用 agent 节点当 START（非真 route_entry），首跳由 agent 节点
+        # 自己 bump（front=1, back=2），turn_count=2（vh32 E18 同款语义）。
         if r2.get("turn_count") != 2 or r2.get("recent_speakers") != ["w1", "w2"]:
             errs.append(f"[E8] 正常 A→B→END 链应 turn_count=2/recent_speakers=['w1','w2']，实际 {r2.get('turn_count')}/{r2.get('recent_speakers')}")
         else:

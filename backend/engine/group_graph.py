@@ -142,6 +142,16 @@ def _looks_central(incoming_kind: str, message: str) -> bool:
     or a plan-confirmation, which the Leader owns. An ``agent_reply`` kind (a
     peer's handoff) or an absent kind (a fresh user chat) is decentralized.
 
+    NOTE — ``agent_reply`` is dual-meaning: a *peer handoff* (no ``task_id``,
+    decentralized → returns ``False`` here) vs a *worker report-back* (carries
+    ``incoming_data.task_id``, CENTRAL → must reach ``handle_reply_group``).
+    The report-back case is handled by ``_is_report_back`` in ``route_entry``
+    as an early return (this function is only consulted AFTER that check, so
+    it never sees a report-back — it always returns ``False`` for the
+    ``agent_reply`` kind, which is correct for the peer-handoff case that
+    reaches it). The ``agent_reply`` → ``False`` contract here is locked by
+    test_vh39 A3/C10 for the peer-handoff path.
+
     A lightweight heuristic backs up the kind: an explicit engineering/plan cue
     in the message ("确认执行" / "确认计划" / "修改计划" / "直接执行" + an
     imperative engineering verb with no @mention) routes to the Leader even when
@@ -161,6 +171,37 @@ def _looks_central(incoming_kind: str, message: str) -> bool:
     if any(cue in m for cue in ("确认执行", "确认计划", "修改计划", "直接执行", "直接干")):
         return True
     return False
+
+
+def _is_report_back(state: GroupState) -> bool:
+    """An execute-path worker report-back: ``agent_reply`` kind carrying a ``task_id``.
+
+    ``agent_reply`` is dual-meaning on the inbound path:
+
+      · **report-back** (has ``incoming_data.task_id``) — a worker finished a
+        dispatched step and is reporting completion/failure to the coordinator.
+        This is unambiguously CENTRAL: the coordinator owns the dispatch plan +
+        MT-15 failure recovery + MT-14 step adjustment, so the turn must reach
+        ``classify`` → ``handle_reply_group``. Routed here, NOT to a peer agent
+        node.
+      · **peer handoff** (no ``task_id``) — an A2A chat handoff (成语接龙 /
+        discussion) where one member @mentions another. Decentralized → the
+        @mentioned agent node. ``_looks_central`` keeps this ``False``.
+
+    The ``task_id`` presence is the sole discriminator — a report-back message
+    ("步骤完成：…\\n结果：…") typically carries no @mention, so without this
+    check route_entry would END the turn at the no-@mention fall-through and
+    the dispatched step would stay ``dispatched`` forever (split-brain: the
+    group-graph Send fan-out mutated ``rt._dispatch_plan`` but no turn ever
+    marks the step completed). ``_looks_central`` itself is NOT changed (its
+    ``agent_reply`` → ``False`` contract is locked by test_vh39 A3/C10 for the
+    peer-handoff case); this check lives in route_entry as an early return that
+    fires only when a ``task_id`` is present.
+    """
+    if state.get("incoming_kind") != "agent_reply":
+        return False
+    data = state.get("incoming_data") or {}
+    return bool(data.get("task_id"))
 
 
 async def route_entry(state: GroupState) -> Command:
@@ -227,6 +268,25 @@ async def route_entry(state: GroupState) -> Command:
             "不选发言者，回合 END",
         )
         return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
+
+    # ── execute-path report-back 中心化分叉（item④前置·修 split-brain）──
+    # ``agent_reply`` 携带 ``incoming_data.task_id`` = worker 跑完派工步骤的回报，
+    # 必须走中心化路径 → classify → handle_reply_group（MT-15 失败恢复 + MT-14
+    # 步骤调整 + 把该 step 标 completed/failed）。这里早返回，不解析 @mention——
+    # 回报消息（"步骤完成：…\n结果：…"）通常无 @mention，否则会落到下方的
+    # no-@mention→END 分支，派工步骤永远停在 dispatched，rt._dispatch_plan 死锁
+    # （split-brain：群图 Send 扇出改了 rt._dispatch_plan 但无回合标完成）。
+    # 区分键：有 task_id = 中心化回报；无 task_id = 去中心化 peer handoff（走下方
+    # _resolve_handoff_target）。``_looks_central`` 的 agent_reply→False 契约不动
+    # （test_vh39 A3/C10 锁 peer-handoff 路径），report-back 由本早返回接管。
+    if _is_report_back(state):
+        logger.debug(
+            "[group_graph] route_entry execute-path report-back 命中（standalone）："
+            "agent_reply + task_id=%s → 中心化 classify（handle_reply_group）",
+            (state.get("incoming_data") or {}).get("task_id"),
+        )
+        turn_count = (state.get("turn_count") or 0) + 1
+        return Command(goto="classify", update={"turn_count": turn_count})
 
     turn_count = (state.get("turn_count") or 0) + 1
     # Reached the in-graph handoff cap before any agent even spoke? End the
@@ -318,6 +378,20 @@ def build_route_entry(handoff_targets: set[str]):
                 "（用户喊停），不选发言者，回合 END（上一发言者已说完，不 mid-stream 强切）",
             )
             return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
+
+        # ── execute-path report-back 中心化分叉（item④前置·修 split-brain）──
+        # 与 standalone route_entry 同款：agent_reply + incoming_data.task_id =
+        # worker 跑完派工步骤的回报 → 中心化 classify → handle_reply_group。不解析
+        # @mention（回报消息无 @）。无 task_id 的 agent_reply = peer handoff（去中心化），
+        # 走下方 _resolve_handoff_target。两份 route_entry 须同步（vh40 锁）。
+        if _is_report_back(state):
+            logger.debug(
+                "[group_graph] route_entry execute-path report-back 命中："
+                "agent_reply + task_id=%s → 中心化 classify（handle_reply_group）",
+                (state.get("incoming_data") or {}).get("task_id"),
+            )
+            turn_count = (state.get("turn_count") or 0) + 1
+            return Command(goto="classify", update={"turn_count": turn_count})
 
         turn_count = (state.get("turn_count") or 0) + 1
         if turn_count >= AGENT_NODE_MAX_HANDOFFS:

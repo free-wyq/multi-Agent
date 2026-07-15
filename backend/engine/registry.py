@@ -443,19 +443,47 @@ class AgentEngine:
         # B22：透传 task_id，让前端 finalizedBubbles 按 task_id 精确退场（非 sender+时间戳）。
         await self._reply(reply, task_id)
 
-        # single agent_reply notify to coordinator (Rust 318-339)
+        # execute report-back → the per-group GroupRuntime (task-19④).
+        #
+        # Split-brain fix: the group graph's ``node_dispatch_next_group`` fans
+        # the plan out via LangGraph ``Send``, marking steps ``dispatched`` +
+        # ``task_id`` synced onto ``rt._dispatch_plan``. The worker's report-back
+        # MUST return to the SAME runtime so the centralized path's
+        # ``node_classify_incoming`` (task_id match against ``rt._dispatch_plan``)
+        # hits and routes to ``handle_reply_group`` (MT-15 recovery / MT-14 step
+        # adjustment). The old ``push_notify → resident coordinator engine``
+        # path injected a STALE ``coordinator_engine._dispatch_plan`` that the
+        # Send fan-out never touched → task_id mismatch → misroute to
+        # llm_decide → plan deadlock. ``invoke_turn(incoming_kind="agent_reply",
+        # incoming_data={"task_id":...})`` flows through ``route_entry``'s
+        # report-back fork (group_graph.py ``_is_report_back``) → classify →
+        # handle_reply_group, the live plan.
+        #
         # 用 engine 启动时缓存的 coordinator_id（身份层·startup-baked，B11 时效契约
         # 见类 docstring）。不每任务查库：coordinator_id 是引擎身份非消息级配置，
         # 运行期不变；换群主须重建引擎（未实现，pending-restart）。
         if self.coordinator_id and self.coordinator_id != agent_id:
-            await push_notify(
-                group_id,
-                "agent_reply",
-                agent_id,
-                self.coordinator_id,
-                f"步骤完成：{task_content}\n\n结果：{snippet or '已完成'}",
-                {"task_id": task_id, "success": success},
-            )
+            msg = f"步骤完成：{task_content}\n\n结果：{snippet or '已完成'}"
+            rt = registry.get_runtime(group_id)
+            if rt is not None and rt._graph is not None:
+                await rt.invoke_turn(
+                    incoming_kind="agent_reply",
+                    incoming_message=msg,
+                    incoming_sender=agent_id,
+                    incoming_data={"task_id": task_id, "success": success},
+                )
+            else:
+                # dual-track fallback: no runtime (cold / compile-failed group /
+                # pre-load race) → legacy notify to the resident coordinator
+                # engine so its ``_handle_notify`` still drives the report-back.
+                await push_notify(
+                    group_id,
+                    "agent_reply",
+                    agent_id,
+                    self.coordinator_id,
+                    msg,
+                    {"task_id": task_id, "success": success},
+                )
 
     async def _on_task_cancelled(self, task: dict[str, Any]) -> None:
         """PL-11: cleanup when the current task is cancelled mid-execution.
@@ -575,18 +603,35 @@ class AgentEngine:
         await self._publish_log(task_id, "⏱ 任务已超时降级")
         # B22：透传 task_id（超时收尾的 announce 归属本任务，前端按 task_id 退场定稿气泡）。
         await self._reply(f"⏱ {timeout_result}", task_id)
-        # report-back to coordinator (same channel as _run_worker_task's failure
-        # path) so MT-15 recovery wakes — without this the step stays
-        # "dispatched" forever and the plan deadlocks.
+        # report-back to coordinator via the per-group GroupRuntime (task-19④).
+        # Same split-brain fix as ``_run_worker_task``: the timed-out step's
+        # ``task_id`` is on ``rt._dispatch_plan`` (set by the Send fan-out), so
+        # the recovery must reach the SAME runtime's ``handle_reply_group`` —
+        # without this the step stays "dispatched" forever and the plan
+        # deadlocks. ``invoke_turn`` flows through the report-back fork →
+        # classify → handle_reply_group so MT-15 recovery (retry/skip/
+        # reassign/keep_failed) wakes.
         if self.coordinator_id and self.coordinator_id != self.agent_id:
-            await push_notify(
-                self.group_id,
-                "agent_reply",
-                self.agent_id,
-                self.coordinator_id,
-                f"步骤完成：{task_content}\n\n结果：{timeout_result}",
-                {"task_id": task_id, "success": False},
-            )
+            msg = f"步骤完成：{task_content}\n\n结果：{timeout_result}"
+            rt = registry.get_runtime(self.group_id)
+            if rt is not None and rt._graph is not None:
+                await rt.invoke_turn(
+                    incoming_kind="agent_reply",
+                    incoming_message=msg,
+                    incoming_sender=self.agent_id,
+                    incoming_data={"task_id": task_id, "success": False},
+                )
+            else:
+                # dual-track fallback: no runtime → legacy notify to the
+                # resident coordinator engine's _handle_notify.
+                await push_notify(
+                    self.group_id,
+                    "agent_reply",
+                    self.agent_id,
+                    self.coordinator_id,
+                    msg,
+                    {"task_id": task_id, "success": False},
+                )
 
     # ── notify handling ──────────────────────────────────────────────
 

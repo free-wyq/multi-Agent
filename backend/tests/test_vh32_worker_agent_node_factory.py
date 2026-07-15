@@ -352,13 +352,13 @@ def assert_contract() -> list[str]:
             g.add_node("agent_agent_back_1", n_back)
             g.add_edge(START, "entry")
             app = g.compile()
-            r = asyncio.run(app.ainvoke({"group_id": "g1", "coordinator_id": "agent_coord_1", "messages": [HumanMessage(content="开始", name="user", id="u1")], "turn_count": 0, "recent_speakers": [], "incoming_message": "开始", "incoming_sender": "user"}))
+            r = asyncio.run(app.ainvoke({"group_id": "g1", "coordinator_id": "agent_coord_1", "messages": [HumanMessage(content="开始", name="user", id="u1")], "turn_count": 0, "recent_speakers": [], "incoming_message": "开始", "incoming_sender": "user", "incoming_kind": "agent_reply"}))
         if "agent_front_1" not in call_log or "agent_back_1" not in call_log:
             errs.append(f"[E18] 两 agent 节点都应被调，实际 {call_log}")
         elif len(r["messages"]) != 3:
             errs.append(f"[E18] messages 应 3（user+front+back），实际 {len(r['messages'])}")
         elif r["turn_count"] != 2:
-            errs.append(f"[E18] turn_count 应 2，实际 {r['turn_count']}")
+            errs.append(f"[E18] turn_count 应 2（peer 路径：front=1/back=2 各占一 superstep），实际 {r['turn_count']}")
         elif r["recent_speakers"] != ["agent_front_1", "agent_back_1"]:
             errs.append(f"[E18] recent_speakers 应 [front,back]，实际 {r['recent_speakers']}")
         elif r["current_speaker"] != "agent_back_1":

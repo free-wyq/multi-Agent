@@ -68,6 +68,41 @@ def clear_group_routes(group_id: str) -> None:
     _a2a_turns.pop(group_id, None)
 
 
+# task-20: inbound 停关键词。用户在群里发这些词 → GroupRuntime.request_stop() 协作式
+# 软停（只 set stop_event，当前发言者跑完当前 step，下一节点让步，回合在节点边界 END）。
+# 区别于 UI 停止按钮（POST /groups/{id}/stop-turn → cancel_turn 硬停，先 set 再 task.cancel
+# 断流）。独立于 @mention 路由——一条「停」消息优先解释为停止信号而非交给某发言者。
+_STOP_PHRASES = ("停", "停止", "中断", "stop")
+
+
+def _is_stop_phrase(content: str) -> bool:
+    """Whether ``content`` is a stop request (cooperative soft-stop trigger).
+
+    Matches the stop phrases (``停`` / ``停止`` / ``中断`` / ``stop``) as a
+    whole-word / trimmed-token check, NOT a substring — ``「请停下来」`` matches
+    (the message's intent is stop), but a normal message that merely *contains*
+    「停」 like ``「方案先停一停讨论下」`` is borderline; we match on a stripped
+    token equality so only a short stop intent trips it (the message IS a stop
+    command, not a sentence containing the character). Case-insensitive for the
+    English ``stop``.
+    """
+    if not content:
+        return False
+    stripped = content.strip().lower()
+    if not stripped:
+        return False
+    # exact / lead-token match: "停", "停止", "中断", "stop", "stop。" etc.
+    for phrase in _STOP_PHRASES:
+        p = phrase.lower()
+        if stripped == p or stripped.startswith(p):
+            # ensure the rest (after the phrase) is only trailing punctuation /
+            # whitespace, not more content (so "停止" matches but not "停止器描述")
+            rest = stripped[len(p):].lstrip("，。！？.,!?、 \t\n")
+            if not rest:
+                return True
+    return False
+
+
 def find_mentions(content: str) -> list[str]:
     """Scan ``content`` for ``@name`` tokens, stripping trailing punctuation.
 
@@ -239,16 +274,77 @@ async def route_mentions(
 
 
 async def route_user_message(group_id: str, content: str) -> None:
-    """Route an inbound user message by @mention, else to the coordinator.
+    """Route an inbound user message onto the group's decentralized swarm graph.
 
-    If the message mentions a group member, ``push_notify`` to that agent with
-    kind ``agent_reply``. Otherwise ``push_notify`` to the group coordinator with
-    kind ``coordinator_reply``. The notify wakes the target engine's run loop.
+    task-19/20: the production inbound path now drives the per-group
+    ``GroupRuntime.invoke_turn`` (the compiled group graph = one turn) instead
+    of pushing a notify to the resident coordinator ``AgentEngine``. The graph's
+    ``route_entry`` forks the turn:
 
-    用户每发一条新消息就把该群 A2A 轮次计数清零——新一轮接龙/讨论从 0 重新数
-    ``_A2A_CAP`` 预算，不会因上一轮触顶而卡住。
+      · **stop keyword** (``停`` / ``stop`` / ``中断`` / ``停止``) →
+        ``rt.request_stop()`` — cooperative soft stop (only ``_stop_event.set()``;
+        the current speaker finishes its step, the next node yields → turn ENDs
+        gracefully at a node boundary, NOT mid-stream). Distinct from the UI
+        stop button (``POST /groups/{id}/stop-turn`` → ``cancel_turn`` hard stop).
+        A stop with no active turn is a documented no-op (the event is cleared at
+        the next ``invoke_turn``'s start).
+      · **@mention** → ``invoke_turn(incoming_kind="agent_reply"``,
+        ``incoming_data=None``) — a peer handoff (no ``task_id``), so
+        ``route_entry`` hands the turn to the @mentioned agent node
+        (decentralized chat / 成语接龙 path).
+      · **no @mention** → ``invoke_turn(incoming_kind="coordinator_reply")`` —
+        engineering demand, ``route_entry`` routes to the Leader's ``classify``
+        (centralized path).
+
+    **Dual-track fallback**: if the group has no ``GroupRuntime`` (cold group /
+    compile failure / pre-load race), degrades to the legacy ``push_notify``
+    path so the resident engine still drives the turn — additive, not a flag.
+
+    **single_chat bypass**: a degenerate single-agent group (``config.
+    single_chat=True``) has no collaboration surface — one agent, no handoff,
+    none of the three defects this migration fixes (顺序乱 / 协调者插话 /
+    停不下来) can arise. Its resident engine is a *worker* graph (the
+    coordinator_id agent is degraded to ``build_worker_graph`` at
+    ``registry.py:132``), whose ``node_brain_decide`` streams ``task_token``
+    with a ``reply_id`` (the CodeBuddy bubble streaming contract, verified by
+    test_vb3). Routing a single_chat turn through the group graph's coordinator
+    subgraph instead would stream ``coordinator_token`` (a different channel)
+    and break that streaming contract for zero collaboration benefit. So a
+    single_chat group always takes the legacy ``push_notify`` path to its
+    resident worker engine — the group graph is for multi-agent groups only.
     """
-    _a2a_turns[group_id] = 0
+    group = await crud.get_group(group_id)
+    # single_chat → resident worker engine (worker-brain streaming contract,
+    # no collaboration surface to route through the group graph). See docstring.
+    if group and (group.config or {}).get("single_chat") and group.coordinator_id:
+        await push_notify(
+            group_id, "coordinator_reply", "user", group.coordinator_id, content, None,
+        )
+        return
+
+    # stop keyword → cooperative soft stop (task-20). Short-circuits both the
+    # @mention and the coordinator paths — a 停 message stops the active turn
+    # rather than routing to a speaker.
+    if _is_stop_phrase(content):
+        # local import: registry imports mention at module load (for
+        # route_mentions / clear_group_routes), so a top-level ``from
+        # engine.registry import registry`` would cycle. Defer to call time —
+        # the singleton exists by the time an inbound message routes.
+        from engine.registry import registry  # noqa: PLC0415
+
+        rt = await registry.ensure_runtime(group_id)
+        if rt is not None:
+            rt.request_stop()
+            logger.debug(
+                "[mention] route_user_message 停关键词命中 group=%s → request_stop（软停）",
+                group_id,
+            )
+            return
+        # no runtime (cold/compile-failed group) → nothing active to stop, no-op.
+
+    from engine.registry import registry  # noqa: PLC0415 — defer to break the
+    # registry→mention import cycle (registry imports mention at load time).
+
     mentions = find_mentions(content)
     if mentions:
         members = await crud.list_group_members_with_agent(group_id)
@@ -256,13 +352,34 @@ async def route_user_message(group_id: str, content: str) -> None:
         for mention in mentions:
             target_id = resolve_mention(members, mention, agents)
             if target_id:
+                # @mention → decentralized peer handoff onto the group graph
+                # (no task_id → route_entry picks the agent node). Falls back to
+                # the legacy notify when no runtime exists.
+                rt = await registry.ensure_runtime(group_id)
+                if rt is not None:
+                    await rt.invoke_turn(
+                        incoming_kind="agent_reply",
+                        incoming_message=content,
+                        incoming_sender="user",
+                        incoming_data=None,
+                    )
+                    return
                 await push_notify(
                     group_id, "agent_reply", "user", target_id, content, None
                 )
                 return  # route to the first @mentioned agent only
-    # no mention hit -> coordinator
-    group = await crud.get_group(group_id)
+    # no mention hit -> coordinator (centralized path)
     if group and group.coordinator_id:
+        rt = await registry.ensure_runtime(group_id)  # local import above
+        if rt is not None:
+            await rt.invoke_turn(
+                incoming_kind="coordinator_reply",
+                incoming_message=content,
+                incoming_sender="user",
+                incoming_data=None,
+            )
+            return
+        # legacy fallback: push a notify to the resident coordinator engine
         await push_notify(
             group_id,
             "coordinator_reply",
@@ -276,31 +393,39 @@ async def route_user_message(group_id: str, content: str) -> None:
 async def route_plan_resume(
     group_id: str, payload: dict | None = None
 ) -> str | None:
-    """PL-02: push a ``plan_resume`` notify to the group's coordinator.
+    """PL-02: resume the group graph's paused dispatch node via ``resume_plan``.
 
-    Pushes a notify of kind ``plan_resume`` whose ``data`` is the resume payload
-    (``{"mode": "confirm"|"direct"|"modify", ...}``); the coordinator engine's
-    ``_handle_notify`` sees ``type == "plan_resume"`` and dispatches it to the
-    graph as ``Command(resume=<payload>)`` — which makes ``node_dispatch``'s
-    ``interrupt()`` return the payload and the graph fan out, bypassing the
-    classify node and resuming the interrupted dispatch node directly.
+    task-19/22: the production plan-confirm path now calls
+    ``GroupRuntime.resume_plan(payload)`` directly — it issues
+    ``Command(resume=<payload>)`` on the thread the prior ``invoke_turn`` paused
+    at ``node_dispatch``'s ``interrupt()`` (the native LangGraph resume path),
+    so ``interrupt()`` returns the payload and ``dispatch_next_group`` fans out
+    the pending steps. Bypasses the inbox notify loop entirely (the old
+    ``push_notify("plan_resume", ...)`` → coordinator engine ``_handle_notify``
+    → ``Command(resume=)`` queue detour is retired for the runtime path).
 
-    The single inbound channel for plan confirmation since the M12 interrupt
-    migration retired the legacy ``plan_confirm`` fresh-input notify path (the
-    old ``route_plan_confirm`` pusher was removed in task 11 — plan-confirm no
-    longer goes through the notify-as-fresh-input channel). Called by the
-    plan-confirm API endpoints (``/plan/confirm`` | ``/direct`` | ``/modify``);
-    the payload is forwarded verbatim — the API owns the ``mode`` semantics,
-    the routing layer only resolves the coordinator and queues the control
-    signal.
+    Called by the plan-confirm API endpoints (``/plan/confirm`` | ``/direct`` |
+    ``/modify``); the payload is forwarded verbatim — the API owns the ``mode``
+    semantics, the routing layer only resolves the runtime + resumes.
 
-    Returns the coordinator's ``agent_id`` if routed, else ``None`` (group has
-    no coordinator). Mirrors ``route_user_message``'s coordinator fallback so
-    the two inbound paths share one resolution primitive.
+    **Dual-track fallback**: if the group has no ``GroupRuntime`` (cold / compile
+    failure), degrades to the legacy ``push_notify("plan_resume")`` path so the
+    resident engine's ``_handle_notify`` plan_resume branch still drives the
+    resume. Returns the coordinator's ``agent_id`` if routed, else ``None``
+    (group has no coordinator) — preserving the return-value contract the
+    plan-confirm API callers rely on.
     """
     group = await crud.get_group(group_id)
     if not group or not group.coordinator_id:
         return None
+    # local import (registry→mention cycle at load time; defer to call time).
+    from engine.registry import registry  # noqa: PLC0415
+
+    rt = await registry.ensure_runtime(group_id)
+    if rt is not None:
+        await rt.resume_plan(payload or {})
+        return group.coordinator_id
+    # legacy fallback: queue a plan_resume notify to the resident coordinator
     await push_notify(
         group_id,
         "plan_resume",
