@@ -29,6 +29,7 @@ from events import (
     emit_coordinator_stats,
     emit_coordinator_think,
     emit_coordinator_token,
+    emit_task_dispatched,
 )
 from engine.reply import persist_agent_reply
 from llm.client import chat_completion, chat_completion_stream, get_llm_config
@@ -1207,6 +1208,33 @@ async def node_dispatch_next_group(state: GroupState) -> Command:
         await emit_coordinator_plan(group_id, coordinator_id, plan)
     except Exception:
         logger.exception("[coordinator] failed to emit plan after dispatch_next_group")
+
+    # Emit a ``task_dispatch`` bus event per dispatched step — mirrors the resident
+    # ``_dispatch_one`` (dispatcher.py:145 ``emit_task_dispatched``), so the group
+    # path's fan-out produces the SAME WS event the resident path produces. Without
+    # this the frontend's task card + the MT-14/MT-15 e2e probes catch 0
+    # ``task_dispatch`` events even though the ``Send``s fanned out (the chain
+    # looked dead at the dispatch step — ``dispatch=0`` / 「两步不全完成」), and
+    # ``emit_task_completed`` (from the worker execute path) had no matching
+    # ``task_dispatch`` to pair with. ``build_dispatch_sends`` already minted the
+    # per-step ``task_id`` (stored on the step) so the event carries the same id
+    # the later ``task_complete`` will carry — the e2e serial-order assertion
+    # (步骤1 task_complete 早于步骤2 task_dispatch) keys off these ids.
+    for step in dispatched:
+        try:
+            await emit_task_dispatched(
+                group_id,
+                step.get("task_id") or "",
+                step.get("step"),
+                step.get("agent_id") or "",
+                step.get("agent_name") or "",
+                step.get("instruction") or "",
+            )
+        except Exception:
+            logger.exception(
+                "[coordinator] failed to emit task_dispatch for step %s in dispatch_next_group",
+                step.get("step"),
+            )
     # LangGraph drives the Send[] in parallel — each agent node gets its own
     # state copy seeded by the Send payload. The plan carries the dispatched
     # statuses for downstream handle_reply matching.
