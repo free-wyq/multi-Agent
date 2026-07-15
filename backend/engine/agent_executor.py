@@ -25,9 +25,31 @@ logger = logging.getLogger("multi-agent.agent_executor")
 
 _SKILL_HEADER = "\n\n## 已挂载技能\n你拥有以下技能，请根据任务需要自主使用：\n"
 
+# 渐进式披露开关（阶段二）：True = manifest 常驻 + 全文按需 load；False = 旧全文直接拼。
+# 默认 **关**：渐进式要真正生效需「worker brain 按需 load 全文」的机制——即阶段四的
+# load_skill 受控工具（task36 工具池 + task40 安全审计）。在 load_skill 落地前开渐进式
+# 会让 worker 只看到技能清单而拿不到全文 content，test_pl06「挂载技能 content 到达 worker
+# 输出」契约会断（哨兵标记在 content 里，manifest 里没有）。故阶段二只铺函数地基 +
+# 契约测试锁其行为，开关保持关，阶段四 load_skill 就绪后翻 True。旧全文路径
+# （_compose_system_prompt）始终是兜底真源。
+_SKILL_PROGRESSIVE = False
+
+# manifest 常驻头：只放技能清单（name+description+triggers），成本低，告诉 worker 有哪些技能
+_SKILL_MANIFEST_HEADER = (
+    "\n\n## 可用技能清单\n"
+    "你已挂载以下技能。若某项与当前任务相关，可用 load_skill 工具加载其完整内容后再依其指引执行：\n"
+)
+
 
 def _compose_system_prompt(base: str, skill_contents: list[str]) -> str:
-    """Append mounted-skill content to the base system prompt (PL-06)."""
+    """Append mounted-skill **full content** to the base system prompt (PL-06 stage 1).
+
+    Legacy/兜底 full-injection path: every mounted skill's whole ``content`` is
+    appended. Kept as the fallback when progressive disclosure is off
+    (``_SKILL_PROGRESSIVE = False``) and as the honest default for
+    ``agent_executor.execute_agent_task`` — the resident execute path where a
+    task is already scoped and pulling full skill text up front is acceptable.
+    """
     base = (base or "").strip()
     if not skill_contents:
         return base
@@ -35,6 +57,40 @@ def _compose_system_prompt(base: str, skill_contents: list[str]) -> str:
     for i, content in enumerate(skill_contents, 1):
         blocks.append(f"### 技能 {i}\n{content}")
     return base + _SKILL_HEADER + "\n\n".join(blocks)
+
+
+def _compose_skill_manifest(base: str, manifest: list[dict]) -> str:
+    """Append a lightweight skill **manifest** (name+description+triggers) to the
+    base system prompt (PL-06 stage 2 progressive disclosure).
+
+    Only metadata is常驻 — no big ``content`` blobs — so token cost stays low
+    even with many skills mounted. The worker brain reads this to decide which
+    skill to load fully on demand (via ``load_skill`` tool / ``_load_skill_full``).
+    """
+    base = (base or "").strip()
+    if not manifest:
+        return base
+    lines = []
+    for i, m in enumerate(manifest, 1):
+        name = m.get("name", "")
+        desc = m.get("description", "")
+        triggers = m.get("triggers") or []
+        # 编号 + name + 一行 description + 触发词（人读辅助 + 自动激活线索）
+        trig = f"（触发：{', '.join(triggers)}）" if triggers else ""
+        lines.append(f"{i}. **{name}**{trig} — {desc}")
+    return base + _SKILL_MANIFEST_HEADER + "\n".join(lines) + "\n"
+
+
+def _load_skill_full(manifest_item: dict, content: str) -> str:
+    """Format a single skill's full content for on-demand injection (stage 2).
+
+    Given a manifest entry (for the skill's name/identity) and its loaded
+    ``content`` string, produce the injected block. Called by the worker brain
+    when it decides a specific skill is needed — the manifest (常驻) told it
+    the skill exists; this fetches + formats the full body.
+    """
+    name = (manifest_item or {}).get("name", "技能")
+    return f"### 技能：{name}\n{content}"
 
 
 async def execute_agent_task(
@@ -60,17 +116,32 @@ async def execute_agent_task(
     raw_turns = agent.get("max_turns", 0) or 0
     max_turns = raw_turns if raw_turns > 0 else DEFAULT_MAX_TURNS
 
-    # PL-06: resolve mounted skills → inject into the system prompt
+    # PL-06: resolve mounted skills → inject into the system prompt.
+    # 阶段二渐进式披露（_SKILL_PROGRESSIVE）：manifest(name+description+triggers)常驻
+    # 拼进 prompt（成本低、技能多不爆），全文 content 按 worker brain 决策再 load。
+    # 旧全文直接拼路径（_compose_system_prompt）作兜底：开关关或 manifest 拉取失败时回退。
     mounted_skills = agent.get("mounted_skills") or []
-    skill_contents = await crud.resolve_skill_contents(mounted_skills)
-    if skill_contents:
-        system_prompt = _compose_system_prompt(system_prompt, skill_contents)
-        if on_log:
-            await on_log(
-                "log",
-                f"[技能] 已加载 {len(skill_contents)} 个挂载技能到上下文",
-                None,
-            )
+    if mounted_skills and _SKILL_PROGRESSIVE:
+        manifest = await crud.resolve_skill_manifest(mounted_skills)
+        if manifest:
+            system_prompt = _compose_skill_manifest(system_prompt, manifest)
+            if on_log:
+                await on_log(
+                    "log",
+                    f"[技能] 已挂载 {len(manifest)} 个技能清单（渐进式·全文按需 load）",
+                    None,
+                )
+    elif mounted_skills:
+        # 兜底/旧路径：全文直接拼
+        skill_contents = await crud.resolve_skill_contents(mounted_skills)
+        if skill_contents:
+            system_prompt = _compose_system_prompt(system_prompt, skill_contents)
+            if on_log:
+                await on_log(
+                    "log",
+                    f"[技能] 已加载 {len(skill_contents)} 个挂载技能到上下文（全文注入）",
+                    None,
+                )
 
     # PL-07: load MCP tools from mounted connections, inject into the loop
     mounted_mcp = agent.get("mounted_mcp") or []

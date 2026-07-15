@@ -89,6 +89,11 @@ def _migrate_schema() -> None:
         _ensure_column(conn, "llm_providers", "request_timeout", "FLOAT NOT NULL DEFAULT 120.0")
         _ensure_column(conn, "llm_providers", "max_retries", "INTEGER NOT NULL DEFAULT 2")
         _ensure_column(conn, "llm_providers", "proxy", "VARCHAR NOT NULL DEFAULT ''")
+        # Skill frontmatter（Claude Skills 化 · 阶段一地基2）：三列 additive，
+        # 旧 skills 表缺这三列时补上空 list 默认值，旧行读到 [] 而非 KeyError。
+        _ensure_column(conn, "skills", "requires_tools", "JSON NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "skills", "triggers", "JSON NOT NULL DEFAULT '[]'")
+        _ensure_column(conn, "skills", "outputs", "JSON NOT NULL DEFAULT '[]'")
         conn.close()
     except Exception:
         # best-effort additive migration: pre-existing DBs that don't have a

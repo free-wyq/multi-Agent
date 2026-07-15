@@ -164,6 +164,13 @@ class SkillEntity(Base):
     installed: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
     content: Mapped[str] = mapped_column(String, nullable=False, default="")
     tags: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # ── frontmatter（Claude Skills 化 · 阶段一地基2）───────────────
+    # 三列皆 NOT NULL DEFAULT '[]'：新库 create_all 直接建带这三列；老库由
+    # _migrate_schema 的 ALTER TABLE ADD COLUMN ... DEFAULT '[]' 在启动时补齐，
+    # 旧行读到空 list 而非崩溃（additive migration，与 agents.mounted_skills 同款）。
+    requires_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    triggers: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    outputs: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
 

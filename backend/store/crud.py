@@ -632,6 +632,12 @@ def _skill_to_model(s: SkillEntity, mounted_to: list[str] | None = None) -> Skil
             "installed": bool(s.installed),
             "content": s.content,
             "tags": s.tags or [],
+            # frontmatter（阶段一地基2）：旧行经 _migrate_schema 已 ALTER 出空 list 列，
+            # 这里兜底 None→[] 防御性补齐（实体 default=list 但 SQLite ALTER 出来的列
+            # 在极旧库上可能短暂为 None，做一次或运算保险）。
+            "requires_tools": s.requires_tools or [],
+            "triggers": s.triggers or [],
+            "outputs": s.outputs or [],
             "mounted_to": mounted_to or [],
             "created_at": s.created_at,
             "updated_at": s.updated_at,
@@ -689,6 +695,10 @@ async def create_skill(payload: Any) -> Skill:
         source=getattr(payload, "source", "custom") or "custom",
         installed=1,
         tags=list(getattr(payload, "tags", []) or []),
+        # frontmatter（阶段一地基2）：从 payload 取，缺省空 list（SkillCreatePayload 已默认 []）
+        requires_tools=list(getattr(payload, "requires_tools", []) or []),
+        triggers=list(getattr(payload, "triggers", []) or []),
+        outputs=list(getattr(payload, "outputs", []) or []),
         created_at=ts,
         updated_at=ts,
     )
@@ -708,7 +718,8 @@ async def update_skill(skill_id: str, payload: Any) -> Skill | None:
         if not row:
             return None
         for k, v in data.items():
-            if k in ("name", "description", "content", "source", "installed", "tags"):
+            if k in ("name", "description", "content", "source", "installed", "tags",
+                     "requires_tools", "triggers", "outputs"):
                 setattr(row, k, v)
         row.updated_at = _now_iso()
         await db.commit()
@@ -776,6 +787,12 @@ async def resolve_skill_contents(skill_ids: list[str]) -> list[str]:
 
     Used by the worker executor to inject mounted-skill content into the system
     prompt (PL-06). Missing ids are skipped silently.
+
+    This is the **full-content** path (stage 1 injection). Stage 2 progressive
+    disclosure splits this into a manifest (name+description, cheap, always-on)
+    + full load (on demand) — see ``resolve_skill_manifest`` /
+    ``resolve_skill_full`` below; this function is kept as the legacy/兜底 full
+    injection path.
     """
     from store.database import SessionLocal
 
@@ -792,6 +809,59 @@ async def resolve_skill_contents(skill_ids: list[str]) -> list[str]:
             if row and row.content:
                 out.append(row.content)
         return out
+
+
+async def resolve_skill_manifest(skill_ids: list[str]) -> list[dict]:
+    """Resolve mounted skill ids to a lightweight manifest (stage 2 progressive disclosure).
+
+    Returns ``[{id, name, description, requires_tools, triggers, outputs}, ...]``
+    — only metadata, no ``content``. This is what gets常驻拼进 the system prompt
+    so the worker knows *which* skills it has and can decide which one to load
+    fully on demand. Cheap: O(n) rows, small payload, no big content blobs.
+
+    Missing ids are skipped silently (same lenient contract as
+    ``resolve_skill_contents``).
+    """
+    from store.database import SessionLocal
+
+    if not skill_ids:
+        return []
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(select(SkillEntity).where(SkillEntity.id.in_(skill_ids)))
+        ).scalars().all()
+        by_id = {r.id: r for r in rows}
+        out: list[dict] = []
+        for sid in skill_ids:
+            row = by_id.get(sid)
+            if not row:
+                continue
+            out.append({
+                "id": row.id,
+                "name": row.name,
+                "description": row.description or "",
+                "requires_tools": row.requires_tools or [],
+                "triggers": row.triggers or [],
+                "outputs": row.outputs or [],
+            })
+        return out
+
+
+async def resolve_skill_full(skill_id: str) -> str | None:
+    """Load a single skill's full content on demand (stage 2 progressive disclosure).
+
+    Called by the worker brain when it decides a specific skill is needed — the
+    manifest (常驻) tells it what skills exist; this fetches one skill's full
+    ``content`` to inject. Returns ``None`` for missing/empty skills (caller
+    skips silently, same lenient contract).
+    """
+    from store.database import SessionLocal
+
+    if not skill_id:
+        return None
+    async with SessionLocal() as db:
+        row = await db.get(SkillEntity, skill_id)
+        return row.content if (row and row.content) else None
 
 
 # ── MCP connection helpers ──────────────────────────────────────

@@ -26,6 +26,16 @@ class Skill(BaseModel):
     content: str = ""
     # optional tags for search/filter (PRD SK-09)
     tags: list[str] = []
+    # ── frontmatter (Claude Skills 化 · 阶段一地基2) ───────────────
+    # 抄 Claude Skills 的 name/description 元数据思想 + 扩出可执行性字段。
+    # 三字段皆可选、默认空 list，向后兼容旧数据（缺字段序列化兜底成空 list）。
+    #   requires_tools: 该技能需要绑定的受控工具名（如 ["file_read","bash_run"]），
+    #     非空 → 阶段四由 make_agent_node 解析后 bind_tools；空 = 纯文档技能只走 prompt 注入。
+    #   triggers: 触发场景关键词（人读辅助 + 未来可作自动激活线索），如 ["建表","迁移"]。
+    #   outputs: 该技能会产出的产物类别（人读辅助 + 产物卡渲染线索），如 ["sql","migration"]。
+    requires_tools: list[str] = []
+    triggers: list[str] = []
+    outputs: list[str] = []
     # agent ids this skill is mounted on (computed at read time, not stored)
     mounted_to: list[str] = []
     created_at: str = ""
@@ -40,6 +50,10 @@ class SkillCreatePayload(BaseModel):
     content: str | None = None
     source: str = "custom"
     tags: list[str] = []
+    # frontmatter（阶段一地基2，皆可选，默认空 list 向后兼容）
+    requires_tools: list[str] = []
+    triggers: list[str] = []
+    outputs: list[str] = []
 
 
 class SkillUploadPayload(BaseModel):
