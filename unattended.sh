@@ -127,6 +127,11 @@ main_loop() {
   STALL_TASK=""
   STALL_COUNT=0
   HAD_ANY_COMMIT=""
+  # 【Bug4 修复·2026-07-15】CONSEC_400 跟踪连续撞 400（上下文撑爆）的次数。
+  # 续接同一会话跑久了 jsonl 涨到 300k+ tokens，worker 每轮撞 400 秒退零产出，
+  # 被误判零改动空转 → 标 [~] 跳过任务（task25-32 曾被误标根因）。
+  # 修：检测到 400 → 删 .session_id 强制下轮开新会话，不标 [~]、重试同任务。
+  CONSEC_400=0
 
   # 会话 id：首轮用 `claude -p`（无 --continue）开一个全新会话，从 stream-json 的
   # init 事件抓 session_id 落盘；后续轮次用 `claude --resume <id> -p` 续接这个会话。
@@ -254,17 +259,24 @@ main_loop() {
 - 本轮结束后直接结束，不要输出总结。
 "
 
+    # 【Bug4 修复·2026-07-15】捕获 worker 输出判 400（上下文撑爆）。续接的老会话
+    # jsonl 涨到 300k+ tokens 时，worker 每轮撞 400 秒退零产出，被误判零改动空转 →
+    # 连 3 次标 [~] 跳过任务（task25-32 曾被误标根因）。修：抓到 400 → 删 .session_id
+    # 强制下轮开新会话 + 重置空转计数 + 跳过本轮打勾/标[~]，让下轮用新会话重试同任务。
+    # 用临时文件接住 worker 的 stderr（原本 2>> LOG_FILE 无法回读），判 400 后处理。
+    local worker_err_tmp=""
+    worker_err_tmp=$(mktemp)
     if [ -n "$SESSION_ID" ]; then
-      # 续接已有会话（纯文本输出，stderr 入日志）
+      # 续接已有会话（纯文本输出，stderr 入日志 + 临时文件供 400 检测）
       claude --resume "$SESSION_ID" -p "$CLAUDE_PROMPT" \
-        --dangerously-skip-permissions < /dev/null 2>> "$LOG_FILE" || true
+        --dangerously-skip-permissions < /dev/null 2> >(tee -a "$LOG_FILE" > "$worker_err_tmp") || true
     else
       # 首轮：开新会话，stream-json 抓 session_id
       # 注意：stream-json 必须配 --verbose，否则 claude 报
       # "When using --print, --output-format=stream-json requires --verbose" 直接退出
       SESSION_JSON=$(claude -p "$CLAUDE_PROMPT" \
         --output-format stream-json --verbose \
-        --dangerously-skip-permissions < /dev/null 2>> "$LOG_FILE" || true)
+        --dangerously-skip-permissions < /dev/null 2> >(tee -a "$LOG_FILE" > "$worker_err_tmp") || true)
       # 从 init 事件抓 session_id（type:system, subtype:init 那行）
       SESSION_ID=$(printf '%s' "$SESSION_JSON" | grep -o '"session_id":"[^"]*"' | head -1 | sed 's/"session_id":"//; s/"$//' || true)
       if [ -n "$SESSION_ID" ]; then
@@ -275,8 +287,41 @@ main_loop() {
       fi
     fi
 
+    # Bug4 检测：stderr 里出现 400 context length exceeded → 会话撑爆
+    local hit_400=0
+    if grep -qiE "maximum context length|context length of [0-9]+|Requested token count exceeds" "$worker_err_tmp" 2>/dev/null; then
+      hit_400=1
+    fi
+    rm -f "$worker_err_tmp"
+
     end_ts=$(date +%s)
     dur_min=$(((end_ts - start_ts) / 60))
+
+    # 【Bug4 处理·2026-07-15】若本轮撞 400（上下文撑爆）：删 .session_id 强制下轮开
+    # 新会话，重置空转计数，跳过打勾/标[~]/提交，让下轮用全新会话重试同一任务。
+    # 这不是 worker 卡死（骨架误判），而是会话太老撑爆，开新会话即可恢复，不能标[~]。
+    if [ "${hit_400:-0}" -eq 1 ]; then
+      CONSEC_400=$((CONSEC_400 + 1))
+      log "🧠 检测到上下文撑爆(400)，会话 $SESSION_ID 已弃用，下轮开新会话重试（第${CONSEC_400}次）"
+      rm -f "$SESSION_ID_FILE"
+      SESSION_ID=""
+      STALL_TASK=""; STALL_COUNT=0
+      # 连续 5 次仍 400 → 可能是单个任务 prompt 本身就超限（极少见），才标[~]跳过兜底
+      if [ "$CONSEC_400" -ge 5 ]; then
+        local block_lineno
+        block_lineno=$(grep -nE '^- \[ \]' "$TASK_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)
+        [ -n "$block_lineno" ] && sed -i "${block_lineno}s/^- \[ \]/- [~]/" "$TASK_FILE" 2>/dev/null || true
+        log "🚧 连续 5 次撞 400，疑单任务 prompt 超限，标 [~] 跳过兜底"
+        CONSEC_400=0
+      fi
+      local NEW_REMAINING_400
+      NEW_REMAINING_400=$(grep -c '^- \[ \]' "$TASK_FILE" 2>/dev/null || true)
+      write_status "idle" "ctx-overflow-retry: $CURRENT_TASK" "${NEW_REMAINING_400:-0}" "$((TOTAL - ${NEW_REMAINING_400:-0}))"
+      sleep 5
+      continue
+    fi
+    # 本轮没撞 400 → 重置计数
+    CONSEC_400=0
 
     # 【C 方案】脚本侧自动打勾：把第一个 [ ] 改成 [x]
     # 这样即使 claude 压缩会话后忘记打勾，进度也能推进
@@ -389,12 +434,15 @@ main_loop() {
 
     # 每 5 轮普通压缩一次；压缩后下一轮 Prompt 会强制重读 .task.md（见上）
     # 用 --resume <SESSION_ID> 续接同一新会话做压缩（不能 --continue，理由见会话策略注释）
+    # 【Bug4 加固·2026-07-15】压缩也要做 400 防护：每 5 轮压缩一次可能不够（任务大、
+    # 读文件多时会话涨得比压缩快），且压缩本身可能因会话已撑爆而失败。Bug4 的 hit_400
+    # 检测会在撑爆时主动弃会话开新的，这里只做常规压缩保活。压缩失败/无 session 不阻塞。
     if [ $((LOOP_COUNT % 5)) -eq 0 ]; then
       log "🗜️ 压缩会话..."
       if [ -n "$SESSION_ID" ]; then
         echo "/compact" | claude --resume "$SESSION_ID" --dangerously-skip-permissions 2>> "$LOG_FILE" || true
       else
-        echo "/compact" | claude --dangerously-skip-permissions 2>> "$LOG_FILE" || true
+        log "🗜️ 无活跃 session（本轮撞过 400 已弃会话），跳过压缩"
       fi
       log "🗜️ 压缩完成"
     fi
