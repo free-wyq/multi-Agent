@@ -1,4 +1,4 @@
-import { useEffect, useState, useMemo, useCallback } from 'react'
+import { useEffect, useState, useMemo, useCallback, useRef } from 'react'
 import {
   Card,
   Button,
@@ -15,6 +15,8 @@ import {
   Tabs,
   Tooltip,
   Upload,
+  Collapse,
+  Typography,
 } from 'antd'
 
 import {
@@ -29,6 +31,7 @@ import {
   ReloadOutlined,
   DownloadOutlined,
   EyeOutlined,
+  PlayCircleOutlined,
 } from '@ant-design/icons'
 import {
   skillApi,
@@ -36,6 +39,7 @@ import {
   type Skill,
   type AgentDefinition,
   type SkillMarketEntry,
+  type SkillRunEvent,
 } from '../services/api'
 
 /* source → Tag 颜色 */
@@ -245,6 +249,76 @@ export default function SkillPage() {
     }
   }
 
+  /* ── 运行可执行技能（阶段四·task39）──
+   * 仅 requires_tools 非空的技能可运行。点击 → skillApi.run(id) 流式展示执行过程
+   * （CodeBuddy 气泡：reasoning + token + 产物卡）。runOpen 持当前运行技能 + 累积
+   * 的事件文本（token 逐字拼接成正文、think 进推理折叠区、tool_* 进工具调用区）。
+   * runDone 持最终 done 事件（ok + output_path + products）。
+   */
+  const [runOpen, setRunOpen] = useState(false)
+  const [runSkillId, setRunSkillId] = useState<string | null>(null)
+  const [runTokenText, setRunTokenText] = useState('')
+  const [runThinkText, setRunThinkText] = useState('')
+  const [runTools, setRunTools] = useState<{ name: string; output: string }[]>([])
+  const [runDone, setRunDone] = useState<SkillRunEvent | null>(null)
+  const [runLoading, setRunLoading] = useState(false)
+  const runStopRef = useRef<(() => void) | null>(null)
+
+  const handleRun = (skill: Skill) => {
+    if (!(skill.requires_tools && skill.requires_tools.length > 0)) return
+    setRunSkillId(skill.id)
+    setRunTokenText('')
+    setRunThinkText('')
+    setRunTools([])
+    setRunDone(null)
+    setRunLoading(true)
+    setRunOpen(true)
+    // 中止上一轮（若有）
+    runStopRef.current?.()
+    runStopRef.current = skillApi.run(skill.id, (ev: SkillRunEvent) => {
+      if (ev.kind === 'token') {
+        setRunTokenText((prev) => prev + (ev.content ?? ''))
+      } else if (ev.kind === 'think') {
+        setRunThinkText((prev) => prev + (ev.content ?? ''))
+      } else if (ev.kind === 'tool_start') {
+        const name = (ev.data && typeof ev.data === 'object' && 'name' in ev.data)
+          ? String(ev.data.name) : 'tool'
+        setRunTools((prev) => [...prev, { name, output: '' }])
+      } else if (ev.kind === 'tool_end') {
+        const name = (ev.data && typeof ev.data === 'object' && 'name' in ev.data)
+          ? String(ev.data.name) : 'tool'
+        const out = (ev.data && typeof ev.data === 'object' && 'output' in ev.data)
+          ? String(ev.data.output) : (ev.content ?? '')
+        setRunTools((prev) => {
+          const copy = [...prev]
+          // 找最后一个同名工具，填上输出
+          for (let i = copy.length - 1; i >= 0; i--) {
+            if (copy[i].name === name && copy[i].output === '') {
+              copy[i] = { name, output: out }
+              break
+            }
+          }
+          return copy
+        })
+      } else if (ev.kind === 'done') {
+        setRunDone(ev)
+        setRunLoading(false)
+      } else if (ev.kind === 'log' && ev.content) {
+        // log 事件（开始/完成/错误）轻提示，避免与正文区冲突
+        if (ev.content.includes('错误') || ev.content.includes('失败')) {
+          message.warning(ev.content)
+        }
+      }
+    })
+  }
+
+  const handleRunClose = () => {
+    runStopRef.current?.()
+    runStopRef.current = null
+    setRunOpen(false)
+    setRunLoading(false)
+  }
+
   /* ── 手动创建 ── */
   const handleManualCreate = async (values: {
     name: string
@@ -396,6 +470,19 @@ export default function SkillPage() {
                           }
                           style={{ width: 300 }}
                           actions={[
+                            ...(skill.requires_tools && skill.requires_tools.length > 0
+                              ? [
+                                  <Tooltip title="运行此技能（带受控工具+沙箱）" key="run">
+                                    <Button
+                                      type="text"
+                                      icon={<PlayCircleOutlined />}
+                                      onClick={() => handleRun(skill)}
+                                    >
+                                      运行
+                                    </Button>
+                                  </Tooltip>,
+                                ]
+                              : []),
                             <Tooltip title="挂载到智能体" key="mount">
                               <Button
                                 type="text"
@@ -756,6 +843,115 @@ export default function SkillPage() {
             },
           ]}
         />
+      </Modal>
+
+      {/* 运行技能 Modal（阶段四·task39）：CodeBuddy 气泡模式展示执行过程 */}
+      <Modal
+        open={runOpen}
+        title={
+          <Space>
+            <PlayCircleOutlined />
+            <span>运行技能：{skills.find((s) => s.id === runSkillId)?.name ?? runSkillId}</span>
+            {runLoading && <Tag color="processing">运行中</Tag>}
+            {runDone && (runDone.ok ? <Tag color="success">完成</Tag> : <Tag color="error">失败</Tag>)}
+          </Space>
+        }
+        width={680}
+        footer={[
+          <Button key="close" onClick={handleRunClose}>
+            {runLoading ? '后台继续' : '关闭'}
+          </Button>,
+        ]}
+        onCancel={handleRunClose}
+      >
+        <div style={{ maxHeight: '60vh', overflowY: 'auto' }}>
+          {/* 工具调用区 */}
+          {runTools.length > 0 && (
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>工具调用</div>
+              {runTools.map((t, i) => (
+                <div
+                  key={i}
+                  style={{
+                    background: 'var(--surface-elevated, #fafafa)',
+                    border: '1px solid #f0f0f0',
+                    borderRadius: 6,
+                    padding: '6px 10px',
+                    marginBottom: 4,
+                    fontSize: 12,
+                  }}
+                >
+                  <Typography.Text strong style={{ fontSize: 12 }}>🔧 {t.name}</Typography.Text>
+                  {t.output && (
+                    <pre style={{ margin: '4px 0 0', whiteSpace: 'pre-wrap', fontSize: 11, color: '#666' }}>
+                      {t.output.slice(0, 500)}
+                    </pre>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* 推理折叠区 */}
+          {runThinkText && (
+            <Collapse
+              size="small"
+              style={{ marginBottom: 12 }}
+              defaultActiveKey={['think']}
+              items={[
+                {
+                  key: 'think',
+                  label: '思考过程',
+                  children: (
+                    <Typography.Paragraph style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: '#888' }}>
+                      {runThinkText}
+                    </Typography.Paragraph>
+                  ),
+                },
+              ]}
+            />
+          )}
+
+          {/* 正文区（token 流式拼接） */}
+          {runTokenText && (
+            <div
+              style={{
+                background: 'var(--surface-elevated, #fafafa)',
+                border: '1px solid #f0f0f0',
+                borderRadius: 6,
+                padding: 12,
+                whiteSpace: 'pre-wrap',
+                fontSize: 13,
+              }}
+            >
+              {runTokenText}
+            </div>
+          )}
+
+          {/* 产物卡 */}
+          {runDone && runDone.ok && runDone.products && runDone.products.length > 0 && (
+            <div style={{ marginTop: 12 }}>
+              <div style={{ fontSize: 12, color: '#999', marginBottom: 4 }}>产物</div>
+              {runDone.products.map((p) => (
+                <Tag key={p} color="green" style={{ marginBottom: 4 }}>📦 {p}</Tag>
+              ))}
+            </div>
+          )}
+
+          {/* 运行中提示 */}
+          {runLoading && !runTokenText && !runThinkText && runTools.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#999', padding: 20 }}>
+              <Spin /> <span style={{ marginLeft: 8 }}>技能运行中…</span>
+            </div>
+          )}
+
+          {/* 失败提示 */}
+          {runDone && !runDone.ok && runDone.error && (
+            <div style={{ marginTop: 12, color: '#cf1322', fontSize: 13 }}>
+              ❌ 运行失败：{runDone.error}
+            </div>
+          )}
+        </div>
       </Modal>
     </div>
   )

@@ -172,7 +172,6 @@ async def run_agent_loop(
     tools = tools_for_group(group_id)
     mcp_tools = list(_EXTRA_TOOLS)
     tools = tools + mcp_tools
-
     # ── build the agent graph (factory owns the ReAct loop) ──
     # ChatOpenAI connection-level kwargs: only pass non-default values so the
     # framework's own defaults apply when the provider hasn't configured them
@@ -437,5 +436,210 @@ async def run_agent_loop(
         output = last_tool_output or "(无输出)"
         if on_log:
             await on_log("log", f"[完成] {output[:200]}", None)
+
+    return {"success": True, "exit_code": 0, "output": output[:2000]}
+
+
+# ── skill run loop (Claude Skills 化 · 阶段四·task38) ────────────────────
+# ``run_agent_loop`` is wired for the resident execute path: it hardcodes the
+# group-workspace tools (``tools_for_group``) + the per-run ``_EXTRA_TOOLS``
+# (MCP / skill tools set via ``set_extra_tools``), and emits via ``on_log``
+# onto a group's WS bus (``emit_task_*``). The skill **run endpoint** needs a
+# different topology: a transient agent with only the skill's controlled tools
+# (``file_read``/``file_write``/``bash_run`` bound to that skill's sandbox),
+# no group, no group WS bus — and it streams its events onto an SSE response
+# (task38) instead of a group WS channel. Rather than overload ``run_agent_loop``
+# with a sprawl of branches (group vs skill, WS vs SSE, group-tools vs
+# skill-tools), the skill run path is its own loop here, reusing the same
+# ``create_react_agent`` factory + ``astream_events`` projection so the
+# model→tool→model iteration stays framework-owned (memory
+# ``engines-use-frameworks-not-handrolled`` — no hand-rolled dispatcher).
+
+_SKILL_RUN_SYSTEM_SUFFIX = """
+
+You are running inside your skill's sandbox workspace. You have these tools:
+- file_read(path): read a file in the sandbox (truncated 8KB)
+- file_write(path, content): create or overwrite a file (products → output/)
+- bash_run(command, timeout=30): run a denylist-gated shell command in the sandbox
+
+Follow the skill's instructions. Produce deliverables under the output/ dir.
+When done, reply with a concise summary of what you produced.
+"""
+
+
+async def run_skill_loop(
+    *,
+    skill_id: str,
+    skill_name: str,
+    skill_content: str,
+    prompt: str,
+    tools: list,
+    on_event: Callable[[str, str, dict | None], Awaitable[None]] | None = None,
+    max_turns: int = DEFAULT_MAX_TURNS,
+    agent_model: str = "",
+) -> dict[str, Any]:
+    """Run a transient skill agent: ``create_react_agent`` + ``astream_events``.
+
+    Same framework-owned ReAct loop as ``run_agent_loop`` but decoupled from any
+    group: ``tools`` are the skill's controlled tools (bound to that skill's
+    sandbox), and ``on_event`` is an SSE-projecting callback (task38), not the
+    group-bus ``emit_task_*``. Events are the same kinds (token / tool_start /
+    tool_end / think / answer / log) so the frontend CodeBuddy bubble renderer
+    (task39) reuses one code path.
+
+    Returns ``{"success": bool, "exit_code": int, "output": str}`` — same shape
+    as ``run_agent_loop`` so callers share handling.
+    """
+    cfg = get_config()
+    model_name = agent_model or cfg["model"]
+
+    try:
+        chat_kwargs: dict[str, Any] = {
+            "model": model_name,
+            "base_url": cfg["base_url"],
+            "api_key": cfg["api_key"],
+            "temperature": cfg["temperature"],
+        }
+        max_tokens = cfg.get("max_tokens")
+        if max_tokens and int(max_tokens) > 0:
+            chat_kwargs["max_tokens"] = int(max_tokens)
+        max_retries = cfg.get("max_retries")
+        if max_retries is not None:
+            chat_kwargs["max_retries"] = int(max_retries)
+        request_timeout = cfg.get("request_timeout")
+        if request_timeout and float(request_timeout) > 0:
+            chat_kwargs["timeout"] = float(request_timeout)
+        organization = (cfg.get("organization") or "").strip()
+        if organization:
+            chat_kwargs["organization"] = organization
+        extra_headers = cfg.get("extra_headers")
+        if isinstance(extra_headers, dict) and extra_headers:
+            chat_kwargs["default_headers"] = dict(extra_headers)
+        model = ChatOpenAI(**chat_kwargs)
+    except Exception as exc:
+        logger.exception("[skill_loop %s] failed to init model", skill_name)
+        if on_event:
+            await on_event("log", f"[错误] 模型初始化失败: {exc}", None)
+        return {"success": False, "exit_code": 1, "output": f"model init error: {exc}"}
+
+    sys_content = ((skill_content or "")).strip()
+    if sys_content:
+        sys_content += "\n"
+    sys_content += _SKILL_RUN_SYSTEM_SUFFIX
+
+    try:
+        agent = create_react_agent(
+            model,
+            tools,
+            prompt=sys_content,
+            checkpointer=MemorySaver(),
+        )
+    except Exception as exc:
+        logger.exception("[skill_loop %s] create_react_agent failed", skill_name)
+        if on_event:
+            await on_event("log", f"[错误] 智能体图构建失败: {exc}", None)
+        return {"success": False, "exit_code": 1, "output": f"create_agent error: {exc}"}
+
+    recursion_limit = max_turns * 2 + 4
+    thread_id = f"skill_run_{skill_id}_{uuid4().hex}"
+    config = {
+        "configurable": {"thread_id": thread_id},
+        "recursion_limit": recursion_limit,
+    }
+
+    if on_event:
+        await on_event(
+            "log",
+            f"[开始] 技能 {skill_name} 运行（max_turns={max_turns}, recursion_limit={recursion_limit}）",
+            None,
+        )
+
+    output = ""
+    last_tool_output = ""
+
+    async def _emit(kind: str, content: str, data: dict | None = None) -> None:
+        if on_event is not None:
+            await on_event(kind, content, data)
+
+    try:
+        async for event in agent.astream_events(
+            {"messages": [HumanMessage(content=prompt)]},
+            config=config,
+            version="v2",
+        ):
+            etype = event["event"]
+            name = event.get("name", "")
+            data = event.get("data", {})
+
+            if etype == "on_tool_start":
+                args_input = data.get("input", {})
+                await _emit(
+                    "tool_start",
+                    f"[工具] {name}({_summarize_args(args_input)})",
+                    {"name": name, "args": args_input},
+                )
+            elif etype == "on_tool_end":
+                raw_output = data.get("output", "")
+                if hasattr(raw_output, "content"):
+                    out_str = str(raw_output.content)
+                else:
+                    out_str = str(raw_output)
+                last_tool_output = out_str
+                await _emit(
+                    "tool_end",
+                    f"[工具] {name} → {out_str[:200]}",
+                    {"name": name, "output": out_str[:2000]},
+                )
+            elif etype == "on_chat_model_stream":
+                chunk = data.get("chunk")
+                delta = ""
+                if chunk is not None:
+                    c = getattr(chunk, "content", None)
+                    if isinstance(c, str):
+                        delta = c
+                if delta:
+                    await _emit("token", delta, {"phase": "streaming"})
+            elif etype == "on_chat_model_end":
+                msg = data.get("output")
+                if isinstance(msg, AIMessage):
+                    ai_content = (
+                        msg.content if isinstance(msg.content, str) else str(msg.content)
+                    )
+                    if ai_content:
+                        output = ai_content
+                        tool_calls = getattr(msg, "tool_calls", None)
+                        if tool_calls:
+                            await _emit("think", ai_content, {"phase": "thinking"})
+                        else:
+                            await _emit("answer", output[:200], {"phase": "final"})
+            elif etype == "on_chain_end" and name == "model":
+                model_output = data.get("output")
+                ai_content = _extract_ai_content(model_output)
+                if ai_content and not output:
+                    output = ai_content
+                    tool_calls = _extract_tool_calls(model_output)
+                    if tool_calls:
+                        await _emit("think", ai_content, {"phase": "thinking"})
+                    else:
+                        await _emit("answer", output[:200], {"phase": "final"})
+
+    except GraphRecursionError:
+        logger.warning(
+            "[skill_loop %s] recursion limit %d reached", skill_name, recursion_limit
+        )
+        await _emit(
+            "log", f"[停止] 达到最大轮次 {max_turns}（recursion_limit={recursion_limit}）", None
+        )
+        if not output:
+            output = last_tool_output or "(达到最大轮次，无最终输出)"
+        return {"success": True, "exit_code": 0, "output": output[:2000]}
+    except Exception as exc:
+        logger.exception("[skill_loop %s] execution error", skill_name)
+        await _emit("log", f"[错误] 执行异常: {exc}", None)
+        return {"success": False, "exit_code": 1, "output": f"execution error: {exc}"}
+
+    if not output:
+        output = last_tool_output or "(无输出)"
+        await _emit("log", f"[完成] {output[:200]}", None)
 
     return {"success": True, "exit_code": 0, "output": output[:2000]}

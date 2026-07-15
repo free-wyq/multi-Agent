@@ -121,6 +121,7 @@ async def execute_agent_task(
     # 拼进 prompt（成本低、技能多不爆），全文 content 按 worker brain 决策再 load。
     # 旧全文直接拼路径（_compose_system_prompt）作兜底：开关关或 manifest 拉取失败时回退。
     mounted_skills = agent.get("mounted_skills") or []
+    skill_contents: list[str] = []
     if mounted_skills and _SKILL_PROGRESSIVE:
         manifest = await crud.resolve_skill_manifest(mounted_skills)
         if manifest:
@@ -143,9 +144,36 @@ async def execute_agent_task(
                     None,
                 )
 
+    # ── 额外工具累积（skill 受控工具 + MCP 工具，合并后一次性 set_extra_tools）──
+    # 阶段四·task36：技能 requires_tools → 受控工具池（file_read/file_write/bash_run，
+    # 绑各技能自家沙箱 workspace）。无 requires_tools 的技能不 bind（纯文档走 prompt 注入）。
+    # PL-07：MCP 连接 → 外部工具。两者合并进 _EXTRA_TOOLS 由 run_agent_loop 拼接 group
+    # 内置工具。注意：set_extra_tools 是覆盖语义，故先累积 extra_tools 再一次性 set，
+    # 否则后跑的块会冲掉先跑的块（早期实现 MCP 块覆盖 skill 工具的 bug）。
+    extra_tools: list = []
+    if mounted_skills:
+        skill_manifest = await crud.resolve_skill_manifest(mounted_skills)
+        if skill_manifest:
+            from engine.tools import resolve_skill_tools
+
+            skill_tools, tool_warnings = resolve_skill_tools(skill_manifest)
+            if skill_tools:
+                extra_tools.extend(skill_tools)
+                if on_log:
+                    await on_log(
+                        "log",
+                        f"[技能] 已绑定 {len(skill_tools)} 个受控工具: "
+                        + ", ".join(t.name for t in skill_tools),
+                        None,
+                    )
+            for w in tool_warnings:
+                logger.warning("[agent_executor] skill tool: %s", w)
+                if on_log:
+                    await on_log("log", f"[警告] 技能工具: {w}", None)
+
     # PL-07: load MCP tools from mounted connections, inject into the loop
     mounted_mcp = agent.get("mounted_mcp") or []
-    mcp_tools = []
+    mcp_tools: list = []
     if mounted_mcp:
         from engine.mcp_manager import load_mcp_tools
 
@@ -163,14 +191,15 @@ async def execute_agent_task(
                     + ", ".join(t.name for t in mcp_tools),
                     None,
                 )
-            set_extra_tools(mcp_tools)
-        else:
-            set_extra_tools([])
+            extra_tools.extend(mcp_tools)
+
+    # 一次性注入累积的额外工具（skill 受控 + MCP）。空也 set（清空上轮残留）。
+    set_extra_tools(extra_tools)
 
     logger.info(
-        "[agent_executor] group=%s agent=%s task_id=%s model=%s turns=%d skills=%d mcp=%d",
+        "[agent_executor] group=%s agent=%s task_id=%s model=%s turns=%d skills=%d mcp=%d extra_tools=%d",
         group_id, agent_name, task_id, agent_model or "(default)", max_turns,
-        len(skill_contents), len(mcp_tools),
+        len(skill_contents), len(mcp_tools), len(extra_tools),
     )
 
     try:

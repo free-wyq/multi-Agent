@@ -505,6 +505,11 @@ export interface Skill {
   installed: boolean
   content: string | null
   tags: string[]
+  // 阶段四·可执行技能 frontmatter（task31 起，纯文档技能为空数组）
+  requires_tools?: string[]
+  triggers?: string[]
+  outputs?: string[]
+  assets?: string[]
   mounted_to: string[]
   created_at: string
   updated_at: string
@@ -516,6 +521,10 @@ export interface SkillCreatePayload {
   content?: string
   source?: string
   tags?: string[]
+  // 阶段四·可执行技能 frontmatter（皆可选，默认空数组向后兼容）
+  requires_tools?: string[]
+  triggers?: string[]
+  outputs?: string[]
 }
 
 /**
@@ -626,6 +635,103 @@ export const skillApi = {
    */
   installMarket: (entryId: string) =>
     http<Skill>('POST', '/api/skills/market/install', { entry_id: entryId }),
+  /**
+   * 阶段四·task38: 运行一个可执行技能（带受控工具 + 沙箱），流式回传执行过程。
+   *
+   * POST /api/skills/{id}/run body={prompt?, max_turns?}。后端起临时 agent（技能
+   * content 作 system prompt + requires_tools 受控工具绑该技能沙箱 workspace），
+   * 跑 create_react_agent agentic loop，产物落 output/。
+   *
+   * 返回 SSE 流（text/event-stream），每事件一行 `data: <json>`：
+   *   {kind: 'token'|'tool_start'|'tool_end'|'think'|'answer'|'log', content, data?}
+   *   ... 最后 {kind: 'done', ok, run_id, output_path, products?, error?}
+   *
+   * 不走通用 http<T>（设 JSON Content-Type）——SSE 是流式响应，需 fetch + getReader
+   * 逐 chunk 解析（与 upload/downloadFile 同属非 JSON 交互独立 fetch）。回调式 onEvent
+   * 消费每条 SSE 事件，返回一个 stop 函数供调用方中止流。
+   *
+   * 安全契约：仅 requires_tools 非空技能可运行（纯文档技能后端 400）；不污染群聊
+   * GroupState（独立执行，非群图回合）。
+   */
+  run: (
+    id: string,
+    onEvent: (ev: SkillRunEvent) => void,
+    opts?: { prompt?: string; maxTurns?: number },
+  ): (() => void) => {
+    const controller = new AbortController()
+    void (async () => {
+      let resp: Response
+      try {
+        resp = await fetch(`${API_BASE}/api/skills/${id}/run`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+          body: JSON.stringify({ prompt: opts?.prompt, max_turns: opts?.maxTurns }),
+          signal: controller.signal,
+        })
+      } catch (e) {
+        onEvent({ kind: 'done', ok: false, run_id: '', output_path: null, error: String(e) })
+        return
+      }
+      if (!resp.ok || !resp.body) {
+        const text = await resp.text().catch(() => '')
+        onEvent({
+          kind: 'done', ok: false, run_id: '', output_path: null,
+          error: `API ${resp.status}: ${text}`,
+        })
+        return
+      }
+      const reader = resp.body.getReader()
+      const decoder = new TextDecoder()
+      let buf = ''
+      try {
+        for (;;) {
+          const { done, value } = await reader.read()
+          if (done) break
+          buf += decoder.decode(value, { stream: true })
+          // SSE 事件以 \n\n 分隔
+          let idx: number
+          while ((idx = buf.indexOf('\n\n')) >= 0) {
+            const raw = buf.slice(0, idx)
+            buf = buf.slice(idx + 2)
+            for (const line of raw.split('\n')) {
+              const s = line.trim()
+              if (s.startsWith('data: ')) {
+                try {
+                  onEvent(JSON.parse(s.slice(6)) as SkillRunEvent)
+                } catch {
+                  /* ignore malformed SSE line */
+                }
+              }
+            }
+          }
+        }
+      } catch (e) {
+        if ((e as Error).name !== 'AbortError') {
+          onEvent({ kind: 'done', ok: false, run_id: '', output_path: null, error: String(e) })
+        }
+      }
+    })()
+    return () => controller.abort()
+  },
+}
+
+/**
+ * 阶段四·task39: 技能运行 SSE 事件类型（skillApi.run 回调参数）.
+ *
+ * 与后端 api/skills.py run_skill 的 SSE 事件一一对应：
+ *  - token/tool_start/tool_end/think/answer/log：执行过程事件（content + 可选 data）
+ *  - done：收尾事件（ok + run_id + output_path + 可选 products/error）
+ */
+export interface SkillRunEvent {
+  kind: 'token' | 'tool_start' | 'tool_end' | 'think' | 'answer' | 'log' | 'done'
+  content?: string
+  data?: Record<string, unknown> | null
+  // done 事件专属字段
+  ok?: boolean
+  run_id?: string
+  output_path?: string | null
+  products?: string[]
+  error?: string
 }
 
 // ── MCP API (MC-01~06 MCP 工具集成) ──────────────────────────

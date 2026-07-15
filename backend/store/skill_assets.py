@@ -134,6 +134,11 @@ def delete_skill_assets(skill_id: str) -> None:
     No-op if the directory doesn't exist (content-only skill). Best-effort:
     filesystem errors are logged, not raised, so a stuck rmtree doesn't block a
     DB-side skill deletion (B31 错误处理重巡航——不静默吞，log 后继续).
+
+    NOTE: this removes the whole ``skills/{skill_id}/`` tree, which since task37
+    also contains the sandbox ``workspace/`` subdir. That is intentional — a
+    deleted skill's workspace is ephemeral run state and should not survive
+    the skill itself.
     """
     d = SKILLS_ROOT / skill_id
     if not d.exists():
@@ -142,3 +147,64 @@ def delete_skill_assets(skill_id: str) -> None:
         shutil.rmtree(d)
     except Exception:  # noqa: BLE001
         logger.warning("[skill_assets] rmtree failed for %s", skill_id, exc_info=True)
+
+
+# ── skill execution sandbox (Claude Skills 化 · 阶段四·task37) ──────────
+# A skill that declares ``requires_tools`` gets a dedicated sandbox workspace
+# under its own directory: ``DATA_DIR/skills/{skill_id}/workspace/``. The
+# controlled tools (file_read/file_write/bash_run, see engine.tools.tools_for_skill)
+# are cwd-bound here; products land in ``workspace/output/``. Path-safety
+# mirrors ``engine.workspace.safe_path`` (no escape via ``../``).
+#
+# MVP = 目录隔离（cwd 限制 + 路径校验）+ bash denylist。LocalWorkspace 直接操作
+# 本地 FS 是安全债——真正的隔离要容器/受限 shell（见 sandbox-design 记忆·长期债）。
+
+_SKILL_WORKSPACE_SUBDIR = "workspace"
+_SKILL_OUTPUT_SUBDIR = "output"
+
+
+def skill_workspace_path(skill_id: str) -> Path:
+    """Return (creating if needed) the sandbox workspace dir for a skill.
+
+    ``DATA_DIR/skills/{skill_id}/workspace/`` — sibling to the skill's
+    ``scripts/`` + ``templates/`` asset dirs. The ``output/`` subdir is created
+    alongside so the run endpoint (task38) has a stable products location to
+    report back. Idempotent (``mkdir parents=True, exist_ok=True``).
+    """
+    if not skill_id:
+        raise ValueError("skill_id 不可为空")
+    p = SKILLS_ROOT / skill_id / _SKILL_WORKSPACE_SUBDIR
+    p.mkdir(parents=True, exist_ok=True)
+    (p / _SKILL_OUTPUT_SUBDIR).mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def skill_output_path(skill_id: str) -> Path:
+    """Return (creating if needed) the ``workspace/output/`` products dir."""
+    p = skill_workspace_path(skill_id) / _SKILL_OUTPUT_SUBDIR
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def safe_skill_path(skill_id: str, rel: str) -> Path:
+    """Resolve ``rel`` to a path inside the skill's sandbox workspace.
+
+    ``rel`` may be empty (the workspace root itself), a relative path, or even
+    an absolute path — but the final resolved path must live inside the
+    workspace root. Anything that escapes (e.g. ``../../etc/passwd``) raises
+    ``ValueError``. Mirrors ``engine.workspace.safe_path`` so the two workspace
+    types share one path-safety contract (no drift).
+    """
+    if not skill_id:
+        raise ValueError("skill_id 不可为空")
+    ws = skill_workspace_path(skill_id).resolve()
+    if not rel or rel == ".":
+        return ws
+    candidate = (ws / rel).resolve()
+    try:
+        candidate.relative_to(ws)
+    except ValueError as exc:
+        raise ValueError(
+            f"路径越界（逃出技能工作区）: {rel}"
+        ) from exc
+    return candidate

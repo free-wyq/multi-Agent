@@ -12,17 +12,21 @@ Routes map to the frontend ``skillApi``:
   DELETE /api/skills/{id}                     → delete_skill        (SK-13 删除)
   POST   /api/skills/{id}/mount               → mount_skill         (SK-04/AG-08 挂载)
   POST   /api/skills/{id}/unmount             → unmount_skill       (AG-09 卸载)
+  POST   /api/skills/{id}/run                 → run_skill            (阶段四·task38 运行)
 """
 from __future__ import annotations
 
+import asyncio
 import io
 import json
 import logging
 import zipfile
 from pathlib import Path
+from uuid import uuid4
 
 from fastapi import APIRouter, File, Form, HTTPException, Query, UploadFile
 from pydantic import BaseModel
+from starlette.responses import StreamingResponse
 
 from llm.client import chat_completion, get_llm_config
 from llm.extract_json import extract_json
@@ -70,6 +74,17 @@ class GenerateSkillBody(BaseModel):
 
 class MountBody(BaseModel):
     agentId: str
+
+
+class RunSkillBody(BaseModel):
+    """阶段四·task38: 运行一个可执行技能的请求体.
+
+    ``prompt`` 是驱动该次运行的自然语言指令（默认让技能按自身 content 自主执行）。
+    ``max_turns`` 可选覆盖（不传用 ``run_skill_loop`` 默认 15）。
+    """
+
+    prompt: str | None = None
+    max_turns: int | None = None
 
 
 async def _generate_skill_via_llm(description: str) -> dict:
@@ -477,9 +492,166 @@ async def delete_skill(skill_id: str) -> bool:
 
 @router.post("/{skill_id}/mount")
 async def mount_skill(skill_id: str, body: MountBody) -> AgentDefinition | None:
+    """SK-04/AG-08: mount a skill onto an agent.
+
+    阶段四·task36：若该技能声明了 ``requires_tools``，挂载时校验引用的工具名
+    都在受控工具池（``file_read``/``file_write``/``bash_run``）内。引用了未知
+    工具名 → 不阻断挂载（技能仍可作纯文档注入），但记 warning 日志让运维可见
+    （前端可后续在挂载结果里展示）。挂载本身是幂等的 DB append，工具校验是
+    best-effort 告警，不改变 mount 的返回契约。
+    """
+    # best-effort requires_tools 校验（不阻断挂载，只告警）
+    skill = await crud.get_skill(skill_id)
+    if skill and skill.requires_tools:
+        from engine.tools import SKILL_TOOL_NAMES
+
+        unknown = [t for t in skill.requires_tools if t not in SKILL_TOOL_NAMES]
+        if unknown:
+            logger.warning(
+                "[skills] mount skill %s (%s): requires_tools 引用未知工具 %s "
+                "（可用 %s）—— 技能仍作纯文档注入，受控工具绑定跳过这些项",
+                skill_id, skill.name, unknown, list(SKILL_TOOL_NAMES),
+            )
     return await crud.mount_skill(body.agentId, skill_id)
 
 
 @router.post("/{skill_id}/unmount")
 async def unmount_skill(skill_id: str, body: MountBody) -> AgentDefinition | None:
     return await crud.unmount_skill(body.agentId, skill_id)
+
+
+@router.post("/{skill_id}/run")
+async def run_skill(skill_id: str, body: RunSkillBody):
+    """阶段四·task38: 运行一个可执行技能（带受控工具 + 沙箱）。
+
+    起一个临时 agent：该技能的 ``content`` 作 system prompt，``requires_tools``
+    解析出的受控工具（``file_read``/``file_write``/``bash_run``，绑该技能自家
+    沙箱 workspace）经 ``bind_tools`` 注入，跑 ``run_skill_loop``（``create_react_agent``
+    + ``astream_events``）。流式回传 token/tool/think/answer 事件（SSE），最终
+    返回 ``{ok, run_id, output_path}``。
+
+    安全契约（task40 全审锁死）：
+    - 仅 ``requires_tools`` 非空的技能可运行（纯文档技能无工具不可执行 → 400）；
+    - 不污染群聊 GroupState（独立执行，非群图回合）；
+    - 工具 cwd 限 ``DATA_DIR/skills/{id}/workspace/``，产物落 ``output/``，
+      路径穿越/危险命令由工具层拒绝（task35 denylist + safe_skill_path）。
+
+    流式协议：SSE（``text/event-stream``），每事件一行 ``data: <json>\\n\\n``。
+    事件 ``kind`` ∈ token/tool_start/tool_end/think/answer/log；最后一条
+    ``{"kind":"done","ok":...,"run_id":...,"output_path":...}`` 收尾。
+    """
+    skill = await crud.get_skill(skill_id)
+    if skill is None:
+        raise HTTPException(status_code=404, detail=f"技能 {skill_id} 不存在")
+
+    # 安全契约①：仅 requires_tools 非空的可运行（纯文档技能无工具不可执行）
+    if not skill.requires_tools:
+        raise HTTPException(
+            status_code=400,
+            detail="该技能未声明 requires_tools（纯文档技能不可运行，请挂载到智能体后在群聊中使用）",
+        )
+
+    # 校验 requires_tools 全部在受控工具池（防御性·mount 时已告警，run 时硬拒）
+    from engine.tools import SKILL_TOOL_NAMES, resolve_skill_tools
+
+    unknown = [t for t in skill.requires_tools if t not in SKILL_TOOL_NAMES]
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"技能引用了未知工具 {unknown}（可用：{list(SKILL_TOOL_NAMES)}）",
+        )
+
+    run_id = f"run_{uuid4().hex}"
+    # 准备沙箱 workspace（含 output/ 子目录）+ 解析受控工具
+    skill_assets.skill_workspace_path(skill_id)
+    manifest = [{
+        "id": skill_id, "name": skill.name, "description": skill.description or "",
+        "requires_tools": list(skill.requires_tools),
+        "triggers": list(skill.triggers or []),
+        "outputs": list(skill.outputs or []),
+    }]
+    tools, tool_warnings = resolve_skill_tools(manifest)
+    if tool_warnings:
+        # 多技能同名碰撞不会发生（单技能 run），但未知工具 run 时已硬拒上方；
+        # 这里仅记录到日志，不阻断（tools 非空即可继续）。
+        for w in tool_warnings:
+            logger.warning("[skills] run_skill %s: %s", skill_id, w)
+    if not tools:
+        raise HTTPException(
+            status_code=400,
+            detail="技能 requires_tools 解析后无可用工具（可能是工具名未知或重复）",
+        )
+
+    prompt = (body.prompt or "").strip() or "请按本技能文档的指引自主执行，产物输出到 output/ 目录。"
+    max_turns = body.max_turns or 15
+
+    async def event_stream():
+        """SSE generator: project run_skill_loop events onto text/event-stream."""
+        from engine.agent_loop import run_skill_loop
+
+        queue: asyncio.Queue = asyncio.Queue()
+
+        async def on_event(kind: str, content: str, data: dict | None = None):
+            await queue.put({"kind": kind, "content": content, "data": data})
+
+        async def runner():
+            try:
+                result = await run_skill_loop(
+                    skill_id=skill_id,
+                    skill_name=skill.name,
+                    skill_content=skill.content or "",
+                    prompt=prompt,
+                    tools=tools,
+                    on_event=on_event,
+                    max_turns=max_turns,
+                )
+                # 扫描产物目录，给出 output_path（首个产物文件相对路径）
+                out_dir = skill_assets.skill_output_path(skill_id)
+                # 产物在 output/ 子目录下，单独扫一遍
+                products: list[str] = []
+                if out_dir.exists():
+                    for f in sorted(out_dir.rglob("*")):
+                        if f.is_file():
+                            products.append(str(f.relative_to(out_dir)))
+                output_path = (out_dir / products[0]).as_posix() if products else None
+                await queue.put({
+                    "kind": "done",
+                    "ok": bool(result.get("success")),
+                    "run_id": run_id,
+                    "output_path": output_path,
+                    "products": products,
+                    "exit_code": result.get("exit_code"),
+                    "output": (result.get("output") or "")[:2000],
+                })
+            except Exception as exc:  # noqa: BLE001
+                logger.exception("[skills] run_skill %s failed", skill_id)
+                await queue.put({
+                    "kind": "done", "ok": False, "run_id": run_id,
+                    "output_path": None, "error": str(exc),
+                })
+            finally:
+                await queue.put(None)  # sentinel: stream end
+
+        task = asyncio.create_task(runner())
+        try:
+            while True:
+                item = await queue.get()
+                if item is None:
+                    break
+                yield f"data: {json.dumps(item, ensure_ascii=False)}\n\n"
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except Exception:  # noqa: BLE001
+                    pass
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",  # nginx 不缓冲，保证 SSE 实时
+        },
+    )
