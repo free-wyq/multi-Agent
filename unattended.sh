@@ -140,7 +140,7 @@ main_loop() {
 
   while true; do
     local REMAINING CURRENT_TASK
-    REMAINING=$(grep -c '\[ \]' "$TASK_FILE" 2>/dev/null || true)
+    REMAINING=$(grep -c '^- \[ \]' "$TASK_FILE" 2>/dev/null || true)
     REMAINING=${REMAINING:-0}
     COMPLETED=$((TOTAL - REMAINING))
 
@@ -150,12 +150,12 @@ main_loop() {
       # 双重校验：只看 [~] 阻塞标记存在 = 之前有空转被跳过的任务，说明 .task.md 被假推进过，
       # 此时 [ ] 归零是假的，不能退出，应报警让人工核实。
       local BLOCKED_COUNT
-      BLOCKED_COUNT=$(grep -c '\[~\]' "$TASK_FILE" 2>/dev/null || true)
+      BLOCKED_COUNT=$(grep -c '^- \[~\]' "$TASK_FILE" 2>/dev/null || true)
       BLOCKED_COUNT=${BLOCKED_COUNT:-0}
       if [ "$BLOCKED_COUNT" -gt 0 ]; then
         log "⚠️ 检测到 $BLOCKED_COUNT 个 [~] 阻塞任务 + REMAINING=0：疑假完成，不退出，人工核实"
         log "⚠️ 阻塞任务清单："
-        grep '\[~\]' "$TASK_FILE" 2>/dev/null | head -10 | while IFS= read -r line; do
+        grep '^- \[~\]' "$TASK_FILE" 2>/dev/null | head -10 | while IFS= read -r line; do
           log "   $line"
         done
         write_status "blocked" "疑假完成·$BLOCKED_COUNT 任务空转阻塞" 0 "$TOTAL"
@@ -199,6 +199,11 @@ main_loop() {
     local start_ts end_ts dur_min
     start_ts=$(date +%s)
     write_status "running" "$CURRENT_TASK" "$REMAINING" "$COMPLETED"
+
+    # 【Bug1 修复·2026-07-15】轮初记当前 HEAD，轮末对比是否前移，以此识别 worker
+    # 在轮内自提交（git diff --cached 看不到已 commit 的改动）。
+    local ROUND_HEAD=""
+    ROUND_HEAD=$(git rev-parse HEAD 2>/dev/null || true)
 
     # 核心：调用 Claude，注入"禁止提问"铁律
     # 注意：打勾由脚本在 claude 退出后用 sed 完成，不依赖 claude 自己改 .task.md
@@ -281,11 +286,23 @@ main_loop() {
     # 骨架/占位误判成「实现完整」直接退，git diff 空 → 若照常打勾，会连轮空转把
     # 整个 .task.md 假打勾到底，脚本判「全部完成」误退（见 unattended-false-completion-bug）。
     # 修法：零改动时不打勾，连续 N 轮空转同任务 → 标 [~] 阻塞，避免无限空转 + 假完成退出。
+    #
+    # 【Bug1 修复·2026-07-15】判改动不能只看 git diff --cached（工作区暂存）——worker
+    # 会在轮内自己 git commit（如 task24 commit 780c4cc 落在轮中），轮末 git add -A
+    # 后工作区已干净，diff --cached 为空 → 误判「零改动空转」→ worker 干了活却被连判
+    # 3 次空转 → 触发 Bug2 批量误标。改：轮初已记 ROUND_HEAD=git rev-parse HEAD，轮末
+    # 若 HEAD 前移（有新 commit）OR 有暂存改动，任一为真则 HAD_CHANGES=1。
     local TICK_RESULT="skip-nochange"
     local HAD_CHANGES=0
     if [ -d .git ]; then
       git add -A 2>/dev/null || true
-      if ! git diff --cached --quiet 2>/dev/null; then
+      local ROUND_HEAD_NOW=""
+      ROUND_HEAD_NOW=$(git rev-parse HEAD 2>/dev/null || true)
+      # HEAD 前移 = 本轮 worker 自提交了（最可靠信号）
+      if [ -n "${ROUND_HEAD:-}" ] && [ -n "$ROUND_HEAD_NOW" ] && [ "$ROUND_HEAD" != "$ROUND_HEAD_NOW" ]; then
+        HAD_CHANGES=1
+      # 或者还有未提交的暂存改动
+      elif ! git diff --cached --quiet 2>/dev/null; then
         HAD_CHANGES=1
       fi
     fi
@@ -311,8 +328,16 @@ main_loop() {
       log "⏸️ 零改动空转 #$STALL_COUNT: $task_key"
       if [ "${STALL_COUNT:-0}" -ge 3 ]; then
         # 同任务连续空转 3 次 → 判定 worker 卡死，标 [~] 阻塞跳过，推进到下一任务
-        sed -i "0,/^${task_key//\//\\/}/s/^- \[ \]/- [~]/" "$TASK_FILE" 2>/dev/null || \
-          sed -i '0,/^- \[ \]/s/^- \[ \]/- [~]/' "$TASK_FILE" 2>/dev/null
+        # 【Bug2 修复·2026-07-15】不能用 task_key 拼进双引号 sed——task_key 是任务描述，
+        # 含反引号时（如 `groupApi.stopTurn(groupId)`）bash 双引号内反引号=命令替换，
+        # 会执行那段命令并替换为空 → sed 模式被击穿成空正则 → 0,/^/ 匹配所有行首 →
+        # s/^- \[ \]/- [~]/ 把后续所有 [ ] 批量误标 [~]（task24-41 全军覆没根因）。
+        # 改用行号定位：取第一个 [ ] 的行号，sed 按行号精确改，彻底绕开特殊字符。
+        local block_lineno
+        block_lineno=$(grep -nE '^- \[ \]' "$TASK_FILE" 2>/dev/null | head -1 | cut -d: -f1 || true)
+        if [ -n "$block_lineno" ]; then
+          sed -i "${block_lineno}s/^- \[ \]/- [~]/" "$TASK_FILE" 2>/dev/null || true
+        fi
         TICK_RESULT="stalled-blocked"
         log "🚧 任务连续空转 3 次已标 [~] 阻塞跳过，推进下一任务（避免无限空转）"
         STALL_TASK=""; STALL_COUNT=0
@@ -322,7 +347,7 @@ main_loop() {
     # 打勾后重新计算剩余，写准确的完成状态
     # 注意：grep -c 无匹配返回非0，配合 set -e 会杀脚本，必须用 || true 兜底
     local NEW_REMAINING
-    NEW_REMAINING=$(grep -c '\[ \]' "$TASK_FILE" 2>/dev/null || true)
+    NEW_REMAINING=$(grep -c '^- \[ \]' "$TASK_FILE" 2>/dev/null || true)
     NEW_REMAINING=${NEW_REMAINING:-0}
     local NEW_COMPLETED=$((TOTAL - NEW_REMAINING))
 
@@ -331,7 +356,8 @@ main_loop() {
 
     # 每轮结束自动 commit（仅本地，不 push）
     # 由脚本提交而非 Claude，保证提交信息统一、不误提交运行产物
-    # 【防假完成·2026-07-14】HAD_CHANGES 已在打勾阶段算过，复用之，避免重复 git add
+    # 【Bug1 修复·2026-07-15】HAD_CHANGES 现在已能识别 worker 自提交。但若 worker 已自己
+    # commit，轮末 staged 为空，这里不应再重复提交（HEAD 已前移，进度已被记录）。
     if [ "$HAD_CHANGES" -eq 1 ] && [ -d .git ]; then
       # git add -A 已在打勾阶段执行过，此处直接判 staged
       if ! git diff --cached --quiet 2>/dev/null; then
@@ -398,7 +424,7 @@ bootstrap_tasks() {
   rm -f "${TASK_FILE}.raw"
 
   local TASK_COUNT
-  TASK_COUNT=$(grep -c '\[ \]' "$TASK_FILE" 2>/dev/null || echo 0)
+  TASK_COUNT=$(grep -c '^- \[ \]' "$TASK_FILE" 2>/dev/null || echo 0)
   if [ "$TASK_COUNT" -eq 0 ]; then
     log "❌ 任务拆解失败"
     rm -f "$TASK_FILE"
@@ -430,7 +456,7 @@ show_report() {
   if [ -f "$TASK_FILE" ]; then
     local total done
     total=$(grep -c '^- \[' "$TASK_FILE" 2>/dev/null || echo 0)
-    done=$(grep -c '\[x\]' "$TASK_FILE" 2>/dev/null || echo 0)
+    done=$(grep -c '^- \[x\]' "$TASK_FILE" 2>/dev/null || echo 0)
     echo "任务进度: $done / $total 已完成"
     echo ""
   fi
