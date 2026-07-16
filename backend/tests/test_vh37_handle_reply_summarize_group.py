@@ -135,8 +135,8 @@ def assert_contract() -> list[str]:
                       "incoming_data": {"task_id": "t1", "success": False}}
                 return await node_handle_reply_group(st)
         cmd = asyncio.run(_run_b4())
-        if cmd.goto != "summarize":
-            errs.append(f"[B4] failure+keep_failed+all_done 应 goto summarize，实际 {cmd.goto!r}")
+        if cmd.goto != "summarize_group":
+            errs.append(f"[B4] failure+keep_failed+all_done 应 goto summarize_group，实际 {cmd.goto!r}")
         elif cmd.update.get("dispatch_plan", [{}])[0].get("status") != "failed":
             errs.append("[B4] failed step 应标 failed")
         else:
@@ -194,8 +194,8 @@ def assert_contract() -> list[str]:
                       "incoming_data": {"task_id": "t1", "success": True}}
                 return await node_handle_reply_group(st)
         cmd = asyncio.run(_run_c7())
-        if cmd.goto != "summarize":
-            errs.append(f"[C7] success+all_done 应 goto summarize，实际 {cmd.goto!r}")
+        if cmd.goto != "summarize_group":
+            errs.append(f"[C7] success+all_done 应 goto summarize_group，实际 {cmd.goto!r}")
         else:
             print("[C7] OK  success+all_done → summarize_group")
     except Exception as e:  # noqa: BLE001

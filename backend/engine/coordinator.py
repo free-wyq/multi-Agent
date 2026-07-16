@@ -597,6 +597,107 @@ def _normalize_revised_step(raw: dict, plan: list[dict]) -> dict:
     }
 
 
+async def _normalize_plan_agent_ids(
+    group_id: str, plan: list[dict]
+) -> list[dict]:
+    """Resolve each step's ``agent_id`` to a real member id before fan-out.
+
+    The coordinator prompt exposes each member as ``- {name}（{role}）id=
+    {agent_id}`` and asks the LLM for strict JSON ``{"agent_id": "xxx"}``, but
+    the LLM frequently echoes the **role label** (``backend_engineer``) or the
+    **member name** (``后端工程师``) into ``agent_id`` instead of the real id
+    (``agent_backend_1``). On the resident dispatch path a bogus id is harmless
+    (``push_task(receiver_id=...)`` queues a task no engine claims). On the
+    GROUP path ``build_dispatch_sends`` mints ``Send(agent_node_target(id))`` =
+    ``agent_<bogus>``, a node the compiled graph never registered → LangGraph
+    silently drops it (``Ignoring unknown node name ... in pending sends``) →
+    the agent node never runs → no worker execute → no report-back → dependent
+    steps never satisfy ``depends_on`` → plan deadlock (mt14 step2 break).
+
+    This resolves a step's ``agent_id`` against the live roster by:
+      1. exact id match (already correct → unchanged),
+      2. exact role match (``backend_engineer`` → the member with that role),
+      3. exact name match (``后端工程师`` → the member with that name),
+      4. case-insensitive substring of the role/id as a last resort,
+    preferring non-coordinator members (the coordinator is a sub-node, not an
+    ``agent_<id>`` dispatch target). ``agent_name`` is re-synced from the
+    resolved member so the dispatch emit + summary stay consistent. Steps that
+    resolve to no member keep their original ``agent_id`` (the resident path's
+    tolerance is preserved — a bogus id degrades rather than raising, so a
+    cold/compile-failed group still dispatches to an inbox).
+
+    Single source: BOTH ``node_dispatch_next`` (resident, ``push_task``) and
+    ``node_dispatch_next_group`` (group, ``Send``) call this before fan-out, so
+    the step id + the ``emit_task_dispatched`` event's ``agent_id`` field are a
+    real member id on both paths. Never raises — a roster read failure returns
+    the plan unchanged (best-effort, degrades to the pre-fix tolerant behaviour).
+    """
+    if not plan:
+        return plan
+    try:
+        members = await crud.list_group_members_with_agent(group_id)
+    except Exception:  # noqa: BLE001
+        logger.exception(
+            "[coordinator] roster read failed for agent_id normalization "
+            "(group=%s); leaving plan agent_ids as-is (best-effort)",
+            group_id,
+        )
+        return plan
+    # non-coordinator members first (the coordinator is a sub-node, not a
+    # dispatch target); fall back to the full roster if a group has only the
+    # coordinator somehow.
+    workers = [m for m in members if m.agent_id != _coord_id_of(members, plan, group_id)]
+    pool = workers if workers else members
+    by_id = {m.agent_id: m for m in pool}
+    by_role = {m.agent_role: m for m in pool if m.agent_role}
+    by_name = {m.agent_name: m for m in pool if m.agent_name}
+
+    def _resolve(raw: str) -> str:
+        if not raw:
+            return raw
+        if raw in by_id:
+            return raw
+        if raw in by_role:
+            return by_role[raw].agent_id
+        if raw in by_name:
+            return by_name[raw].agent_id
+        low = raw.lower()
+        for m in pool:
+            if m.agent_role and m.agent_role.lower() == low:
+                return m.agent_id
+            if m.agent_name and m.agent_name == raw:
+                return m.agent_id
+        return raw
+
+    changed = False
+    for s in plan:
+        if not isinstance(s, dict):
+            continue
+        resolved = _resolve(str(s.get("agent_id", "") or ""))
+        if resolved and resolved != s.get("agent_id"):
+            s["agent_id"] = resolved
+            member = by_id.get(resolved)
+            if member and member.agent_name:
+                s["agent_name"] = member.agent_name
+            changed = True
+    if changed:
+        logger.info(
+            "[coordinator] normalized plan step agent_ids against roster "
+            "(group=%s, %d steps) — LLM had echoed role/name instead of id",
+            group_id, len(plan),
+        )
+    return plan
+
+
+def _coord_id_of(members: list, plan: list[dict], group_id: str) -> str:
+    """Best-effort coordinator id for a group (to exclude it from dispatch targets)."""
+    # a member whose role is "coordinator" is the Leader
+    for m in members:
+        if getattr(m, "agent_role", "") == "coordinator":
+            return m.agent_id
+    return ""
+
+
 def _splice_amended_steps(plan: list[dict], amended: list[dict]) -> list[dict]:
     """Splice user-amended steps (from a /plan/modify resume payload) into the plan.
 
@@ -1108,6 +1209,16 @@ async def node_dispatch_next(state: CoordinatorState) -> dict:
     coordinator_id = state["agent_id"]
     plan = state.get("dispatch_plan") or []
 
+    # Normalize step.agent_id against the live roster before fan-out (same
+    # single-source fix as the group ``node_dispatch_next_group`` — see its
+    # comment for the LLM-echoes-role-as-id defect). The resident path does
+    # not strictly need this (``push_task`` tolerates a bogus receiver_id) but
+    # applying it here keeps the resident + group dispatchers reading the same
+    # resolved id, so ``emit_task_dispatched``'s ``agent_id`` field is a real
+    # member id on BOTH paths (the frontend's task card + the MT-14/MT-15 e2e
+    # probes key off it).
+    plan = await _normalize_plan_agent_ids(group_id, plan)
+
     dispatched = await dispatch_ready_steps(group_id, coordinator_id, plan)
 
     if not dispatched:
@@ -1188,13 +1299,42 @@ async def node_dispatch_next_group(state: GroupState) -> Command:
     coordinator_id = state.get("coordinator_id") or state.get("agent_id") or ""
     plan = state.get("dispatch_plan") or []
 
+    # Normalize step.agent_id against the live roster BEFORE fan-out. The
+    # coordinator prompt exposes each member as ``- {name}（{role}）id={agent_id}``
+    # and asks for strict JSON ``{"agent_id": "xxx"}``, but the LLM frequently
+    # echoes the role label (``backend_engineer`` / ``frontend_engineer``) or
+    # the member name (``后端工程师``) into ``agent_id`` instead of the real id
+    # (``agent_backend_1``). On the resident path this is harmless —
+    # ``_dispatch_one`` does ``push_task(receiver_id=step.agent_id)`` and a
+    # bogus receiver_id simply queues a task no engine claims (the resident
+    # ``dispatch_ready_steps`` has no node-name lookup). On the GROUP path
+    # ``build_dispatch_sends`` mints ``Send(agent_node_target(step.agent_id))``
+    # = ``agent_<bogus>``, a node the compiled graph never registered →
+    # LangGraph drops it (``Ignoring unknown node name agent_frontend_engineer
+    # in pending sends``) → the step's agent node never runs → no worker
+    # execute → no report-back → dependent steps never satisfy their
+    # ``depends_on`` → plan deadlock (mt14 step2 re-dispatch break). Resolving
+    # the step's ``agent_id`` to a real member id here (single source, before
+    # BOTH the resident ``dispatch_ready_steps`` and the group
+    # ``build_dispatch_sends`` consume it) fixes the group path without
+    # disturbing the resident path (a correct id round-trips unchanged).
+    plan = await _normalize_plan_agent_ids(group_id, plan)
+
     sends, dispatched = build_dispatch_sends(group_id, coordinator_id, plan)
 
     if not dispatched:
         # no dispatchable step; if all done, summarize
         if plan and all(s.get("status") in ("completed", "failed") for s in plan):
+            # GROUP twin: goto must name the registered group node
+            # ``summarize_group`` (group_graph.py registers it as
+            # ``summarize_group``, NOT ``summarize`` — that bare name only
+            # exists in the resident coordinator graph). A bare ``summarize``
+            # goto here targets an unregistered node → LangGraph logs
+            # "wrote to unknown channel branch:to:summarize, ignoring it" →
+            # node_summarize_group never runs → no "all done" summary reply →
+            # mt14 checks 8/9 fail (task #37 root cause #3).
             return _Command(
-                goto="summarize",
+                goto="summarize_group",
                 update={"action_taken": "summarize", "dispatch_plan": plan},
             )
         # not all done + nothing dispatchable → END (in-flight steps running)
@@ -1373,7 +1513,11 @@ async def node_handle_reply_group(state: GroupState) -> Command:
         # after retry/reassign the step may be pending again (re-dispatched);
         # skip may have marked it completed (degraded). Re-evaluate all_done.
         if all(s.get("status") in ("completed", "failed") for s in plan):
-            return _Command(goto="summarize", update={"dispatch_plan": plan,
+            # GROUP twin: goto the registered ``summarize_group`` node, NOT the
+            # resident-only ``summarize`` (unregistered in the group graph →
+            # "wrote to unknown channel branch:to:summarize, ignoring it" → no
+            # summary reply → mt14 checks 8/9 fail). See task #37 root cause #3.
+            return _Command(goto="summarize_group", update={"dispatch_plan": plan,
                                                       "action_taken": "summarize"})
         # if the failed step was reset to pending (retry/reassign), skip the
         # MT-14 success-side adjustment — there are no fresh results to adjust
@@ -1383,7 +1527,11 @@ async def node_handle_reply_group(state: GroupState) -> Command:
 
     all_done = all(s.get("status") in ("completed", "failed") for s in plan)
     if all_done:
-        return _Command(goto="summarize", update={"dispatch_plan": plan,
+        # GROUP twin: goto the registered ``summarize_group`` node, NOT the
+        # resident-only ``summarize`` (unregistered in the group graph → goto
+        # ignored → no summary reply → mt14 checks 8/9 fail).
+        # See task #37 root cause #3.
+        return _Command(goto="summarize_group", update={"dispatch_plan": plan,
                                                   "action_taken": "summarize"})
 
     # MT-14: only ask the LLM to revise the remaining pending steps when this

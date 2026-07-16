@@ -773,7 +773,26 @@ async def make_agent_node(
         # templated announce + push_task to self (engine runs the agentic loop).
         preview = content[:30]
         await _unified_reply(group_id, agent_id, f"收到，我来 {preview}...")
-        await push_task(group_id, agent_id, agent_id, content, None)
+        # Carry the dispatch-side ``task_id`` (from the ``Send`` payload's
+        # ``incoming_data.task_id``, minted by ``build_dispatch_sends`` + stored
+        # on the plan step) through the inbox item's ``data.dispatch_task_id``
+        # so the engine's report-back (``_run_worker_task``) can hand the SAME
+        # id to ``handle_reply_group``'s ``step.task_id`` match. Without this
+        # linkage ``push_task`` mints its own ``tq_`` inbox id (the execute path's
+        # plumbing key — ``emit_task_completed`` / ``complete_task`` /
+        # ``current_task_id``) and the report-back carries that ``tq_`` id, which
+        # never matches the dispatch ``task_`` id on the plan step → the
+        # report-back misroutes to ``llm_decide`` (re-decision) instead of
+        # ``handle_reply_group`` → step1 stays ``dispatched``, dependent step2
+        # never satisfies its ``depends_on`` → plan deadlock (mt14 step2
+        # re-dispatch break). The resident path does not hit this:
+        # ``_dispatch_one`` does ``step["task_id"] = pushed["id"]`` so dispatch
+        # and execute share the same ``tq_`` id there.
+        dispatch_task_id = (state.get("incoming_data") or {}).get("task_id") or ""
+        exec_data = (
+            {"dispatch_task_id": dispatch_task_id} if dispatch_task_id else None
+        )
+        await push_task(group_id, agent_id, agent_id, content, exec_data)
         # execute ack ends the turn (no @mention handoff — the work continues
         # out-of-band via the task, not via the group graph).
         next_speaker: str | None = None

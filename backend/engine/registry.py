@@ -466,11 +466,23 @@ class AgentEngine:
             msg = f"步骤完成：{task_content}\n\n结果：{snippet or '已完成'}"
             rt = registry.get_runtime(group_id)
             if rt is not None and rt._graph is not None:
+                # report-back task_id = the DISPATCH-side ``task_`` id (minted by
+                # ``build_dispatch_sends``, threaded through the ``Send`` payload
+                # + the inbox item's ``data.dispatch_task_id``), NOT the ``tq_``
+                # execute-plumbing id (``task["id"]``). ``handle_reply_group``
+                # matches a plan step by ``step.task_id == incoming_data.task_id
+                # and step.status == "dispatched"``; the step carries the dispatch
+                # ``task_`` id, so the report-back must carry it too or the match
+                # misses → misroute to ``llm_decide`` → step1 stays ``dispatched``
+                # → dependent step2 never re-dispatches (mt14 break).
+                report_task_id = (task.get("data") or {}).get(
+                    "dispatch_task_id"
+                ) or task_id
                 await rt.invoke_turn(
                     incoming_kind="agent_reply",
                     incoming_message=msg,
                     incoming_sender=agent_id,
-                    incoming_data={"task_id": task_id, "success": success},
+                    incoming_data={"task_id": report_task_id, "success": success},
                 )
             else:
                 # dual-track fallback: no runtime (cold / compile-failed group /
@@ -615,11 +627,18 @@ class AgentEngine:
             msg = f"步骤完成：{task_content}\n\n结果：{timeout_result}"
             rt = registry.get_runtime(self.group_id)
             if rt is not None and rt._graph is not None:
+                # Same dispatch-task_id linkage as ``_run_worker_task``: the
+                # report-back must carry the dispatch ``task_`` id (on the plan
+                # step) so ``handle_reply_group``'s step match hits, not the
+                # ``tq_`` execute-plumbing id.
+                report_task_id = (task.get("data") or {}).get(
+                    "dispatch_task_id"
+                ) or task_id
                 await rt.invoke_turn(
                     incoming_kind="agent_reply",
                     incoming_message=msg,
                     incoming_sender=self.agent_id,
-                    incoming_data={"task_id": task_id, "success": False},
+                    incoming_data={"task_id": report_task_id, "success": False},
                 )
             else:
                 # dual-track fallback: no runtime → legacy notify to the
