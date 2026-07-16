@@ -163,8 +163,26 @@ class GroupRuntime:
           ``emit_agent_status(idle)`` fires (later ``invoke_turn`` task).
 
     Thread-safety: ``asyncio`` single-thread — the event + task handle + graph
-    are touched only from the event loop, so no lock is needed. ``request_stop``
-    / ``cancel_turn`` are safe to call from any coroutine in the loop.
+    are touched only from the event loop, so no lock is needed for THEM.
+    ``request_stop`` / ``cancel_turn`` are safe to call from any coroutine in
+    the loop. BUT a turn's ``graph.ainvoke`` IS serialized by ``_turn_lock``:
+    one ``GroupRuntime`` serves the whole group (user chat, plan resume, every
+    worker report-back all call ``invoke_turn``/``resume_plan`` on the SAME
+    runtime). Without serialization, a worker's report-back
+    (``registry._run_worker_task`` → ``invoke_turn``) can fire WHILE a prior
+    ``invoke_turn``/``resume_plan`` is mid-flight — both touch the runtime's
+    checkpointer thread (``resume_plan`` even REUSES the last turn's thread)
+    and both write the ``turn_count`` / ``current_speaker`` last-value channels,
+    so two concurrent ``ainvoke``s collide → ``InvalidUpdateError: At key
+    'turn_count': Can receive only one value per step``. The resident
+    ``AgentEngine`` avoids this via its ``asyncio.Queue`` inbox (one
+    ``_handle_task`` at a time); the group-graph analogue is this lock. A turn
+    acquires the lock around its whole body (identity resolve → ainvoke →
+    sync-back → idle emit) so concurrent turns queue rather than interleave —
+    matching the resident engine's serial-inbox semantics (a report-back that
+    lands mid-turn waits for the turn to end, exactly as it waits on the inbox).
+    ``cancel_turn`` does NOT take the lock (it cancels the stashed task; the
+    cancelled task's ``finally`` releases the lock — no deadlock).
     """
 
     def __init__(self, group: "Group | str") -> None:
@@ -185,6 +203,20 @@ class GroupRuntime:
         # Command(goto=END) so the current speaker finishes its step then the turn
         # ends gracefully.
         self._stop_event: asyncio.Event = asyncio.Event()
+
+        # ── turn serialization lock (one ainvoke at a time per group) ──
+        # One GroupRuntime serves the whole group: user chat, plan resume, and
+        # every worker report-back (registry._run_worker_task → invoke_turn) all
+        # call invoke_turn / resume_plan on THIS runtime. Without a lock, a
+        # report-back firing mid-turn would run a second graph.ainvoke
+        # concurrently — both writing the turn_count/current_speaker last-value
+        # channels on the runtime's checkpointer thread (resume_plan even REUSES
+        # the last turn's thread) → InvalidUpdateError: At key 'turn_count':
+        # Can receive only one value per step. The resident AgentEngine is
+        # serial via its asyncio.Queue inbox; this lock is the group-graph
+        # analogue. Acquired around the whole turn body; cancel_turn does NOT
+        # take it (it cancels the stashed task whose finally releases the lock).
+        self._turn_lock: asyncio.Lock = asyncio.Lock()
 
         # ── compiled group graph (filled by compile_graph, this task) ──
         # The per-group swarm graph (build_group_graph output): route_entry +
@@ -688,88 +720,99 @@ class GroupRuntime:
             )
             return None
 
-        # Per-turn START: reset the cooperative stop so a stale stop (from a
-        # previous request_stop / cancel_turn) does NOT suppress this fresh turn.
-        # ``route_entry`` + agent nodes check ``is_stopped()`` at entry (wired
-        # later); a fresh event lets the turn run.
-        self.reset_stop()
+        # Serialize turns: one graph.ainvoke at a time per group (see class
+        # docstring + _turn_lock). A worker report-back firing mid-turn would
+        # otherwise run a second ainvoke concurrently on this runtime and collide
+        # on the turn_count/current_speaker last-value channels. Holding the lock
+        # across the WHOLE turn (identity resolve → ainvoke → sync-back → idle
+        # emit) matches the resident engine's serial-inbox semantics — a
+        # report-back that lands mid-turn simply queues. cancel_turn does NOT
+        # take this lock; it cancels the stashed _current_task, whose finally
+        # below releases the lock (no deadlock: the task holds the lock, cancel
+        # sets CancelledError, the async-with exits, lock released).
+        async with self._turn_lock:
+            # Per-turn START: reset the cooperative stop so a stale stop (from
+            # a previous request_stop / cancel_turn) does NOT suppress this fresh turn.
+            # ``route_entry`` + agent nodes check ``is_stopped()`` at entry (wired
+            # later); a fresh event lets the turn run.
+            self.reset_stop()
 
-        leader = await self._resolve_leader_identity()
-        group_config = await self._resolve_group_config()
-        turn_input = self._build_turn_input(
-            incoming_kind, incoming_message, incoming_sender, incoming_data,
-            leader, group_config,
-        )
-        thread_id = self._next_thread_id()
-        config = {"configurable": {"thread_id": thread_id}}
-
-        # Install the engine-side reply callback for the duration of the invoke
-        # (mirrors the resident engine's set_reply_callback / finally clear).
-        reply_cb = self._reply_cb_factory()
-        coord_mod.set_reply_callback(reply_cb)
-        worker_mod.set_reply_callback(reply_cb)
-        # Task-17: install this runtime as the turn's GroupRuntime contextvar so
-        # the group graph's route_entry + every agent node (make_agent_node) can
-        # consult ``self.is_stopped()`` at entry (cooperative soft stop — on hit
-        # return Command(goto=END) instead of speaking). Cleared in ``finally``
-        # so the slot doesn't leak into the next turn (paired with the _REPLY_CB
-        # clear; per-task contextvar copy so concurrent group turns each see
-        # their own runtime — a request_stop on group A never bleeds into B).
-        worker_mod.set_group_runtime(self)
-
-        async def _ainvoke():
-            return await self._graph.ainvoke(turn_input, config=config)
-
-        task = self._start_turn_task(_ainvoke())
-        cancelled = False
-        result: dict[str, Any] | None = None
-        try:
-            result = await task
-        except asyncio.CancelledError:
-            # cancel_turn (hard backstop) cancelled the task: the
-            # CancelledError already broke the streaming LLM's async for
-            # mid-stream. Propagate it — the caller (registry) decides whether
-            # to absorb it (mirrors AgentEngine._handle_task's CancelledError
-            # branch). Mark cancelled so the finally skips the idle emit (the
-            # stop-button path owns the terminal UI state).
-            cancelled = True
-            raise
-        finally:
-            coord_mod.set_reply_callback(None)
-            worker_mod.set_reply_callback(None)
-            worker_mod.set_group_runtime(None)
-            self._end_turn()
-
-        # Normal END: sync the dispatch_plan back from the graph result (the
-        # coordinator's dispatch/handle_reply/summarize nodes mutate it) — the
-        # runtime's resident mirror is the /confirm|/direct|/modify pending
-        # guard + the /modify patch source (single source, mirrors the resident
-        # engine's mirror-sync at _handle_notify:701-704).
-        if result and isinstance(result, dict):
-            updated_plan = result.get("dispatch_plan")
-            if updated_plan is not None:
-                self._dispatch_plan = list(updated_plan)
-            # Record the turn's user-side memory (appended so the next turn's
-            # injection sees the conversation — mirrors the resident engine's
-            # self._memory.append at _handle_notify:710-715). Skip for a control-
-            # signal turn (plan_resume) whose incoming_message is empty — an
-            # empty "[user] " entry would pollute the Leader's context.
-            if incoming_kind != "plan_resume" and incoming_message:
-                self._memory.append(
-                    {
-                        "role": "user",
-                        "content": f"[{incoming_sender}] {incoming_message}",
-                    }
-                )
-
-        # Emit agent_status(idle) so the UI retires the「执行中」state — the
-        # turn is done (normal END). NOT fired on cancel (see above).
-        if not cancelled:
-            await emit_agent_status(
-                self.group_id, self.coordinator_id, leader.get("agent_name", ""),
-                "idle", None,
+            leader = await self._resolve_leader_identity()
+            group_config = await self._resolve_group_config()
+            turn_input = self._build_turn_input(
+                incoming_kind, incoming_message, incoming_sender, incoming_data,
+                leader, group_config,
             )
-        return result
+            thread_id = self._next_thread_id()
+            config = {"configurable": {"thread_id": thread_id}}
+
+            # Install the engine-side reply callback for the duration of the invoke
+            # (mirrors the resident engine's set_reply_callback / finally clear).
+            reply_cb = self._reply_cb_factory()
+            coord_mod.set_reply_callback(reply_cb)
+            worker_mod.set_reply_callback(reply_cb)
+            # Task-17: install this runtime as the turn's GroupRuntime contextvar so
+            # the group graph's route_entry + every agent node (make_agent_node) can
+            # consult ``self.is_stopped()`` at entry (cooperative soft stop — on hit
+            # return Command(goto=END) instead of speaking). Cleared in ``finally``
+            # so the slot doesn't leak into the next turn (paired with the _REPLY_CB
+            # clear; per-task contextvar copy so concurrent group turns each see
+            # their own runtime — a request_stop on group A never bleeds into B).
+            worker_mod.set_group_runtime(self)
+
+            async def _ainvoke():
+                return await self._graph.ainvoke(turn_input, config=config)
+
+            task = self._start_turn_task(_ainvoke())
+            cancelled = False
+            result: dict[str, Any] | None = None
+            try:
+                result = await task
+            except asyncio.CancelledError:
+                # cancel_turn (hard backstop) cancelled the task: the
+                # CancelledError already broke the streaming LLM's async for
+                # mid-stream. Propagate it — the caller (registry) decides whether
+                # to absorb it (mirrors AgentEngine._handle_task's CancelledError
+                # branch). Mark cancelled so the finally skips the idle emit (the
+                # stop-button path owns the terminal UI state).
+                cancelled = True
+                raise
+            finally:
+                coord_mod.set_reply_callback(None)
+                worker_mod.set_reply_callback(None)
+                worker_mod.set_group_runtime(None)
+                self._end_turn()
+
+            # Normal END: sync the dispatch_plan back from the graph result (the
+            # coordinator's dispatch/handle_reply/summarize nodes mutate it) — the
+            # runtime's resident mirror is the /confirm|/direct|/modify pending
+            # guard + the /modify patch source (single source, mirrors the resident
+            # engine's mirror-sync at _handle_notify:701-704).
+            if result and isinstance(result, dict):
+                updated_plan = result.get("dispatch_plan")
+                if updated_plan is not None:
+                    self._dispatch_plan = list(updated_plan)
+                # Record the turn's user-side memory (appended so the next turn's
+                # injection sees the conversation — mirrors the resident engine's
+                # self._memory.append at _handle_notify:710-715). Skip for a control-
+                # signal turn (plan_resume) whose incoming_message is empty — an
+                # empty "[user] " entry would pollute the Leader's context.
+                if incoming_kind != "plan_resume" and incoming_message:
+                    self._memory.append(
+                        {
+                            "role": "user",
+                            "content": f"[{incoming_sender}] {incoming_message}",
+                        }
+                    )
+
+            # Emit agent_status(idle) so the UI retires the「执行中」state — the
+            # turn is done (normal END). NOT fired on cancel (see above).
+            if not cancelled:
+                await emit_agent_status(
+                    self.group_id, self.coordinator_id, leader.get("agent_name", ""),
+                    "idle", None,
+                )
+            return result
 
     async def resume_plan(self, payload: dict[str, Any] | None) -> dict[str, Any] | None:
         """Resume the group graph's paused dispatch node via ``Command(resume=...)``.
@@ -805,51 +848,60 @@ class GroupRuntime:
             )
             return None
 
-        self.reset_stop()
-        # Reuse the runtime's current thread (the interrupt paused it); do NOT
-        # mint a fresh thread — a fresh thread has no paused state to resume.
-        thread_id = f"{self.thread_id}:{self._turn_seq}" if self._turn_seq else self.thread_id
-        config = {"configurable": {"thread_id": thread_id}}
+        # Same serialization as invoke_turn (see _turn_lock): a resume re-enters
+        # the LAST turn's checkpointer thread (it does NOT mint a fresh one),
+        # so it MUST NOT run concurrently with any other turn on this runtime —
+        # two concurrent ainvokes on the same thread would both write the
+        # turn_count/current_speaker last-value channels → InvalidUpdateError.
+        # Acquiring _turn_lock here also guards against a resume racing an
+        # in-flight worker report-back (registry._run_worker_task → invoke_turn):
+        # whichever arrives second queues, the prior's finally releases the lock.
+        async with self._turn_lock:
+            self.reset_stop()
+            # Reuse the runtime's current thread (the interrupt paused it); do NOT
+            # mint a fresh thread — a fresh thread has no paused state to resume.
+            thread_id = f"{self.thread_id}:{self._turn_seq}" if self._turn_seq else self.thread_id
+            config = {"configurable": {"thread_id": thread_id}}
 
-        reply_cb = self._reply_cb_factory()
-        coord_mod.set_reply_callback(reply_cb)
-        worker_mod.set_reply_callback(reply_cb)
-        # Task-17: install this runtime so route_entry + agent nodes consult
-        # ``is_stopped()`` at entry during the resume turn too (a resume is still
-        # a turn — a request_stop mid-resume should yield at the next node).
-        worker_mod.set_group_runtime(self)
+            reply_cb = self._reply_cb_factory()
+            coord_mod.set_reply_callback(reply_cb)
+            worker_mod.set_reply_callback(reply_cb)
+            # Task-17: install this runtime so route_entry + agent nodes consult
+            # ``is_stopped()`` at entry during the resume turn too (a resume is still
+            # a turn — a request_stop mid-resume should yield at the next node).
+            worker_mod.set_group_runtime(self)
 
-        async def _aresume():
-            return await self._graph.ainvoke(Command(resume=payload or {}), config=config)
+            async def _aresume():
+                return await self._graph.ainvoke(Command(resume=payload or {}), config=config)
 
-        task = self._start_turn_task(_aresume())
-        cancelled = False
-        result: dict[str, Any] | None = None
-        try:
-            result = await task
-        except asyncio.CancelledError:
-            cancelled = True
-            raise
-        finally:
-            coord_mod.set_reply_callback(None)
-            worker_mod.set_reply_callback(None)
-            worker_mod.set_group_runtime(None)
-            self._end_turn()
+            task = self._start_turn_task(_aresume())
+            cancelled = False
+            result: dict[str, Any] | None = None
+            try:
+                result = await task
+            except asyncio.CancelledError:
+                cancelled = True
+                raise
+            finally:
+                coord_mod.set_reply_callback(None)
+                worker_mod.set_reply_callback(None)
+                worker_mod.set_group_runtime(None)
+                self._end_turn()
 
-        if result and isinstance(result, dict):
-            updated_plan = result.get("dispatch_plan")
-            if updated_plan is not None:
-                self._dispatch_plan = list(updated_plan)
+            if result and isinstance(result, dict):
+                updated_plan = result.get("dispatch_plan")
+                if updated_plan is not None:
+                    self._dispatch_plan = list(updated_plan)
 
-        if not cancelled:
-            leader_name = ""
-            # best-effort leader name for the idle emit; the runtime does not
-            # cache it (read fresh in invoke_turn). ``""`` is acceptable — the
-            # idle emit's agent_name is cosmetic for the status card.
-            await emit_agent_status(
-                self.group_id, self.coordinator_id, leader_name, "idle", None,
-            )
-        return result
+            if not cancelled:
+                leader_name = ""
+                # best-effort leader name for the idle emit; the runtime does not
+                # cache it (read fresh in invoke_turn). ``""`` is acceptable — the
+                # idle emit's agent_name is cosmetic for the status card.
+                await emit_agent_status(
+                    self.group_id, self.coordinator_id, leader_name, "idle", None,
+                )
+            return result
 
     async def reset_session(self) -> None:
         """BE-02: clear cross-turn state + resolve a dangling interrupt.

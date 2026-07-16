@@ -169,7 +169,7 @@ async def collect(timeout: float, stop_types: tuple[str, ...]) -> list[dict]:
     """
     events: list[dict] = []
     deadline = time.time() + timeout
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         while time.time() < deadline:
             remaining = deadline - time.time()
             wait = max(0.1, min(QUIET, remaining))

@@ -55,7 +55,7 @@ async def collect_plan(timeout: float) -> tuple[dict | None, list[dict]]:
     plan_event: dict | None = None
     deadline = time.time() + timeout
 
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         # 发消息前先连上 WS，确保不漏事件
         sent = await send_user_message(GOAL)
         print(f"[send] user message id={sent['id'][:16]}...")

@@ -149,7 +149,7 @@ async def collect_events_until_idle(timeout: float) -> list[dict]:
     events: list[dict] = []
     deadline = time.time() + timeout
     try:
-        async with websockets.connect(WS_URL) as ws:
+        async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
             while time.time() < deadline:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=1.0)

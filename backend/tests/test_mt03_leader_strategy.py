@@ -114,7 +114,7 @@ async def collect_plan(timeout: float, goal: str) -> tuple[dict | None, list[dic
     events: list[dict] = []
     plan_event: dict | None = None
     deadline = time.time() + timeout
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         await send_user_message(goal)
         while time.time() < deadline and plan_event is None:
             try:

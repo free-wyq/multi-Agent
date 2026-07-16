@@ -619,6 +619,23 @@ async def make_agent_node(
     """
     group_id = state.get("group_id", "")
 
+    # ``is_dispatch_fanout`` (a ``Send`` from ``node_dispatch_next_group`` →
+    # ``incoming_kind == "coordinator_task"``) runs N agent nodes in ONE
+    # superstep. The serial peer-handoff path is one node per superstep, so it
+    # may freely write the ``turn_count`` / ``current_speaker`` last-value
+    # channels (last-write-wins merges cleanly). The fan-out path MUST NOT — N
+    # writers in one superstep collide
+    # (``InvalidUpdateError: Can receive only one value per step``). This guard
+    # is evaluated FIRST, before the entry guards below (already_spoke / stop),
+    # because those guards ALSO write ``current_speaker`` on their END path — if
+    # a fan-out sibling hits a guard it would still collide. So fan-out nodes
+    # take every early-exit path with an EMPTY update (no last-value writes),
+    # and the main return below (``if not is_dispatch_fanout``) already skips the
+    # last-value writes for fan-out. The only place a fan-out node legitimately
+    # writes is the reducer channels (``messages`` / ``recent_speakers``), which
+    # are safe for concurrent writers.
+    is_dispatch_fanout = state.get("incoming_kind", "") == "coordinator_task"
+
     # ── 图内防连发守卫（顺序乱根因①/②）────────────────────────
     # handoff 天然串行只一节点在跑，但「同一 agent 一回合被驱动两次」仍可能发生：
     # ① LLM 把话筒 @回刚发过言的人（"@前端 接着说" 而前端刚说完）；
@@ -638,6 +655,11 @@ async def make_agent_node(
             "不重复发言，回合 END",
             agent_name, state.get("recent_speakers"),
         )
+        # fan-out siblings share one superstep → write NO last-value channel
+        # (an empty update still ENDs the node; the per-step owner is already
+        # recorded on dispatch_plan). Only the serial peer path owns the baton.
+        if is_dispatch_fanout:
+            return Command(goto=END, update={})
         return Command(goto=END, update={"current_speaker": agent_id})
 
     # ── 协作式停止守卫（StopSignal·task-17）────────────────
@@ -659,6 +681,9 @@ async def make_agent_node(
             "用户喊停），不发言，回合 END（当前发言者已说完，不 mid-stream 强切）",
             agent_name,
         )
+        # same last-value guard as above: fan-out siblings write nothing.
+        if is_dispatch_fanout:
+            return Command(goto=END, update={})
         return Command(goto=END, update={"current_speaker": agent_id})
 
     # 1. context + display message (DB true source, same as node_brain_decide).
@@ -768,10 +793,10 @@ async def make_agent_node(
     # superstep → each bump lands in its own superstep → last-write-wins merges
     # cleanly), so it owns both. The dispatch fan-out path
     # (``incoming_kind == "coordinator_task"`` — a ``Send`` from
-    # ``node_dispatch_next_group``) runs N agent nodes in ONE superstep; there
-    # each agent executes→END and writes NEITHER (the per-step owner is already
-    # on ``dispatch_plan`` step.agent_id + the appended ``recent_speakers``).
-    is_dispatch_fanout = state.get("incoming_kind", "") == "coordinator_task"
+    # ``node_dispatch_next_group``, evaluated at node entry above) runs N agent
+    # nodes in ONE superstep; there each agent executes→END and writes NEITHER
+    # (the per-step owner is already on ``dispatch_plan`` step.agent_id + the
+    # appended ``recent_speakers``).
     recent_speakers = [agent_id]  # appended via reducer to the running list
     update: dict[str, Any] = {
         "messages": [AIMessage(content=content, name=agent_name, id=msg_id)],

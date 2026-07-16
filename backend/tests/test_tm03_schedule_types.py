@@ -146,7 +146,7 @@ async def collect_ws(stop_event: asyncio.Event, tail: float) -> list[dict]:
     """
     events: list[dict] = []
     try:
-        async with websockets.connect(WS_URL) as ws:
+        async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
             while not stop_event.is_set():
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=0.5)

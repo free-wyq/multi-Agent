@@ -268,9 +268,19 @@ async def collect_until_summary(
     initial_plan: dict | None = None
     summary_ev: dict | None = None
     deadline = time.time() + timeout
-    async with websockets.connect(ws_url) as ws:
+    # ping_interval=None 关闭 keepalive ping（默认 20s）：串行依赖链路（步骤1执行+
+    # report-back+调整+步骤2派发执行+汇总）在 reasoning 模型下可达数分钟，期间无业务
+    # 消息时 ping 超时会让服务端以 1011 断连，测试误判挂。max_size 抬到 8MB。
+    async with websockets.connect(
+        ws_url, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024,
+    ) as ws:
+        # send_action 并发跑（不 await 阻塞 recv）：POST /api/messages 同步 await 整个
+        # 协调者回合（ainvoke 可达数十秒），若在此 await，主循环不调 ws.recv() →
+        # 服务端 keepalive ping 读不到、pong 不发 → ping_timeout → 1011 断连。放
+        # background task 让主循环持续 recv（websockets 在 recv 时自动回 pong）。
+        send_task: asyncio.Task | None = None
         if send_action is not None:
-            await send_action()
+            send_task = asyncio.create_task(send_action())
         while time.time() < deadline and summary_ev is None:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
@@ -312,6 +322,8 @@ async def collect_until_summary(
                         except asyncio.TimeoutError:
                             break
                     break
+        if send_task is not None and not send_task.done():
+            send_task.cancel()
     # 兜底：从全量事件补扫
     for ev in events:
         if ev.get("type") == "task_dispatch" and ev not in dispatches:

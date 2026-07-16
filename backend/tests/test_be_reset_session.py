@@ -97,7 +97,7 @@ async def collect_plan_clear_event(timeout: float = 5.0) -> dict | None:
     """reset-session 应广播 coordinator_plan(plan=[])。WS 收一条 plan 事件。"""
     deadline = asyncio.get_event_loop().time() + timeout
     try:
-        async with websockets.connect(WS_URL) as ws:
+        async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
             while asyncio.get_event_loop().time() < deadline:
                 try:
                     raw = await asyncio.wait_for(ws.recv(), timeout=1.0)

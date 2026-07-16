@@ -223,7 +223,7 @@ async def collect_until_quiet(
     events: list[dict] = []
     last_ev_time = time.time()
     deadline = time.time() + hard_deadline
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         if send_action is not None:
             await send_action()
             last_ev_time = time.time()
@@ -244,7 +244,7 @@ async def collect_window(ws_url: str, duration: float, send_action=None) -> list
     """连 WS 收事件 ``duration`` 秒。"""
     events: list[dict] = []
     deadline = time.time() + duration
-    async with websockets.connect(ws_url) as ws:
+    async with websockets.connect(ws_url, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         if send_action is not None:
             await send_action()
         while time.time() < deadline:

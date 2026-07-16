@@ -44,20 +44,20 @@ DISPATCH_TIMEOUT = 60.0
 
 
 async def health_ok() -> bool:
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.get(f"{BASE}/health")
         return r.json().get("status") == "ok"
 
 
 async def get_group_config() -> dict | None:
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.get(f"{BASE}/api/groups/{GROUP_ID}")
         return r.json().get("config")
 
 
 async def set_auto_confirm(value: bool) -> dict | None:
     """直接 PUT /api/groups/{id} 改 config（保留其他键）。"""
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         cur = (await c.get(f"{BASE}/api/groups/{GROUP_ID}")).json()
         config = dict(cur.get("config") or {})
         config["auto_confirm"] = value
@@ -66,7 +66,7 @@ async def set_auto_confirm(value: bool) -> dict | None:
 
 
 async def send_user_message(content: str) -> dict:
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.post(
             f"{BASE}/api/messages",
             json={
@@ -81,13 +81,13 @@ async def send_user_message(content: str) -> dict:
 
 
 async def plan_confirm() -> dict:
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.post(f"{BASE}/api/groups/{GROUP_ID}/plan/confirm")
         return r.json()
 
 
 async def plan_direct() -> dict:
-    async with httpx.AsyncClient() as c:
+    async with httpx.AsyncClient(timeout=120.0) as c:
         r = await c.post(f"{BASE}/api/groups/{GROUP_ID}/plan/direct")
         return r.json()
 
@@ -105,9 +105,19 @@ async def collect_until(
     events: list[dict] = []
     hit: Any = None
     deadline = time.time() + timeout
-    async with websockets.connect(WS_URL) as ws:
+    # 客户端 ping_interval=None 关闭 websockets 库的 keepalive ping（默认 20s）——协调者
+    # 一回合 ainvoke 可达 50s+（reasoning 模型），客户端默认 ping 在长 recv 间隔下也易自伤。
+    # max_size 抬到 8MB 防 plan+trace 大事件被拒。
+    async with websockets.connect(
+        WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024,
+    ) as ws:
+        # send_action 并发跑（不 await 阻塞 recv）：POST /api/messages 同步 await 整个
+        # 协调者回合（ainvoke ~25s+），若在此 await，主循环不调 ws.recv() → 服务端的
+        # keepalive ping 帧读不到、pong 不发 → ping_timeout → 1011 断连。放 background
+        # task 让主循环持续 recv（websockets 在 recv 时自动回 pong），send 并行完成。
+        send_task: asyncio.Task | None = None
         if send_action is not None:
-            await send_action()
+            send_task = asyncio.create_task(send_action())
         while time.time() < deadline and hit is None:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
@@ -129,6 +139,8 @@ async def collect_until(
                     except asyncio.TimeoutError:
                         break
                 break
+        if send_task is not None and not send_task.done():
+            send_task.cancel()
     return events, hit
 
 

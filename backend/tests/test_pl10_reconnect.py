@@ -127,7 +127,7 @@ async def collect_until_plan(timeout: float) -> list[dict]:
     """WS#1：收事件直到抓到 coordinator_plan 或超时。"""
     events: list[dict] = []
     deadline = time.time() + timeout
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         while time.time() < deadline:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
@@ -150,7 +150,7 @@ async def collect_until_plan(timeout: float) -> list[dict]:
 
 async def collect_first_event(timeout: float) -> dict | None:
     """WS#2：收第一个事件（验证重连后实时通道），超时返回 None。"""
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         try:
             raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
             return json.loads(raw)
@@ -162,7 +162,7 @@ async def collect_until_sentinel(sentinel: str, timeout: float) -> list[dict]:
     """WS#2：收事件直到出现含哨兵的 agent_reply 或超时。"""
     events: list[dict] = []
     deadline = time.time() + timeout
-    async with websockets.connect(WS_URL) as ws:
+    async with websockets.connect(WS_URL, ping_interval=None, ping_timeout=None, max_size=8 * 1024 * 1024) as ws:
         while time.time() < deadline:
             try:
                 raw = await asyncio.wait_for(ws.recv(), timeout=timeout)
