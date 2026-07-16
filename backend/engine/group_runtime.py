@@ -78,6 +78,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import TYPE_CHECKING, Any
 
 from langgraph.graph import END
@@ -93,6 +94,20 @@ if TYPE_CHECKING:
     from models.group import Group
 
 logger = logging.getLogger("multi-agent.group_runtime")
+
+
+# ── 会话发言总量封顶（cross-turn safety backstop）──────────────────────
+# 按钮硬停（cancel_turn）+ 关键词软停（request_stop）之外的最后兜底：当二者都失效
+# 或用户不在场时，防止 agent 之间无限 handoff（成语接龙接疯 / A↔B 互相 @ 无限刷屏）
+# 烧 token。对标 AutoGen v0.4 ``MaxMessageTermination(N)`` / OpenAI Agents SDK
+# ``max_turns`` —— 跨回合的会话总量上限，与 per-turn 的 ``AGENT_NODE_MAX_HANDOFFS``
+# （单回合 handoff 链护栏，worker.py）是两个正交维度：
+#   · per-turn 8：单次 invoke 内一个 agent 接龙接疯的护栏（handoff 链长度）。
+#   · 会话 50：跨多次 invoke（多个用户回合）累计 agent 发言数的总闸。
+# 计一个 agent 节点发言一次 = +1（``record_speech``），不含 dispatch fan-out 的
+# execute 派工（那是中心化任务，不是来回对话）。撞顶后 route_entry / make_agent_node
+# 拦截，回合 END + emit 一条「已达上限」提示。env 可调；默认 50 给互动留够空间。
+SESSION_SPEECH_CAP = max(1, int(os.environ.get("MULTI_AGENT_SESSION_SPEECH_CAP", "50")))
 
 
 # ── per-turn fresh-thread key ────────────────────────────────────────
@@ -263,6 +278,18 @@ class GroupRuntime:
         # resident engine's accumulation hazard.
         self._memory: list[dict[str, str]] = []
         self._dispatch_plan: list[dict[str, Any]] = []
+
+        # ── 会话发言总量计数器（cross-turn safety backstop）──────────────
+        # 按钮硬停 + 关键词软停失效时的最后兜底（对标 AutoGen
+        # ``MaxMessageTermination`` / OpenAI ``max_turns``）。一个 agent 节点发言
+        # 一次 = +1（``record_speech``）；不含 dispatch fan-out 的 execute 派工
+        # （中心化任务，非来回对话）。撞 ``SESSION_SPEECH_CAP`` 后 route_entry /
+        # make_agent_node 拦截回合。**跨回合累加**——不随单回合 END 清零（接龙就是
+        # 多个短回合，单回合 reset 拦不住），只在 ``reset_session``（/new 开新对话）
+        # 时清零。``_cap_emitted`` 防撞顶后每回合都重复 emit 提示（撞一次即标记，
+        # reset_session 清）。
+        self._speech_count: int = 0
+        self._cap_emitted: bool = False
 
         # MemorySaver checkpointer key for this group's graph thread. One thread
         # per group (the whole group shares ONE graph, vs the resident per-agent
@@ -458,6 +485,42 @@ class GroupRuntime:
             "(next turn may run)",
             self.group_id,
         )
+
+    # ── session-speech cap (cross-turn backstop) ─────────────
+    def is_session_capped(self) -> bool:
+        """Whether the session has hit the speech cap (cross-turn backstop).
+
+        The third stop layer (alongside ``request_stop`` soft / ``cancel_turn``
+        hard): when the button and keyword both fail or the user is away, this
+        prevents unbounded agent handoff (成语接龙接疯 / A↔B 互相 @ 无限刷屏)
+        from burning tokens. Mirrors AutoGen ``MaxMessageTermination`` /
+        OpenAI ``max_turns``. ``route_entry`` + ``make_agent_node`` consult this
+        at entry (on hit the turn ENDs without speaking). **Cross-turn** — does
+        NOT reset per turn (only ``reset_session`` / ``/new`` clears it), which is
+        exactly why it catches a multi-turn 成语接龙 that the per-turn
+        ``_stop_event`` (reset each turn) misses.
+        """
+        return self._speech_count >= SESSION_SPEECH_CAP
+
+    async def record_speech(self) -> None:
+        """Increment the session speech counter (one agent spoke).
+
+        Called by ``make_agent_node`` AFTER an agent actually speaks (brain
+        replied), so the count reflects real agent replies — NOT dispatch
+        fan-out execute acks (those are centralized tasks, not back-and-forth
+        conversation, and counting them would burn the cap on a single dispatch
+        round). On reaching ``SESSION_SPEECH_CAP`` emits a single「已达上限」reply
+        (``_cap_emitted`` guards a one-shot so subsequent turns don't repeat it).
+        ``reset_session`` zeroes the count + the flag.
+        """
+        self._speech_count += 1
+        if self._speech_count >= SESSION_SPEECH_CAP and not self._cap_emitted:
+            self._cap_emitted = True
+            logger.info(
+                "[group_runtime] session speech cap hit: group=%s count=%d cap=%d "
+                "(turns will END without speaking; /new to reset)",
+                self.group_id, self._speech_count, SESSION_SPEECH_CAP,
+            )
 
     # ── turn task handle (cancellable ainvoke, mirrors _worker_task) ──
     def _start_turn_task(self, coro: Any) -> asyncio.Task[Any]:
@@ -947,9 +1010,13 @@ class GroupRuntime:
                 )
         self._memory.clear()
         self._dispatch_plan.clear()
+        # 会话发言计数器 + 撞顶标记也清零——/new 开新对话即重置封顶兜底，给新一轮
+        # 协作留满额度（对标 reset_session 清 _memory / _dispatch_plan 的「换话题重来」）。
+        self._speech_count = 0
+        self._cap_emitted = False
         logger.info(
             "[group_runtime] reset_session for group=%s (interrupt resolved + "
-            "memory + dispatch_plan cleared)",
+            "memory + dispatch_plan + speech_count cleared)",
             self.group_id,
         )
 

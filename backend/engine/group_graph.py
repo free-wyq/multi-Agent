@@ -288,6 +288,20 @@ async def route_entry(state: GroupState) -> Command:
         turn_count = (state.get("turn_count") or 0) + 1
         return Command(goto="classify", update={"turn_count": turn_count})
 
+    # ── 会话发言总量封顶守卫（cross-turn backstop·standalone）────────
+    # 按钮硬停 + 关键词软停失效时的最后兜底（对标 AutoGen ``MaxMessageTermination``）。
+    # 跨回合累加——不随单回合 END 清零（接龙是多个短回合，单回合 _stop_event 拦不住），
+    # 只在 reset_session（/new）清零。**放在 report-back 早返回之后**：worker 跑完派工
+    # 步骤的回报（agent_reply + task_id）是中心化 DAG 收尾，挡它会致派工步骤永远停在
+    # dispatched（split-brain 死锁），所以 report-back 必须先放过。闲聊接龙撞顶正是要拦
+    # 的目标——它无 task_id，走不到 report-back 早返回，被本守卫拦下。
+    if rt is not None and rt.is_session_capped():
+        logger.debug(
+            "[group_graph] route_entry 会话封顶守卫命中（standalone）：speech_count 已达上限，"
+            "不选发言者，回合 END（跨回合兜底·/new 重置）",
+        )
+        return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
+
     turn_count = (state.get("turn_count") or 0) + 1
     # Reached the in-graph handoff cap before any agent even spoke? End the
     # turn (defensive — route_entry itself counts as one handoff step).
@@ -384,6 +398,8 @@ def build_route_entry(handoff_targets: set[str]):
         # worker 跑完派工步骤的回报 → 中心化 classify → handle_reply_group。不解析
         # @mention（回报消息无 @）。无 task_id 的 agent_reply = peer handoff（去中心化），
         # 走下方 _resolve_handoff_target。两份 route_entry 须同步（vh40 锁）。
+        # **report-back 早返回必须在会话封顶守卫之前**：派工回报是中心化 DAG 收尾，
+        # 撞顶也不能挡它（否则派工步骤永远停在 dispatched，split-brain 死锁）。
         if _is_report_back(state):
             logger.debug(
                 "[group_graph] route_entry execute-path report-back 命中："
@@ -392,6 +408,19 @@ def build_route_entry(handoff_targets: set[str]):
             )
             turn_count = (state.get("turn_count") or 0) + 1
             return Command(goto="classify", update={"turn_count": turn_count})
+
+        # ── 会话发言总量封顶守卫（cross-turn backstop·closure-bound twin）──
+        # 与 standalone route_entry 同款（vh40 锁两份同步）：撞 SESSION_SPEECH_CAP 后
+        # 不选发言者直接 END。跨回合累加、只在 reset_session（/new）清零——这正是拦住
+        # 多回合成语接龙的关键（单回合 _stop_event 每回合 reset 拦不住）。放在 report-back
+        # 早返回之后，让中心化派工回报照常收尾（挡它会 split-brain 死锁）；闲聊接龙无
+        # task_id 走不到 report-back，被本守卫拦下。
+        if rt is not None and rt.is_session_capped():
+            logger.debug(
+                "[group_graph] route_entry 会话封顶守卫命中：speech_count 已达上限，"
+                "不选发言者，回合 END（跨回合兜底·/new 重置）",
+            )
+            return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
 
         turn_count = (state.get("turn_count") or 0) + 1
         if turn_count >= AGENT_NODE_MAX_HANDOFFS:

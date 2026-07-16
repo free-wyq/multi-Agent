@@ -686,6 +686,24 @@ async def make_agent_node(
             return Command(goto=END, update={})
         return Command(goto=END, update={"current_speaker": agent_id})
 
+    # ── 会话发言总量封顶守卫（cross-turn backstop·StopSignal 第三层）──
+    # 按钮硬停（cancel_turn）+ 关键词软停（request_stop）失效 / 用户不在场时的最后兜底，
+    # 对标 AutoGen ``MaxMessageTermination`` / OpenAI ``max_turns``。``route_entry`` 入口
+    # 已查过一次（跨回合拦截），这里是节点入口的二次守卫——撞顶后本 agent 不发言直接 END。
+    # **只挡闲聊/handoff（is_dispatch_fanout False），不挡 dispatch fan-out 派工 execute**：
+    # 派工是中心化任务（DAG 扇出 N 个 worker 各跑一步），不是来回对话，挡它会让派工
+    # 永远完不成（deadlock）。闲聊接龙撞顶正是要拦的目标。runtime None（驻留 worker 图 /
+    # 群图在 GroupRuntime 之外被 invoke）→ 无计数器，守卫跳过（向后兼容）。
+    if not is_dispatch_fanout:
+        rt_cap = get_group_runtime()
+        if rt_cap is not None and rt_cap.is_session_capped():
+            logger.debug(
+                "[worker %s] agent-node 会话封顶守卫命中：speech_count 已达上限，"
+                "不发言，回合 END（跨回合兜底·/new 重置）",
+                agent_name,
+            )
+            return Command(goto=END, update={"current_speaker": agent_id})
+
     # 1. context + display message (DB true source, same as node_brain_decide).
     context = await _build_context_from_db(group_id, coordinator_id)
     display_msg = _format_display_msg(
@@ -799,6 +817,13 @@ async def make_agent_node(
     else:
         # chat / ask — the streamed reply IS the persisted content; carry stats.
         await _unified_reply(group_id, agent_id, content, data=stats)
+        # 会话发言总量计数（cross-turn backstop）：一个 agent 节点发言一次 +1。
+        # 只在闲聊/handoff 路径计（execute 派工是中心化任务不计，已在上面 is_dispatch_fanout
+        # 分支 return）。撞 SESSION_SPEECH_CAP 后 record_speech 内部 emit 一条「已达上限」提示
+        # （_cap_emitted 一次性守卫）。runtime None（驻留图）→ 无计数器，跳过（向后兼容）。
+        rt_speak = get_group_runtime()
+        if rt_speak is not None:
+            await rt_speak.record_speech()
         # 4. resolve next speaker from the reply's @mention.
         next_speaker = await _resolve_handoff_target(
             group_id, coordinator_id, agent_id, content,
