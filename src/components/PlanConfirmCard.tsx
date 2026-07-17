@@ -54,6 +54,13 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
 
   const pendingCount = plan.filter((s) => s.status === 'pending').length
   const hasPending = pendingCount > 0
+  const allDone =
+    plan.length > 0 &&
+    plan.every((s) => s.status === 'completed' || s.status === 'failed')
+  // 只读进度模式（Bug B）：无 pending 且未全完成 = 直接干飞行中（dispatched/completed 混合）。
+  // 隐藏确认/直接干（无 pending 可操作），步骤徽标随 coordinator_plan 事件实时翻色；
+  // summarize emit [] → plan 清空 → 卡片自动隐藏；!allDone 时保留「修改」可中途改计划。
+  const inProgress = !hasPending && !allDone
   const busy = confirming || directing || modifying
 
   const handleConfirm = async () => {
@@ -162,17 +169,23 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
           <Tag color="purple" style={{ margin: 0 }}>协调者计划</Tag>
           <span style={{ fontSize: 13, color: '#666' }}>
             共 {plan.length} 步 · 待执行 {pendingCount}
+            {inProgress && ` · 执行中 ${plan.filter((s) => s.status === 'completed').length}/${plan.length}`}
           </span>
         </span>
       }
     >
-      <Alert
-        type="info"
-        showIcon
-        style={{ marginBottom: 12 }}
-        message="请确认是否按此计划执行"
-        description="确认继续 → 按原计划派发；直接干 → 本群后续计划自动派发不再确认；修改 → 编辑步骤后派发。"
-      />
+      {/* 确认模式（有 pending）：展示确认提示 + 三按钮。
+       * 只读进度模式（inProgress 直接干飞行中）：隐藏确认提示，步骤徽标实时翻色。
+       * Bug B：计划实时可视化——卡片常驻到 summarize 清空 plan。 */}
+      {hasPending && (
+        <Alert
+          type="info"
+          showIcon
+          style={{ marginBottom: 12 }}
+          message="请确认是否按此计划执行"
+          description="确认继续 → 按原计划派发；直接干 → 本群后续计划自动派发不再确认；修改 → 编辑步骤后派发。"
+        />
+      )}
 
       {/* 步骤列表 */}
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6, marginBottom: 12 }}>
@@ -213,32 +226,40 @@ export default function PlanConfirmCard({ groupId, plan, refreshPlan }: PlanConf
         })}
       </div>
 
-      {/* 操作按钮：确认/直接干需有待执行步骤；三者互斥（任一进行中禁用其余）。 */}
+      {/* 操作按钮：确认/直接干需有待执行步骤；三者互斥（任一进行中禁用其余）。
+       * 只读进度模式（inProgress 无 pending）隐藏确认/直接干——无 pending 可操作；
+       * !allDone 时保留「修改」可中途改计划；全完成时按钮全隐（卡片等 summarize 清空 plan）。 */}
       <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-        <Button
-          type="primary"
-          icon={<CheckOutlined />}
-          loading={confirming}
-          disabled={!hasPending || (busy && !confirming)}
-          onClick={handleConfirm}
-        >
-          确认继续
-        </Button>
-        <Button
-          icon={<ThunderboltOutlined />}
-          loading={directing}
-          disabled={!hasPending || (busy && !directing)}
-          onClick={handleDirectRun}
-        >
-          直接干
-        </Button>
-        <Button
-          icon={<EditOutlined />}
-          disabled={plan.length === 0 || (busy && !modifying)}
-          onClick={openModify}
-        >
-          修改
-        </Button>
+        {hasPending && (
+          <>
+            <Button
+              type="primary"
+              icon={<CheckOutlined />}
+              loading={confirming}
+              disabled={!hasPending || (busy && !confirming)}
+              onClick={handleConfirm}
+            >
+              确认继续
+            </Button>
+            <Button
+              icon={<ThunderboltOutlined />}
+              loading={directing}
+              disabled={!hasPending || (busy && !directing)}
+              onClick={handleDirectRun}
+            >
+              直接干
+            </Button>
+          </>
+        )}
+        {!allDone && (
+          <Button
+            icon={<EditOutlined />}
+            disabled={plan.length === 0 || (busy && !modifying)}
+            onClick={openModify}
+          >
+            修改
+          </Button>
+        )}
       </div>
 
       {/* 修改弹窗 */}

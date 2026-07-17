@@ -538,12 +538,12 @@ export default function ChatPanel({
         : undefined)
     : undefined
 
-  // 计划含 pending 步骤 → 展示计划确认卡片（M12-PL02）。
-  const showPlanCard =
-    !!chatGroupId &&
-    !!plan &&
-    plan.length > 0 &&
-    plan.some((s) => s.status === 'pending')
+  // 计划存在即展示（Bug B：实时可视化）。去掉「必须含 pending」门槛——「直接干」模式
+  // auto_confirm 跳过 interrupt，pending 几乎瞬间翻 dispatched，原门槛致卡片永不显示。
+  // 现在只要 plan.length>0 就显示：确认模式（有 pending，带确认按钮）或只读进度模式
+  // （无 pending，dispatched/completed 混合实时翻色）。node_summarize_group emit [] →
+  // plan 清空 → 卡片自动隐藏。
+  const showPlanCard = !!chatGroupId && !!plan && plan.length > 0
 
   // ST-02：流式 token 接入聊天气泡逐字渲染。
   // BusEventContext.streaming[task_id] 是 PL-08 逐字增量拼接的「正在生成」缓冲。
@@ -570,16 +570,19 @@ export default function ChatPanel({
 
   // 协调者流式气泡：coordinator_token 按 reply_id 累积的 delta，配合 coordinator_stats
   // 渲染 Claude-Code 风格状态行（"model · Ns · ↓ N tokens（含 N 推理）· thinking"）。
-  // 与 worker 流式气泡区别：协调者无 task_id（不经 create_react_agent），按 reply_id 归并；
-  // sender 是 group.coordinator_id（真实 agent_id，ChatAvatar/SenderName 据此解析角色色/名）。
+  // 与 worker 流式气泡区别：协调者无 task_id（不经 create_react_agent），按 reply_id 归并。
+  // Bug A：senderId 从 coordStreaming[reply_id].senderId 取（事件携带，coordinator_token→
+  // coordinator_id；worker 单聊/脑回路 task_token→worker agent_id），不再硬编码「群主(协调者)」。
+  // 缺省回退 coordinator（防事件缺 sender_id 的陈旧/异常路径）。
   // phase="done" 时 useBusEvent 清空 coordStreaming[reply_id] → 气泡自然退场，
   // 由随后落地的持久化 agent_reply 接管（同 worker streaming→finalized 模式）。
   // reasoning 取 coordReasoning[reply_id]——推理模型在可见 content 前流出的内部思维链，
   // 传给 ChatMessageBubble 渲染默认折叠的「思考过程」区，用户可自行展开/收起。
   const coordinatorStreamingBubbles = chatGroupId
-    ? Object.entries(coordStreaming).map(([replyId, content]) => ({
+    ? Object.entries(coordStreaming).map(([replyId, entry]) => ({
         replyId,
-        content,
+        content: entry.content,
+        senderId: entry.senderId || group?.coordinator_id || 'coordinator',
         reasoning: coordReasoning[replyId] || '',
         stats: coordStats[replyId],
       }))
@@ -1322,14 +1325,21 @@ export default function ChatPanel({
           const phaseLabel =
             stats?.phase === 'done' ? '完成' : '思考中'
           const model = stats?.model
+          // Bug A：senderId/名/头像从事件携带的 senderId 解析（coordinator_token→coordinator_id；
+          // worker 单聊/脑回路 task_token→worker agent_id），不再硬编码「群主(协调者)」。
+          // coordinatorId 气泡（id===group.coordinator_id 或 fallback 'coordinator'）显「群主(协调者)」，
+          // 其他 id 走 SenderName 查 agents 取 agent 名——worker 推理流式由此冠到正确 worker 头像下。
+          const senderId = b.senderId
+          const senderName =
+            senderId === (group?.coordinator_id ?? 'coordinator') || senderId === 'coordinator'
+              ? '群主(协调者)'
+              : (agents.find((a) => a.id === senderId)?.name ?? senderId.slice(0, 8) + '...')
           return (
             <ChatMessageBubble
               key={`coord-streaming-${b.replyId}`}
-              senderId={group?.coordinator_id ?? 'coordinator'}
-              senderName="群主(协调者)"
-              avatar={
-                <ChatAvatar id={group?.coordinator_id ?? 'coordinator'} agents={agents} />
-              }
+              senderId={senderId}
+              senderName={senderName}
+              avatar={<ChatAvatar id={senderId} agents={agents} />}
               content={b.content}
               reasoning={b.reasoning || undefined}
               reasoningTokens={reasoningTokens}

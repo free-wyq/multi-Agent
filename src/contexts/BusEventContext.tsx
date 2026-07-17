@@ -37,8 +37,10 @@ export interface BusEventContextValue {
   agentStatuses: Record<string, AgentStatusInfo>
   plan: PlanStep[] | null
   streaming: Record<string, string>
-  /** 协调者流式回复：reply_id → 累积的可见 content delta（coordinator_token 逐字拼接）。 */
-  coordStreaming: Record<string, string>
+  /** 协调者流式回复：reply_id → { content: 累积的可见 content delta, senderId: 发言者 agent_id }。
+   *  senderId 由事件携带（coordinator_token→coordinator_id；worker 单聊/脑回路 task_token→worker agent_id），
+   *  Bug A：渲染层据此把 worker 推理流式冠到正确 worker 头像下，而非硬编码「群主(协调者)」。 */
+  coordStreaming: Record<string, { content: string; senderId: string }>
   /** 协调者流式推理：reply_id → 累积的 reasoning_content delta（coordinator_reasoning 逐字拼接）。
    *  推理模型（DeepSeek/o1 类）在可见 content 之前流出内部思维链；非推理模型不流，条目不存在。 */
   coordReasoning: Record<string, string>

@@ -113,13 +113,19 @@ export function useBusEvent(groupId: string | null) {
   const [plan, setPlan] = useState<PlanStep[] | null>(null)
   const [streaming, setStreaming] = useState<Record<string, string>>({})
   // 协调者流式回复（与 worker task_token 同构，但按 reply_id 而非 task_id 归并）：
-  //  - coordStreaming[reply_id] = 累积的 content delta（逐字拼接，可见回复）
+  //  - coordStreaming[reply_id] = { content: 累积的 content delta, senderId: 发言者 agent_id }
+  //    senderId 由事件携带（coordinator_token 的 sender_id=coordinator_id；worker 单聊/脑回路
+  //    task_token 的 sender_id=worker agent_id）。Bug A：渲染层据此把 worker 推理流式冠到
+  //    正确 worker 头像下，而非硬编码「群主(协调者)」。首个 delta 落定 senderId，后续不覆盖
+  //    （同一 reply_id 始终属一个发言者，防陈旧事件乱改身份）。
   //  - coordReasoning[reply_id] = 累积的 reasoning_content delta（模型内部推理链，
   //    DeepSeek/o1 类推理模型在可见 content 之前流出；非推理模型不流，map 不存在）
   //  - coordStats[reply_id] = 最新 { elapsed_ms, tokens, phase, model, reasoning_tokens }
   //    （~200ms 节流 + done 终态）
   // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
-  const [coordStreaming, setCoordStreaming] = useState<Record<string, string>>({})
+  const [coordStreaming, setCoordStreaming] = useState<
+    Record<string, { content: string; senderId: string }>
+  >({})
   const [coordReasoning, setCoordReasoning] = useState<Record<string, string>>({})
   const [coordStats, setCoordStats] = useState<Record<string, CoordStats>>({})
 
@@ -454,11 +460,19 @@ export function useBusEvent(groupId: string | null) {
               [key]: (prev[key] || '') + d.content,
             }))
           } else {
-            // worker 单聊流式（reply_id）→ coordStreaming[reply_id]，复用协调者流式气泡渲染
-            setCoordStreaming((prev) => ({
-              ...prev,
-              [key]: (prev[key] || '') + d.content,
-            }))
+            // worker 单聊/脑回路流式（reply_id）→ coordStreaming[reply_id]，复用协调者流式气泡渲染。
+            // senderId 用事件携带的 d.sender_id（worker 的 agent_id），Bug A：渲染层据此把
+            // worker 推理流式冠到正确 worker 头像下。首个 delta 落定 senderId，后续不覆盖。
+            setCoordStreaming((prev) => {
+              const existing = prev[key]
+              return {
+                ...prev,
+                [key]: {
+                  content: (existing?.content || '') + d.content,
+                  senderId: existing?.senderId || (d.sender_id as string) || '',
+                },
+              }
+            })
           }
         }
       } else if (
@@ -499,10 +513,19 @@ export function useBusEvent(groupId: string | null) {
             : null
         if (d.content && typeof replyId === 'string') {
           const rid = replyId
-          setCoordStreaming((prev) => ({
-            ...prev,
-            [rid]: (prev[rid] || '') + d.content,
-          }))
+          // senderId 用事件携带的 d.sender_id（coordinator_token 的 sender_id=coordinator_id）。
+          // Bug A：渲染层据此解析正确头像/名（协调者）；worker 单聊/脑回路走 task_token 分支
+          // 各自带 worker sender_id。首个 delta 落定 senderId，后续不覆盖。
+          setCoordStreaming((prev) => {
+            const existing = prev[rid]
+            return {
+              ...prev,
+              [rid]: {
+                content: (existing?.content || '') + d.content,
+                senderId: existing?.senderId || (d.sender_id as string) || '',
+              },
+            }
+          })
         }
       } else if (d.type === 'coordinator_reasoning') {
         const replyId =

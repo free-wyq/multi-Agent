@@ -1506,6 +1506,19 @@ async def node_handle_reply_group(state: GroupState) -> Command:
     plan[matched_idx]["status"] = "completed" if success else "failed"
     plan[matched_idx]["result"] = content
 
+    # 广播状态推进（Bug B：计划实时可视化）。worker 报回后步骤 dispatched→completed/failed
+    # 必须推给前端 PlanConfirmCard，否则卡片停在派发态看不到进度。单一 emit 点覆盖后续
+    # 4 条 return（summarize/dispatch_next）：summarize_group 会清空 plan、dispatch_next_group
+    # 会再 emit，前端终态都对。MT-15 若把失败步 reset 回 pending，下游 dispatch_next_group
+    # 的 emit 会反映重试——卡片短暂显 failed 翻 pending 是真实语义、更可读。best-effort：
+    # emit 失败不挡下游 MT-15/MT-14 恢复逻辑（对齐 vh25 class 1 best-effort 模式）。
+    try:
+        await emit_coordinator_plan(state["group_id"], state["agent_id"], plan)
+    except Exception:
+        logger.exception(
+            "[coordinator] failed to emit plan after handle_reply_group status mutation"
+        )
+
     # MT-15: on a worker failure, ask the LLM whether to retry or degrade
     # BEFORE the all-done check (same ordering + cap as the resident path).
     if not success:
