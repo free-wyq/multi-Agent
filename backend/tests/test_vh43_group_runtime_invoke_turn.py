@@ -115,14 +115,15 @@ async def assert_contract() -> list[str]:
         else:
             print("[A1] OK  invoke_turn(...) async + keyword-only（incoming_kind/.../incoming_data）")
 
-    # A2 调前 reset_stop + 调后 _current_task 清空（finally _end_turn）
+    # A2 finally _current_task 清空（_end_turn in finally）。Option B·③ 删软停件后
+    # 不再调 reset_stop（per-turn reset 已删），只验 finally _end_turn 清句柄。
     invoke_body = _fn_body(src, "invoke_turn")
-    if "reset_stop" not in invoke_body:
-        errs.append("[A2] invoke_turn 体内未调 reset_stop（turn start 应防 stale stop）")
+    if "reset_stop" in invoke_body:
+        errs.append("[A2] invoke_turn 体内仍调 reset_stop（Option B·③ 应删 per-turn reset）")
     if "_end_turn" not in invoke_body or "finally" not in invoke_body:
         errs.append("[A2] invoke_turn 体内缺 finally _end_turn（句柄应清空）")
     if not errs or not any(e.startswith("[A2]") for e in errs):
-        print("[A2] OK  invoke_turn turn start reset_stop + finally _end_turn 清句柄")
+        print("[A2] OK  invoke_turn finally _end_turn 清句柄（Option B·③ 删 reset_stop）")
 
     # A3 正常 END：_dispatch_plan 同步 + _memory 追加 + emit idle
     if "_dispatch_plan" not in invoke_body or "emit_agent_status" not in invoke_body:
@@ -300,16 +301,19 @@ async def assert_contract() -> list[str]:
         else:
             print("[E10] OK  resume_plan(payload) async + Command(resume=payload) ainvoke（PL-02 native resume）")
 
-    # E11 resume_plan 用同 thread（不 mint 新 thread）+ reset_stop + finally 清句柄
+    # E11 resume_plan 用同 thread（不 mint 新 thread）+ finally _end_turn 清句柄。
+    # Option B·③ 删软停件后 resume_plan 不再调 reset_stop，只验同 thread + finally 清句柄。
     resume_body = _fn_body(src, "resume_plan")
     # resume_plan reuses the runtime's current thread (thread_id:{seq}), NOT a
     # fresh thread via _next_thread_id (which would lose the paused interrupt state).
     if "self._next_thread_id()" in resume_body:
         errs.append("[E11] resume_plan 不应调 self._next_thread_id()（新 thread 丢中断态，应用同 thread）")
-    elif "reset_stop" not in resume_body or "_end_turn" not in resume_body:
-        errs.append("[E11] resume_plan 体内缺 reset_stop / _end_turn（同 invoke_turn 生命周期）")
+    elif "reset_stop" in resume_body:
+        errs.append("[E11] resume_plan 体内仍调 reset_stop（Option B·③ 应删）")
+    elif "_end_turn" not in resume_body:
+        errs.append("[E11] resume_plan 体内缺 _end_turn（同 invoke_turn finally 清句柄）")
     else:
-        print("[E11] OK  resume_plan 用同 thread（不 mint 新 thread）+ reset_stop + finally 清句柄")
+        print("[E11] OK  resume_plan 用同 thread（不 mint 新 thread）+ finally _end_turn 清句柄（Option B·③ 删 reset_stop）")
 
     # ── F. reset_session BE-02 ──────────────────────────────
     # F12 reset_session async + 清 _memory/_dispatch_plan + aupdate_state(END)
@@ -339,23 +343,18 @@ async def assert_contract() -> list[str]:
     except Exception as e:  # noqa: BLE001
         errs.append(f"[G14] main import 异常（import cycle？）：{type(e).__name__}: {e}")
 
-    # G15 vh41/vh42 契约不破（invoke_turn 是新增能力）
+    # G15 vh41/vh42 契约不破（invoke_turn 是新增能力）。Option B·③ 删软停件后
+    # request_stop/is_stopped/reset_stop 已删，cancel_turn 仍工作（纯 task.cancel 幂等）。
     try:
         rt = GroupRuntime(_FakeGroup())
         await rt.compile_graph(members)
-        # vh41 stop 契约仍工作
-        if not rt.is_stopped():
-            rt.request_stop()
-            if not rt.is_stopped():
-                errs.append("[G15] invoke_turn 新增后 vh41 request_stop/is_stopped 破")
-            else:
-                rt.reset_stop()
-                if rt.is_stopped():
-                    errs.append("[G15] invoke_turn 新增后 vh41 reset_stop 破")
-                else:
-                    print("[G15] OK  vh41/vh42 契约不破（invoke_turn 是新增能力，停止+编译契约仍工作）")
+        # 软停三件已删（Option B·③）
+        if hasattr(rt, "request_stop") or hasattr(rt, "is_stopped") or hasattr(rt, "reset_stop"):
+            errs.append("[G15] invoke_turn 后 GroupRuntime 仍有软停件（Option B·③ 应删）")
+        elif rt.cancel_turn() is not False:
+            errs.append("[G15] 无活跃回合 cancel_turn 应返 False（幂等），实际非 False")
         else:
-            errs.append("[G15] 编译后 is_stopped 应 False")
+            print("[G15] OK  vh41/vh42 契约不破（软停件已删 + cancel_turn 幂等，invoke_turn 不破编译契约）")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[G15] 兼容检查异常：{type(e).__name__}: {e}")
 
@@ -374,7 +373,7 @@ def main() -> int:
     print("\n=== 结果: PASS ===")
     print(
         "GroupRuntime.invoke_turn 一回合生命周期锁定：\n"
-        "  · A invoke_turn async + keyword-only + turn start reset_stop + finally _end_turn + 正常END dispatch_plan同步/memory追加/emit idle；\n"
+        "  · A invoke_turn async + keyword-only + finally _end_turn + 正常END dispatch_plan同步/memory追加/emit idle；\n"
         "  · B ainvoke 经 _start_turn_task 包 cancellable Task + 中途 cancel_turn 中断（CancelledError）；\n"
         "  · C 正常 END emit agent_status(idle) + cancel 路径不 emit idle（重抛 CancelledError）；\n"
         "  · D _next_thread_id 递增 fresh thread + 两轮 turn_count/recent_speakers 不累积；\n"

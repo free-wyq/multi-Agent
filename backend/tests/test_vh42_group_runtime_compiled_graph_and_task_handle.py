@@ -285,22 +285,18 @@ async def assert_contract() -> list[str]:
         errs.append(f"[F14] main import 异常（import cycle？）：{type(e).__name__}: {e}")
 
     # F15 vh41 停止契约不破（compile_graph 是新增能力，不改停止契约）
+    # Option B·③ 删软停件后：request_stop/is_stopped/reset_stop 已删（测「不存在」），
+    # cancel_turn 仍工作（纯 task.cancel + 幂等）。compile_graph 不影响 cancel_turn。
     try:
         rt = GroupRuntime(_FakeGroup())
         await rt.compile_graph(members)
-        # request_stop / is_stopped / reset_stop / cancel_turn 仍工作
-        if not rt.is_stopped():
-            rt.request_stop()
-            if not rt.is_stopped():
-                errs.append("[F15] compile_graph 后 request_stop/is_stopped 破")
-            else:
-                rt.reset_stop()
-                if rt.is_stopped():
-                    errs.append("[F15] compile_graph 后 reset_stop 破")
-                else:
-                    print("[F15] OK  vh41 停止契约不破（compile_graph 是新增能力，request_stop/is_stopped/reset_stop/cancel_turn 仍工作）")
+        # 软停三件已删（Option B·③）
+        if hasattr(rt, "request_stop") or hasattr(rt, "is_stopped") or hasattr(rt, "reset_stop"):
+            errs.append("[F15] compile_graph 后 GroupRuntime 仍有软停件（Option B·③ 应删 request_stop/is_stopped/reset_stop）")
+        elif rt.cancel_turn() is not False:
+            errs.append("[F15] 无活跃回合 cancel_turn 应返 False（幂等），实际非 False")
         else:
-            errs.append("[F15] compile_graph 后 is_stopped 应 False（编译不改 stop 状态）")
+            print("[F15] OK  vh41 契约不破（compile_graph 后软停件已删 + cancel_turn 纯 task.cancel 幂等）")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[F15] 停止契约检查异常：{type(e).__name__}: {e}")
 
@@ -328,7 +324,7 @@ def main() -> int:
         "  · C _start_turn_task(coro) 包成 asyncio.Task stash _current_task（镜像 _worker_task）+ _end_turn 清句柄 + 幂等 cancel；\n"
         "  · D cancel_turn 只 cancel _current_task（不碰 _graph 只读产物）+ 有活跃回合返 True+CancelledError；\n"
         "  · E thread_id == group_id（一图一 thread 跨 invoke）；\n"
-        "  · F main import OK 无 cycle + vh41 停止契约不破。"
+        "  · F main import OK 无 cycle + vh41 停止契约不破（软停件已删 + cancel_turn 幂等）。"
     )
     return 0
 

@@ -21,58 +21,46 @@ The three群聊缺陷 (顺序乱 / 协调者插话 / 停不下来) collapse into
   · 协调者插话 — ``route_entry`` forks by kind (task-11) so chat/@mention turns
     never reach the coordinator.
   · 停不下来 — a turn = one ``graph.ainvoke`` owned here as a cancellable
-    ``asyncio.Task`` (later task); ``request_stop`` / ``cancel_turn`` (this
-    skeleton) are the two stop entries.
+    ``asyncio.Task`` (later task); ``cancel_turn`` (this module) is the stop
+    entry (hard stop), complemented by the ``SESSION_SPEECH_CAP`` cross-turn cap.
 
-Two-layer stop (the contract this skeleton locks)
--------------------------------------------------
-``GroupRuntime`` holds a ``self._stop_event: asyncio.Event`` (default *clear*).
-Two stop entries, mirroring AutoGen v0.4's ``ExternalTermination`` (termination
-as a first-class, externally-injectable condition; default cooperative, not a
-hard cancel):
+Stop (Option B: two entries, no cooperative soft-stop layer)
+------------------------------------------------------------
+Option B removed the cooperative soft-stop layer (``request_stop`` /
+``is_stopped`` / ``reset_stop`` / ``_stop_event``) — its only producer was the
+inbound stop-keyword path (Option B·①), now deleted, so the soft-stop trio was
+dead code. Stopping now has two entries only:
 
-  1. ``request_stop()`` — **cooperative soft stop**. Only ``_stop_event.set()``;
-     no ``task.cancel()``. ``route_entry`` and every agent node (``worker.
-     make_agent_node``) check ``_stop_event.is_set()`` at entry (a later task
-     wires the check); on hit they do NOT speak and return ``Command(goto=END)``,
-     so the current speaker finishes its current step and the turn ends
-     gracefully (no mid-stream abort, no half message). Used by the「停/stop/
-     中断」keyword path in ``route_user_message`` (a later task).
-
-  2. ``cancel_turn()`` — **hard stop backstop**. First ``_stop_event.set()`` (so
-     any node about to start yields cooperatively), THEN ``self._current_task.
-     cancel()``. The ``CancelledError`` propagates into the streaming LLM's
-     ``async for`` and breaks the stream on the spot. Idempotent: no active turn
+  1. ``cancel_turn()`` — **hard stop**. Pure ``self._current_task.cancel()``;
+     the ``CancelledError`` propagates into the streaming LLM's ``async for``
+     and breaks the stream on the spot (mid-stream). Idempotent: no active turn
      → returns ``False``. Used by the UI stop button → ``POST /api/groups/{id}/
-     stop-turn`` (later tasks).
+     stop-turn``. ``task.cancel`` already covers the fan-out sibling node window
+     (CancelledError propagates through the Send fan-out), so the deleted event
+     does not regress coverage.
 
-Why ``_stop_event`` is NOT on GroupState
----------------------------------------
-``asyncio.Event`` is a runtime object — not serializable, it cannot live on
-``GroupState`` (the LangGraph checkpointer would try to serialize it and raise).
-It is a ``GroupRuntime`` instance attribute, **游离于图状态之外**, and cooperates
-with the graph only through「node-entry checks」the nodes perform against the
-runtime reference (injected via the node closure / ``RunnableConfig``, a later
-wiring task).
+  2. ``SESSION_SPEECH_CAP`` (``is_session_capped`` / ``record_speech``) — the
+     cross-turn backstop (Option B kept): when the button fails or the user is
+     away, this caps total agent replies per session (default 50, env-tunable)
+     to prevent unbounded handoff (成语接龙接疯) burning tokens.
+
+``_stop_event`` is gone (Option B·③): no cooperative event, no per-turn reset.
+The contextvar ``worker.set_group_runtime`` / ``get_group_runtime`` is RETAINED
+— ``record_speech`` / ``is_session_capped`` still consult the runtime via it.
 
 Scope of THIS task
 ------------------
 **``invoke_turn`` — the full turn lifecycle.** Built on the skeleton
-(``compile_graph`` / ``_start_turn_task`` / ``_end_turn`` / the stop signal)
+(``compile_graph`` / ``_start_turn_task`` / ``_end_turn`` / ``cancel_turn``)
 landed by task-13/14. ``invoke_turn`` resolves the Leader identity + group
 config, injects them + the resident cross-turn mirrors as the *initial* state
 of a FRESH checkpointer thread (per-turn ``_next_thread_id`` so the per-turn
 reducers do not accumulate across turns), wraps ``ainvoke`` as a cancellable
 ``asyncio.Task`` (``_start_turn_task``, mirrors ``_worker_task``), awaits it,
-and in ``finally`` clears the handle + resets stop. ``reset_stop`` at turn
-start so a stale stop does not suppress a fresh turn; ``route_entry`` + agent
-nodes check ``is_stopped()`` at entry (wired by a later task). On normal END:
-sync ``dispatch_plan`` back + record turn memory + ``emit agent_status(idle)``.
-``resume_plan`` is the PL-02 native resume (``Command(resume=...)``) twin;
-``reset_session`` is the BE-02 cross-turn wipe + dangling-interrupt resolve.
-The node-entry stop check (route_entry + agent nodes reading ``is_stopped()``)
-is the NEXT task (.task.md line 17) — ``invoke_turn`` exposes ``is_stopped()``
-for it; this task does not yet wire the check inside the nodes.
+and in ``finally`` clears the handle. On normal END: sync ``dispatch_plan``
+back + record turn memory + ``emit agent_status(idle)``. ``resume_plan`` is the
+PL-02 native resume (``Command(resume=...)``) twin; ``reset_session`` is the
+BE-02 cross-turn wipe + dangling-interrupt resolve.
 """
 from __future__ import annotations
 
@@ -97,16 +85,17 @@ logger = logging.getLogger("multi-agent.group_runtime")
 
 
 # ── 会话发言总量封顶（cross-turn safety backstop）──────────────────────
-# 按钮硬停（cancel_turn）+ 关键词软停（request_stop）之外的最后兜底：当二者都失效
-# 或用户不在场时，防止 agent 之间无限 handoff（成语接龙接疯 / A↔B 互相 @ 无限刷屏）
-# 烧 token。对标 AutoGen v0.4 ``MaxMessageTermination(N)`` / OpenAI Agents SDK
-# ``max_turns`` —— 跨回合的会话总量上限，与 per-turn 的 ``AGENT_NODE_MAX_HANDOFFS``
-# （单回合 handoff 链护栏，worker.py）是两个正交维度：
+# 按钮硬停（cancel_turn）之外的最后兜底：当按钮失效或用户不在场时，防止 agent 之间
+# 无限 handoff（成语接龙接疯 / A↔B 互相 @ 无限刷屏）烧 token。对标 AutoGen v0.4
+# ``MaxMessageTermination(N)`` / OpenAI Agents SDK ``max_turns`` —— 跨回合的会话总量
+# 上限，与 per-turn 的 ``AGENT_NODE_MAX_HANDOFFS``（单回合 handoff 链护栏，worker.py）
+# 是两个正交维度：
 #   · per-turn 8：单次 invoke 内一个 agent 接龙接疯的护栏（handoff 链长度）。
 #   · 会话 50：跨多次 invoke（多个用户回合）累计 agent 发言数的总闸。
 # 计一个 agent 节点发言一次 = +1（``record_speech``），不含 dispatch fan-out 的
 # execute 派工（那是中心化任务，不是来回对话）。撞顶后 route_entry / make_agent_node
 # 拦截，回合 END + emit 一条「已达上限」提示。env 可调；默认 50 给互动留够空间。
+# Option B 后停止只剩两入口：cancel_turn 硬切 + 本 50 封顶（软停 request_stop 已删）。
 SESSION_SPEECH_CAP = max(1, int(os.environ.get("MULTI_AGENT_SESSION_SPEECH_CAP", "50")))
 
 
@@ -132,10 +121,9 @@ class GroupRuntime:
     """Per-group turn controller: owns the compiled group graph's turn lifecycle.
 
     Holds the **compiled group graph** (``self._graph``) + the **current turn
-    task** handle (``self._current_task``) + the **stop signal**
-    (``asyncio.Event``). This is the去中心化群图的回合边界 + 可中止性 owner — a
-    turn is one ``graph.ainvoke`` wrapped as a cancellable ``asyncio.Task``
-    (mirrors the resident ``AgentEngine._worker_task``).
+    task** handle (``self._current_task``). This is the去中心化群图的回合边界 +
+    可中止性 owner — a turn is one ``graph.ainvoke`` wrapped as a cancellable
+    ``asyncio.Task`` (mirrors the resident ``AgentEngine._worker_task``).
 
     Args:
         group: the ``Group`` (``models.group.Group``) — captures ``id`` /
@@ -148,9 +136,6 @@ class GroupRuntime:
     Attributes:
         group_id: the group's id (read off ``group.id`` or the ``str`` arg).
         coordinator_id: the group's Leader agent_id (``group.coordinator_id``).
-        _stop_event: ``asyncio.Event``, default *clear*. The cooperative stop
-            signal. **Not** on ``GroupState`` — a runtime object,游离于图状态外
-            (never serialized by the checkpointer).
         _graph: the compiled per-group swarm graph (``build_group_graph`` output),
             or ``None`` until ``compile_graph`` runs. Holds the route_entry +
             coordinator sub-nodes + agent nodes + handoff edges in ONE graph.
@@ -171,33 +156,31 @@ class GroupRuntime:
           group graph once (startup / on member change). Stored on ``_graph``.
         · A turn = one ``graph.ainvoke`` (the later ``invoke_turn`` wraps it as a
           cancellable ``asyncio.Task`` stored on ``_current_task``).
-        · ``request_stop()`` sets the event so node entries yield (current
-          speaker finishes its step, then the next node ENDs the turn).
-        · ``cancel_turn()`` sets the event THEN cancels the task (hard backstop).
+        · ``cancel_turn()`` cancels the stashed task (hard stop, mid-stream break).
         · On turn end (normal or cancelled), ``_current_task`` is cleared +
           ``emit_agent_status(idle)`` fires (later ``invoke_turn`` task).
 
-    Thread-safety: ``asyncio`` single-thread — the event + task handle + graph
-    are touched only from the event loop, so no lock is needed for THEM.
-    ``request_stop`` / ``cancel_turn`` are safe to call from any coroutine in
-    the loop. BUT a turn's ``graph.ainvoke`` IS serialized by ``_turn_lock``:
-    one ``GroupRuntime`` serves the whole group (user chat, plan resume, every
-    worker report-back all call ``invoke_turn``/``resume_plan`` on the SAME
-    runtime). Without serialization, a worker's report-back
-    (``registry._run_worker_task`` → ``invoke_turn``) can fire WHILE a prior
-    ``invoke_turn``/``resume_plan`` is mid-flight — both touch the runtime's
-    checkpointer thread (``resume_plan`` even REUSES the last turn's thread)
-    and both write the ``turn_count`` / ``current_speaker`` last-value channels,
-    so two concurrent ``ainvoke``s collide → ``InvalidUpdateError: At key
-    'turn_count': Can receive only one value per step``. The resident
-    ``AgentEngine`` avoids this via its ``asyncio.Queue`` inbox (one
-    ``_handle_task`` at a time); the group-graph analogue is this lock. A turn
-    acquires the lock around its whole body (identity resolve → ainvoke →
-    sync-back → idle emit) so concurrent turns queue rather than interleave —
-    matching the resident engine's serial-inbox semantics (a report-back that
-    lands mid-turn waits for the turn to end, exactly as it waits on the inbox).
-    ``cancel_turn`` does NOT take the lock (it cancels the stashed task; the
-    cancelled task's ``finally`` releases the lock — no deadlock).
+    Thread-safety: ``asyncio`` single-thread — the task handle + graph are
+    touched only from the event loop, so no lock is needed for THEM.
+    ``cancel_turn`` is safe to call from any coroutine in the loop. BUT a turn's
+    ``graph.ainvoke`` IS serialized by ``_turn_lock``: one ``GroupRuntime``
+    serves the whole group (user chat, plan resume, every worker report-back all
+    call ``invoke_turn``/``resume_plan`` on the SAME runtime). Without
+    serialization, a worker's report-back (``registry._run_worker_task`` →
+    ``invoke_turn``) can fire WHILE a prior ``invoke_turn``/``resume_plan`` is
+    mid-flight — both touch the runtime's checkpointer thread (``resume_plan``
+    even REUSES the last turn's thread) and both write the ``turn_count`` /
+    ``current_speaker`` last-value channels, so two concurrent ``ainvoke``s
+    collide → ``InvalidUpdateError: At key 'turn_count': Can receive only one
+    value per step``. The resident ``AgentEngine`` avoids this via its
+    ``asyncio.Queue`` inbox (one ``_handle_task`` at a time); the group-graph
+    analogue is this lock. A turn acquires the lock around its whole body
+    (identity resolve → ainvoke → sync-back → idle emit) so concurrent turns
+    queue rather than interleave — matching the resident engine's serial-inbox
+    semantics (a report-back that lands mid-turn waits for the turn to end,
+    exactly as it waits on the inbox). ``cancel_turn`` does NOT take the lock
+    (it cancels the stashed task; the cancelled task's ``finally`` releases the
+    lock — no deadlock).
     """
 
     def __init__(self, group: "Group | str") -> None:
@@ -210,14 +193,6 @@ class GroupRuntime:
         else:
             self.group_id = str(group)
             self.coordinator_id = ""
-
-        # ── cooperative stop signal (游离于 GroupState, not checkpointer-serialized) ──
-        # Default CLEAR: a turn runs until END / cap / stop. set() by request_stop
-        # (soft) and cancel_turn (hard backstop). route_entry + each agent node
-        # entry check is_set() (a later task wires the check) → on hit return
-        # Command(goto=END) so the current speaker finishes its step then the turn
-        # ends gracefully.
-        self._stop_event: asyncio.Event = asyncio.Event()
 
         # ── turn serialization lock (one ainvoke at a time per group) ──
         # One GroupRuntime serves the whole group: user chat, plan resume, and
@@ -385,73 +360,35 @@ class GroupRuntime:
             })
         return members
 
-    # ── cooperative stop (soft) ───────────────────────────────
-    def request_stop(self) -> None:
-        """Cooperative soft stop — only ``_stop_event.set()``, no cancel.
-
-        Sets the stop event so that ``route_entry`` and every agent node
-        (``worker.make_agent_node``), which check ``_stop_event.is_set()`` at
-        entry (a later task wires the check), yield on the NEXT node boundary:
-        they do NOT speak and return ``Command(goto=END)``. The currently-running
-        node (speaker mid-step) is allowed to finish — no mid-stream abort, no
-        half message — then the turn ends at the next node entry.
-
-        This is the「停/stop/中断」keyword path (``route_user_message`` identifies
-        the keyword and calls this, a later task). It is NOT a hard cancel: a
-        speaker already streaming finishes its token stream; only the *next*
-        speaker is suppressed.
-
-        Idempotent: setting an already-set event is a no-op. Safe to call when
-        no turn is active (the event just stays set; the next turn's node-entry
-        checks will yield immediately unless ``reset_stop`` is called first —
-        ``invoke_turn`` (later task) resets the event at turn start so a stale
-        stop doesn't suppress a fresh turn).
-        """
-        self._stop_event.set()
-        logger.debug(
-            "[group_runtime] request_stop: cooperative stop event set for group=%s "
-            "(current speaker finishes its step, next node yields → END)",
-            self.group_id,
-        )
-
-    # ── hard stop backstop ────────────────────────────────────
+    # ── hard stop (cancel_turn) ──────────────────────────────
     def cancel_turn(self) -> bool:
-        """Hard stop backstop — set event THEN cancel the turn task.
+        """Hard stop — cancel the active turn task (pure ``task.cancel``).
 
-        Two layers (mirrors ``stop-signal-cooperative-cancel-design``):
-          1. ``_stop_event.set()`` — so any node about to START yields
-             cooperatively (same as ``request_stop``); a node mid-step still
-             gets the cancel below.
-          2. ``self._current_task.cancel()`` — the ``CancelledError`` propagates
-             into the streaming LLM's ``async for`` and breaks the stream on
-             the spot (mid-stream hard stop, the hard backstop for when the
-             cooperative layer is not enough — e.g. a long LLM call with no
-             node boundary in sight).
+        Option B·③: the cooperative soft-stop layer (``request_stop`` /
+        ``is_stopped`` / ``reset_stop`` / ``_stop_event``) was removed — its only
+        producer was the inbound stop-keyword path (Option B·①, deleted), so the
+        soft-stop trio was dead code. ``cancel_turn`` is now a pure hard stop:
+        ``self._current_task.cancel()``. The ``CancelledError`` propagates into
+        the streaming LLM's ``async for`` and breaks the stream on the spot
+        (mid-stream). ``task.cancel`` already covers the fan-out sibling node
+        window (CancelledError propagates through the Send fan-out), so the
+        deleted event does not regress coverage.
 
         Returns ``True`` if a cancel was issued, ``False`` if no active turn
         (``_current_task is None``) — idempotent: calling with no active turn is
-        a no-op (the event is still set so a turn starting later would yield,
-        but no task is cancelled). This is the UI stop-button path
-        (``StopTaskButton`` → ``POST /api/groups/{id}/stop-turn`` → this, later
-        tasks).
-
-        Until the later ``invoke_turn`` task fills ``_current_task``, this
-        always returns ``False`` (no active turn) — which IS the idempotent
-        no-active-turn contract; the set() still happens so the event reflects
-        the stop intent.
+        a no-op. This is the UI stop-button path (``StopTaskButton`` → ``POST
+        /api/groups/{id}/stop-turn`` → this).
         """
-        # Layer 1: cooperative — set the event so node entries yield.
-        self._stop_event.set()
         task = self._current_task
         if task is None:
             logger.debug(
                 "[group_runtime] cancel_turn: no active turn for group=%s "
-                "(event set, no task cancelled) — idempotent no-op",
+                "(no task cancelled) — idempotent no-op",
                 self.group_id,
             )
             return False
-        # Layer 2: hard — cancel the streaming turn task. CancelledError
-        # propagates into chat_completion_stream's async for → mid-stream break.
+        # Hard stop: cancel the streaming turn task. CancelledError propagates
+        # into chat_completion_stream's async for → mid-stream break.
         task.cancel()
         logger.debug(
             "[group_runtime] cancel_turn: hard cancel issued for group=%s "
@@ -460,45 +397,19 @@ class GroupRuntime:
         )
         return True
 
-    # ── stop-signal introspection / reset ─────────────────────
-    def is_stopped(self) -> bool:
-        """Whether the cooperative stop event is currently set.
-
-        ``route_entry`` + agent nodes consult this at entry (a later task wires
-        the check) to decide whether to yield (``Command(goto=END)``) instead
-        of speaking. Exposed as a method (not just the raw event) so the
-        node-entry check has one named call site to wire against.
-        """
-        return self._stop_event.is_set()
-
-    def reset_stop(self) -> None:
-        """Clear the stop event — a fresh turn may run.
-
-        Called by the later ``invoke_turn`` at turn start so a stale stop
-        (from a previous request_stop / cancel_turn) does NOT suppress a fresh
-        turn. Also called after a cancelled turn winds down so the runtime is
-        ready for the next user message.
-        """
-        self._stop_event.clear()
-        logger.debug(
-            "[group_runtime] reset_stop: stop event cleared for group=%s "
-            "(next turn may run)",
-            self.group_id,
-        )
-
     # ── session-speech cap (cross-turn backstop) ─────────────
     def is_session_capped(self) -> bool:
         """Whether the session has hit the speech cap (cross-turn backstop).
 
-        The third stop layer (alongside ``request_stop`` soft / ``cancel_turn``
-        hard): when the button and keyword both fail or the user is away, this
-        prevents unbounded agent handoff (成语接龙接疯 / A↔B 互相 @ 无限刷屏)
-        from burning tokens. Mirrors AutoGen ``MaxMessageTermination`` /
-        OpenAI ``max_turns``. ``route_entry`` + ``make_agent_node`` consult this
-        at entry (on hit the turn ENDs without speaking). **Cross-turn** — does
-        NOT reset per turn (only ``reset_session`` / ``/new`` clears it), which is
-        exactly why it catches a multi-turn 成语接龙 that the per-turn
-        ``_stop_event`` (reset each turn) misses.
+        The stop backstop alongside ``cancel_turn`` (Option B: two stop entries
+        — the button hard-stop + this cross-turn cap). When the button fails or
+        the user is away, this prevents unbounded agent handoff (成语接龙接疯 /
+        A↔B 互相 @ 无限刷屏) from burning tokens. Mirrors AutoGen
+        ``MaxMessageTermination`` / OpenAI ``max_turns``. ``route_entry`` +
+        ``make_agent_node`` consult this at entry (on hit the turn ENDs without
+        speaking). **Cross-turn** — does NOT reset per turn (only
+        ``reset_session`` / ``/new`` clears it), which is exactly why it catches
+        a multi-turn 成语接龙.
         """
         return self._speech_count >= SESSION_SPEECH_CAP
 
@@ -554,12 +465,9 @@ class GroupRuntime:
     def _end_turn(self) -> None:
         """Clear the current turn task handle (turn done — normal or cancelled).
 
-        Called by the later ``invoke_turn``'s ``finally`` so the slot is clean
-        for the next turn (``cancel_turn`` on a cleared slot returns ``False`` —
-        the idempotent no-active-turn contract). Does NOT clear the stop event
-        (``invoke_turn`` calls ``reset_stop`` at the NEXT turn's start; clearing
-        here would let a just-cancelled turn's stop intent leak into a turn that
-        hasn't started yet — reset_stop is per-turn-start, not per-turn-end).
+        Called by ``invoke_turn``'s ``finally`` so the slot is clean for the
+        next turn (``cancel_turn`` on a cleared slot returns ``False`` — the
+        idempotent no-active-turn contract).
         """
         self._current_task = None
 
@@ -722,25 +630,16 @@ class GroupRuntime:
         cross-turn mirrors as the *initial* state of a FRESH checkpointer
         thread, wraps the ``ainvoke`` as a cancellable ``asyncio.Task`` (via
         ``_start_turn_task``, mirroring ``AgentEngine._worker_task``), awaits it,
-        and in ``finally`` clears the task handle + resets the stop event so the
-        next turn starts clean.
-
-        Cooperative stop (StopSignal): ``reset_stop`` is called at turn START so
-        a stale stop (from a previous ``request_stop`` / ``cancel_turn``) does
-        NOT suppress this turn. ``route_entry`` + each agent node check
-        ``is_stopped()`` at entry (wired in a later task) — on hit they return
-        ``Command(goto=END)`` instead of speaking (current speaker finishes its
-        step, next node yields). A mid-turn ``request_stop`` (the「停/stop/中断」
-        keyword path) thus ends the turn gracefully at the next node boundary.
+        and in ``finally`` clears the handle so the next turn starts clean.
 
         ``ainvoke`` is wrapped in a Task (NOT awaited inline) so
-        ``Event.wait()`` / ``task.cancel()`` can be injected: the task is
-        scheduled onto the loop and ``await``-ed, so a ``cancel_turn`` (the hard
-        backstop) cancels it mid-await and the ``CancelledError`` propagates into
-        the streaming LLM's ``async for`` (mid-stream break). No synchronous code
-        blocks the loop before/after ``ainvoke`` — all setup (identity / config
-        resolution) is ``await``-ed, and ``_start_turn_task`` +
-        ``_current_task`` / ``finally`` cleanup are non-blocking.
+        ``task.cancel()`` can be injected: the task is scheduled onto the loop
+        and ``await``-ed, so a ``cancel_turn`` (the hard stop) cancels it
+        mid-await and the ``CancelledError`` propagates into the streaming LLM's
+        ``async for`` (mid-stream break). No synchronous code blocks the loop
+        before/after ``ainvoke`` — all setup (identity / config resolution) is
+        ``await``-ed, and ``_start_turn_task`` + ``_current_task`` / ``finally``
+        cleanup are non-blocking.
 
         On turn END (normal): syncs ``dispatch_plan`` back from the graph result
         (the coordinator's dispatch/handle_reply/summarize nodes mutate it) +
@@ -751,8 +650,8 @@ class GroupRuntime:
         On CANCEL: the ``CancelledError`` propagates out (the caller — the
         resident registry / a later registry migration — decides whether to
         absorb it, mirroring ``AgentEngine._handle_task``'s
-        ``except CancelledError`` absorption). ``finally`` still clears the handle
-        + resets stop so the runtime is ready for the next message. ``emit
+        ``except CancelledError`` absorption). ``finally`` still clears the
+        handle so the runtime is ready for the next message. ``emit
         agent_status(idle)`` is NOT fired on a cancel (the UI's stop-button path
         emits its own terminal state; firing idle here would race the
         stop-button's toast).
@@ -803,12 +702,6 @@ class GroupRuntime:
         # below releases the lock (no deadlock: the task holds the lock, cancel
         # sets CancelledError, the async-with exits, lock released).
         async with self._turn_lock:
-            # Per-turn START: reset the cooperative stop so a stale stop (from
-            # a previous request_stop / cancel_turn) does NOT suppress this fresh turn.
-            # ``route_entry`` + agent nodes check ``is_stopped()`` at entry (wired
-            # later); a fresh event lets the turn run.
-            self.reset_stop()
-
             leader = await self._resolve_leader_identity()
             group_config = await self._resolve_group_config()
             turn_input = self._build_turn_input(
@@ -828,13 +721,12 @@ class GroupRuntime:
             reply_cb = self._reply_cb_factory()
             coord_mod.set_reply_callback(reply_cb)
             worker_mod.set_reply_callback(reply_cb)
-            # Task-17: install this runtime as the turn's GroupRuntime contextvar so
-            # the group graph's route_entry + every agent node (make_agent_node) can
-            # consult ``self.is_stopped()`` at entry (cooperative soft stop — on hit
-            # return Command(goto=END) instead of speaking). Cleared in ``finally``
-            # so the slot doesn't leak into the next turn (paired with the _REPLY_CB
-            # clear; per-task contextvar copy so concurrent group turns each see
-            # their own runtime — a request_stop on group A never bleeds into B).
+            # Install this runtime as the turn's GroupRuntime contextvar so the
+            # group graph's route_entry + every agent node (make_agent_node) can
+            # consult ``rt.is_session_capped()`` / ``record_speech()`` (the
+            # cross-turn speech cap). Cleared in ``finally`` so the slot doesn't
+            # leak into the next turn (per-task contextvar copy so concurrent group
+            # turns each see their own runtime).
             worker_mod.set_group_runtime(self)
 
             async def _ainvoke():
@@ -901,15 +793,15 @@ class GroupRuntime:
         ``interrupt()`` returns the payload and the graph fans out the pending
         steps via ``dispatch_next_group``'s ``Send`` fan-out.
 
-        Same turn lifecycle as ``invoke_turn``: reset_stop at start, fresh
-        thread, cancellable Task, finally clear handle + reset stop. The resume
-        runs on the SAME thread the interrupt paused — so this does NOT call
-        ``_next_thread_id`` (a fresh thread would lose the paused state). Instead
-        it reuses the runtime's current thread (the last ``invoke_turn``'s
-        thread). If no turn was ever interrupted (cold runtime / the prior turn
-        was not a dispatch), the resume is a harmless no-op that runs the graph
-        on an empty/terminal thread (mirrors the resident engine's documented
-        safe-no-op resume, m12-plan-confirmation-roadmap).
+        Same turn lifecycle as ``invoke_turn``: fresh thread, cancellable Task,
+        finally clear handle. The resume runs on the SAME thread the interrupt
+        paused — so this does NOT call ``_next_thread_id`` (a fresh thread would
+        lose the paused state). Instead it reuses the runtime's current thread
+        (the last ``invoke_turn``'s thread). If no turn was ever interrupted
+        (cold runtime / the prior turn was not a dispatch), the resume is a
+        harmless no-op that runs the graph on an empty/terminal thread (mirrors
+        the resident engine's documented safe-no-op resume,
+        m12-plan-confirmation-roadmap).
 
         Args:
             payload: the resume payload (``{"mode": "confirm"|"direct"|"modify",
@@ -934,7 +826,6 @@ class GroupRuntime:
         # in-flight worker report-back (registry._run_worker_task → invoke_turn):
         # whichever arrives second queues, the prior's finally releases the lock.
         async with self._turn_lock:
-            self.reset_stop()
             # Reuse the runtime's current thread (the interrupt paused it); do NOT
             # mint a fresh thread — a fresh thread has no paused state to resume.
             thread_id = f"{self.thread_id}:{self._turn_seq}" if self._turn_seq else self.thread_id
@@ -943,9 +834,9 @@ class GroupRuntime:
             reply_cb = self._reply_cb_factory()
             coord_mod.set_reply_callback(reply_cb)
             worker_mod.set_reply_callback(reply_cb)
-            # Task-17: install this runtime so route_entry + agent nodes consult
-            # ``is_stopped()`` at entry during the resume turn too (a resume is still
-            # a turn — a request_stop mid-resume should yield at the next node).
+            # Install this runtime so route_entry + agent nodes consult
+            # ``is_session_capped()`` / ``record_speech()`` during the resume
+            # turn too (a resume is still a turn).
             worker_mod.set_group_runtime(self)
 
             async def _aresume():
@@ -993,12 +884,11 @@ class GroupRuntime:
         Best-effort: a checkpointer failure degrades to the mirror-only clear
         (logged) rather than aborting.
 
-        Does NOT touch the compiled graph or the stop event (``reset_stop`` is
-        per-turn-start). If a turn is active, cancels it first via
-        ``cancel_turn`` so the reset cannot race an in-flight ainvoke that would
-        otherwise re-populate ``_memory`` / ``_dispatch_plan`` as it unwinds —
-        the caller is expected to poll status back to idle (mirrors PL-11 stop
-        semantics).
+        Does NOT touch the compiled graph. If a turn is active, cancels it first
+        via ``cancel_turn`` so the reset cannot race an in-flight ainvoke that
+        would otherwise re-populate ``_memory`` / ``_dispatch_plan`` as it
+        unwinds — the caller is expected to poll status back to idle (mirrors
+        PL-11 stop semantics).
         """
         # Cancel an in-flight turn so it can't repopulate state as it unwinds.
         self.cancel_turn()

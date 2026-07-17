@@ -313,18 +313,19 @@ async def list_files(group_id: str) -> list[GroupFile]:
 async def stop_turn(group_id: str) -> dict[str, Any]:
     """StopSignal UI stop: cancel the group's current decentralized turn.
 
-    ``POST /api/groups/{id}/stop-turn`` is the hard-stop backstop for the
+    ``POST /api/groups/{id}/stop-turn`` is the hard-stop entry for the
     decentralized swarm-graph turn (the StopTaskButton / busy-input interrupt
     path). It resolves the group's ``GroupRuntime`` (lazily building it if
-    missing via ``registry.ensure_runtime``) and calls ``cancel_turn`` — the
-    TWO-layer stop from ``stop-signal-cooperative-cancel-design``:
+    missing via ``registry.ensure_runtime``) and calls ``cancel_turn`` — a
+    pure ``task.cancel`` (Option B·③ removed the cooperative soft-stop layer;
+    stopping now has two entries: this button hard-stop + the
+    ``SESSION_SPEECH_CAP`` cross-turn cap):
 
-      1. ``_stop_event.set()`` — cooperative: any node about to START yields
-         (returns ``Command(goto=END)`` instead of speaking), so the current
-         speaker finishes its step.
-      2. ``self._current_task.cancel()`` — hard: ``CancelledError`` propagates
-         into the streaming LLM's ``async for`` and breaks the stream mid-stream
-         (the backstop for a long LLM call with no node boundary in sight).
+      ``self._current_task.cancel()`` — hard: ``CancelledError`` propagates into
+      the streaming LLM's ``async for`` and breaks the stream mid-stream.
+      ``task.cancel`` already covers the fan-out sibling node window
+      (CancelledError propagates through the Send fan-out), so the deleted event
+      does not regress coverage.
 
     This is distinct from the per-task PL-11 ``POST /api/tasks/{id}/stop``
     (which cancels a *resident engine's* executing task via
