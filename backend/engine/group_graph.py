@@ -254,21 +254,6 @@ async def route_entry(state: GroupState) -> Command:
     # avoids polluting GroupState with a private key).
     handoff_targets: set[str] = state.get("_handoff_targets") or set()  # type: ignore[assignment]
 
-    # ── 协作式停止守卫（StopSignal·task-17）────────────────
-    # Same cooperative-stop check as the closure-bound ``build_route_entry``:
-    # ``GroupRuntime.request_stop()`` set the event (soft stop), so this entry
-    # node does NOT pick a speaker + returns ``Command(goto=END)`` (current
-    # speaker already finished, the turn ends gracefully). ``None`` runtime →
-    # skip (backward compatible — the standalone route_entry is used by tests
-    # that don't install a runtime). Kept in sync with the closure-bound twin.
-    rt = worker_mod.get_group_runtime()
-    if rt is not None and rt.is_stopped():
-        logger.debug(
-            "[group_graph] route_entry 协作式停止守卫命中（standalone）：stop_event 已 set，"
-            "不选发言者，回合 END",
-        )
-        return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
-
     # ── execute-path report-back 中心化分叉（item④前置·修 split-brain）──
     # ``agent_reply`` 携带 ``incoming_data.task_id`` = worker 跑完派工步骤的回报，
     # 必须走中心化路径 → classify → handle_reply_group（MT-15 失败恢复 + MT-14
@@ -289,12 +274,14 @@ async def route_entry(state: GroupState) -> Command:
         return Command(goto="classify", update={"turn_count": turn_count})
 
     # ── 会话发言总量封顶守卫（cross-turn backstop·standalone）────────
-    # 按钮硬停 + 关键词软停失效时的最后兜底（对标 AutoGen ``MaxMessageTermination``）。
-    # 跨回合累加——不随单回合 END 清零（接龙是多个短回合，单回合 _stop_event 拦不住），
-    # 只在 reset_session（/new）清零。**放在 report-back 早返回之后**：worker 跑完派工
-    # 步骤的回报（agent_reply + task_id）是中心化 DAG 收尾，挡它会致派工步骤永远停在
-    # dispatched（split-brain 死锁），所以 report-back 必须先放过。闲聊接龙撞顶正是要拦
-    # 的目标——它无 task_id，走不到 report-back 早返回，被本守卫拦下。
+    # 按钮硬停（cancel_turn）失效 / 用户不在场时的最后兜底（对标 AutoGen
+    # ``MaxMessageTermination``）。跨回合累加——不随单回合 END 清零（接龙是多个
+    # 短回合），只在 reset_session（/new）清零。**放在 report-back 早返回之后**：
+    # worker 跑完派工步骤的回报（agent_reply + task_id）是中心化 DAG 收尾，挡它
+    # 会致派工步骤永远停在 dispatched（split-brain 死锁），所以 report-back 必须先
+    # 放过。闲聊接龙撞顶正是要拦的目标——它无 task_id，走不到 report-back 早返回，
+    # 被本守卫拦下。（Option B·②删了 is_stopped 协作式软停守卫，本封顶守卫保留。）
+    rt = worker_mod.get_group_runtime()
     if rt is not None and rt.is_session_capped():
         logger.debug(
             "[group_graph] route_entry 会话封顶守卫命中（standalone）：speech_count 已达上限，"
@@ -375,24 +362,6 @@ def build_route_entry(handoff_targets: set[str]):
         incoming_sender = state.get("incoming_sender", "") or ""
         incoming_kind = state.get("incoming_kind", "") or ""
 
-        # ── 协作式停止守卫（StopSignal·task-17）────────────────
-        # ``GroupRuntime.request_stop()``（用户喊「停/stop/中断」）只 set 一个
-        # ``asyncio.Event``（软停·不强切）。route_entry 是回合入口节点，命中 stop
-        # 即不选发言者、直接 ``Command(goto=END)`` 结束回合——上一发言者已把当前
-        # step 跑完，本回合话筒落地，不 mid-stream 强切、不留半截消息。
-        # 这是双层停止的软停层；硬停层 ``cancel_turn``（先 set 再 task.cancel）由 UI
-        # 停止按钮走，与本守卫正交。runtime 经 ``worker.get_group_runtime()`` 从
-        # contextvar 取（``GroupRuntime.invoke_turn`` 在 ainvoke 前 set，finally 清）。
-        # ``None``（群图在 GroupRuntime 之外被 invoke / 测试直调）→ 守卫跳过，
-        # route_entry 按原逻辑分叉（向后兼容）。
-        rt = worker_mod.get_group_runtime()
-        if rt is not None and rt.is_stopped():
-            logger.debug(
-                "[group_graph] route_entry 协作式停止守卫命中：stop_event 已 set"
-                "（用户喊停），不选发言者，回合 END（上一发言者已说完，不 mid-stream 强切）",
-            )
-            return Command(goto=END, update={"turn_count": state.get("turn_count") or 0})
-
         # ── execute-path report-back 中心化分叉（item④前置·修 split-brain）──
         # 与 standalone route_entry 同款：agent_reply + incoming_data.task_id =
         # worker 跑完派工步骤的回报 → 中心化 classify → handle_reply_group。不解析
@@ -412,9 +381,10 @@ def build_route_entry(handoff_targets: set[str]):
         # ── 会话发言总量封顶守卫（cross-turn backstop·closure-bound twin）──
         # 与 standalone route_entry 同款（vh40 锁两份同步）：撞 SESSION_SPEECH_CAP 后
         # 不选发言者直接 END。跨回合累加、只在 reset_session（/new）清零——这正是拦住
-        # 多回合成语接龙的关键（单回合 _stop_event 每回合 reset 拦不住）。放在 report-back
-        # 早返回之后，让中心化派工回报照常收尾（挡它会 split-brain 死锁）；闲聊接龙无
-        # task_id 走不到 report-back，被本守卫拦下。
+        # 多回合成语接龙的关键。放在 report-back 早返回之后，让中心化派工回报照常收尾
+        # （挡它会 split-brain 死锁）；闲聊接龙无 task_id 走不到 report-back，被本守卫拦下。
+        # （Option B·②删了 is_stopped 协作式软停守卫；本封顶守卫保留，停的兜底入口之一。）
+        rt = worker_mod.get_group_runtime()
         if rt is not None and rt.is_session_capped():
             logger.debug(
                 "[group_graph] route_entry 会话封顶守卫命中：speech_count 已达上限，"

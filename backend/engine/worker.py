@@ -662,38 +662,16 @@ async def make_agent_node(
             return Command(goto=END, update={})
         return Command(goto=END, update={"current_speaker": agent_id})
 
-    # ── 协作式停止守卫（StopSignal·task-17）────────────────
-    # ``GroupRuntime.request_stop()``（用户喊「停/stop/中断」）只 set 一个
-    # ``asyncio.Event``（软停·不强切）。本节点入口查 ``is_stopped()``：命中即不发言
-    # （不调 brain / 不 _unified_reply），直接 ``Command(goto=END)`` 结束回合——当前
-    # 发言者已把当前 step 跑完（流式话说完），本节点是「下一个」发言者，命中 stop
-    # 即话筒落地，不 mid-stream 强切、不留半截消息。这是双层停止的软停层；硬停层
-    # ``cancel_turn``（先 set 再 task.cancel）由 UI 停止按钮走，与本守卫正交。
-    #
-    # runtime 经 ``get_group_runtime()`` 从 contextvar 取（``GroupRuntime.invoke_turn``
-    # 在 ainvoke 前 set，finally 清）。``None``（驻留 worker 图 / 群图在 GroupRuntime
-    # 之外被 invoke）→ 无协作停止信号，守卫跳过（向后兼容驻留引擎，其停止走
-    # ``AgentEngine.request_cancel`` 强切路径，不经此 contextvar）。
-    rt = get_group_runtime()
-    if rt is not None and rt.is_stopped():
-        logger.debug(
-            "[worker %s] agent-node 协作式停止守卫命中：stop_event 已 set（"
-            "用户喊停），不发言，回合 END（当前发言者已说完，不 mid-stream 强切）",
-            agent_name,
-        )
-        # same last-value guard as above: fan-out siblings write nothing.
-        if is_dispatch_fanout:
-            return Command(goto=END, update={})
-        return Command(goto=END, update={"current_speaker": agent_id})
-
-    # ── 会话发言总量封顶守卫（cross-turn backstop·StopSignal 第三层）──
-    # 按钮硬停（cancel_turn）+ 关键词软停（request_stop）失效 / 用户不在场时的最后兜底，
-    # 对标 AutoGen ``MaxMessageTermination`` / OpenAI ``max_turns``。``route_entry`` 入口
-    # 已查过一次（跨回合拦截），这里是节点入口的二次守卫——撞顶后本 agent 不发言直接 END。
+    # ── 会话发言总量封顶守卫（cross-turn backstop）──────────────────
+    # 按钮硬停（cancel_turn）失效 / 用户不在场时的最后兜底，对标 AutoGen
+    # ``MaxMessageTermination`` / OpenAI ``max_turns``。``route_entry`` 入口已查过一次
+    # （跨回合拦截），这里是节点入口的二次守卫——撞顶后本 agent 不发言直接 END。
     # **只挡闲聊/handoff（is_dispatch_fanout False），不挡 dispatch fan-out 派工 execute**：
     # 派工是中心化任务（DAG 扇出 N 个 worker 各跑一步），不是来回对话，挡它会让派工
     # 永远完不成（deadlock）。闲聊接龙撞顶正是要拦的目标。runtime None（驻留 worker 图 /
     # 群图在 GroupRuntime 之外被 invoke）→ 无计数器，守卫跳过（向后兼容）。
+    # （Option B·②删了 is_stopped 协作式软停守卫；本封顶守卫保留，停的兜底入口之一。
+    # contextvar get_group_runtime/set_group_runtime 保留——record_speech/cap 仍用。）
     if not is_dispatch_fanout:
         rt_cap = get_group_runtime()
         if rt_cap is not None and rt_cap.is_session_capped():

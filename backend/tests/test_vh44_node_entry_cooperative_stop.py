@@ -1,46 +1,45 @@
-"""VH44 回归：route_entry + agent 节点入口协作式停止守卫（StopSignal·task-17）.
+"""VH44 回归：Option B·② 删 route_entry + make_agent_node 的 is_stopped 守卫 + cancel_turn live.
 
-锁住 task-17 决策——``route_entry`` 节点入口 + 每个 agent 节点（``make_agent_node``）入口
-先检查 ``GroupRuntime._stop_event``：命中（``is_stopped()`` True）则不发言、直接返回
-``Command(goto=END)``（协作式停止——当前发言者把当前 step 跑完再退，不 mid-stream 强切）.
+Option B·② 决策——删除协作式软停的「节点入口检查 is_stopped」守卫：
+  · ``route_entry`` standalone + closure-bound twin 不再入口查 ``is_stopped()``；
+  · ``make_agent_node`` 不再入口查 ``is_stopped()``；
+  · 停止只留两入口：UI 终止按钮 ``cancel_turn``（硬切 task.cancel）+ ``SESSION_SPEECH_CAP=50`` 封顶。
 
-设计真源见 memory ``stop-signal-cooperative-cancel-design``（参考 AutoGen
-ExternalTermination：终止做成一等公民且可外部注入，默认协作式非强切）.
+设计真源见 memory ``converge-turn-design`` + ``stop-signal-cooperative-cancel-design``（Option B 删软停层）.
 
-本任务锁三件：
-  1. ``GroupRuntime.invoke_turn`` / ``resume_plan`` 在 ainvoke 前 set_group_runtime(self)，
-     finally 清（contextvar 注入，per-task 不串台）。
-  2. ``route_entry``（standalone + closure-bound ``build_route_entry`` twin）入口查
-     ``worker.get_group_runtime()`` + ``is_stopped()`` 命中即 ``Command(goto=END)``。
-  3. ``make_agent_node`` 入口查 ``get_group_runtime()`` + ``is_stopped()`` 命中即
-     ``Command(goto=END)``（在防连发守卫之后、brain 之前）。
+保留不动（本任务只删节点入口 is_stopped 守卫）：
+  · contextvar ``get_group_runtime`` / ``set_group_runtime``（record_speech / is_session_capped 仍用）；
+  · ``is_session_capped`` 守卫（50 封顶是保留的停的兜底入口之一）；
+  · 「report-back 早返回」+「防连发守卫（recent_speakers）」+「turn_count 链 8」三道；
+  · ``GroupRuntime`` 的 ``request_stop`` / ``is_stopped`` / ``reset_stop`` / ``_stop_event``（软停件由 Option B·③删，本任务不碰）。
 
-六段契约（纯静态 + 真 asyncio stub + 真 build_group_graph，不依赖 live server / 真实 LLM）：
+八段契约（纯静态 + 真 asyncio stub + 真 build_group_graph + 真 cancel live，不依赖 live server / 真实 LLM）：
 
-  A. contextvar 注入锁——set/get_group_runtime
-    1. ``worker.set_group_runtime(rt)`` / ``worker.get_group_runtime()`` 存在。
-    2. invoke_turn 在 ainvoke 前 set_group_runtime(self)，finally 清（set_group_runtime(None)）。
+  A. contextvar 注入锁——set/get_group_runtime（保留，record_speech/cap 仍用）
+    1. ``worker.set_group_runtime(rt)`` / ``get_group_runtime()`` 存在（默认 None）。
+    2. invoke_turn / resume_plan 在 ainvoke 前 set_group_runtime(self)，finally 清（contextvar 注入，per-task 不串台）。
 
-  B. route_entry 协作式停止锁——命中即 END
-    3. standalone ``route_entry`` + closure-bound ``build_route_entry`` 入口查 get_group_runtime
-       + is_stopped() 命中即 ``Command(goto=END)``（不选发言者）。
-    4. runtime None（未注入）→ 守卫跳过，route_entry 按原逻辑分叉（向后兼容 vh39）。
+  B. route_entry is_stopped 守卫已删锁（standalone + closure-bound twin）
+    3. standalone ``route_entry`` + closure-bound ``build_route_entry`` 体内**不再**查 ``is_stopped()``（Option B·② 删）。
+    4. ``is_session_capped`` 守卫仍在（50 封顶保留）——route_entry 仍查 get_group_runtime + is_session_capped。
+    5. runtime None → route_entry 按原逻辑分叉（cap 守卫跳过，向后兼容 vh39）。
 
-  C. make_agent_node 协作式停止锁——命中即 END
-    5. ``make_agent_node`` 入口（防连发守卫之后、brain 之前）查 get_group_runtime + is_stopped()
-       命中即 ``Command(goto=END)``（不调 brain / 不 _unified_reply）。
-    6. runtime None → 守卫跳过（驻留 worker 图 / 无 runtime 调用），make_agent_node 正常发言（向后兼容 vh40）。
+  C. make_agent_node is_stopped 守卫已删锁
+    6. ``make_agent_node`` 体内**不再**查 ``is_stopped()``（Option B·② 删）。
+    7. ``is_session_capped`` 守卫仍在（50 封顶保留）。
+    8. runtime None → make_agent_node 正常发言（cap 守卫跳过，向后兼容 vh40）。
 
-  D. 端到端协作式停止锁——request_stop 后 route_entry END
-    7. 真 StateGraph：invoke_turn 跑到一半 request_stop() → route_entry（或下一节点）入口命中
-       is_stopped → END，不 mid-stream 强切（当前发言者把当前 step 跑完）。
+  D. cancel_turn live 锁——硬切中断活跃回合（替代原 D7 request_stop live）
+    9. 真 GroupRuntime + 群图：invoke_turn 跑到一半（ainvoke 阻塞中）cancel_turn() → 返 True（有活跃回合）+
+       CancelledError 传入 ainvoke 断流 → invoke_turn 重抛 CancelledError → 回合终止 + _current_task 清空。
+   10. cancel_turn 幂等：无活跃回合（_current_task=None）→ 返 False（no-op，不报错）。
 
-  E. 守卫位置锁——agent 节点停止守卫在防连发之后、brain 之前
-    8. make_agent_node 源码顺序：防连发守卫块 → 停止守卫块 → brain 调用（停止守卫先于 brain）。
+  E. 守卫位置锁——make_agent_node 防连发 → cap → brain（is_stopped 已删）
+   11. make_agent_node 源码顺序：already_spoke → is_session_capped → brain（is_stopped 守卫已不在该链上）。
 
   F. 向后兼容锁——main import OK + vh39/vh40/vh43 不破
-    9. ``main`` 全量 import OK（worker/group_graph 加 contextvar 无 cycle）。
-   10. vh39 route_entry kind 分叉 + vh40 防连发 + vh43 invoke_turn 生命周期不破。
+   12. ``main`` 全量 import OK（删 is_stopped 守卫无 cycle）。
+   13. vh39 route_entry kind 分叉 + vh40 防连发 + vh43 invoke_turn 生命周期不破。
 """
 from __future__ import annotations
 
@@ -113,7 +112,7 @@ async def assert_contract() -> list[str]:
         {"agent_id": "w2", "agent_name": "后端", "agent_role": "be", "system_prompt": "sp2"},
     ]
 
-    # ── A. contextvar 注入 ──────────────────────────────────
+    # ── A. contextvar 注入（保留：record_speech / is_session_capped 仍用）──────
     # A1 set/get_group_runtime 存在
     if not hasattr(worker_mod, "set_group_runtime") or not hasattr(worker_mod, "get_group_runtime"):
         errs.append("[A1] worker 缺 set_group_runtime / get_group_runtime")
@@ -123,7 +122,7 @@ async def assert_contract() -> list[str]:
         if worker_mod.get_group_runtime() is not None:
             errs.append(f"[A1] get_group_runtime 默认应 None，实际 {worker_mod.get_group_runtime()!r}")
         else:
-            print("[A1] OK  worker.set_group_runtime(rt) / get_group_runtime() 存在（默认 None）")
+            print("[A1] OK  worker.set_group_runtime(rt) / get_group_runtime() 存在（默认 None，record_speech/cap 仍用）")
 
     # A2 invoke_turn ainvoke 前 set_group_runtime(self) + finally 清
     invoke_body = _fn_body(gr_src, "invoke_turn")
@@ -141,27 +140,35 @@ async def assert_contract() -> list[str]:
     else:
         print("[A2] OK  resume_plan twin 也 set_group_runtime(self) + finally 清（resume 也是回合）")
 
-    # ── B. route_entry 协作式停止 ───────────────────────────
-    # B3 standalone route_entry + build_route_entry twin 查 get_group_runtime + is_stopped
+    # ── B. route_entry is_stopped 守卫已删（standalone + closure-bound twin）──
     re_body = _fn_body(gg_src, "route_entry")
     bre_body = _fn_body(gg_src, "build_route_entry")
-    # the closure-bound check lives inside _route_entry; search the whole build_route_entry body
-    if "get_group_runtime" not in re_body:
-        errs.append("[B3] standalone route_entry 未调 get_group_runtime（停止守卫缺失）")
-    if "get_group_runtime" not in bre_body:
-        errs.append("[B3] build_route_entry（closure-bound twin）未调 get_group_runtime（停止守卫缺失）")
-    if "is_stopped()" not in re_body or "is_stopped()" not in bre_body:
-        errs.append("[B3] route_entry / build_route_entry 未查 is_stopped()")
+    # B3 standalone route_entry + build_route_entry twin 不再查 is_stopped（Option B·② 删）
+    #   注意：仅判定 ``is_stopped()`` 调用消失，``is_session_capped()`` 必须仍在。
+    if "is_stopped()" in re_body:
+        errs.append("[B3] standalone route_entry 仍查 is_stopped()（Option B·② 应删该守卫）")
+    if "is_stopped()" in bre_body:
+        errs.append("[B3] build_route_entry（closure-bound twin）仍查 is_stopped()（Option B·② 应删）")
     if not any(e.startswith("[B3]") for e in errs):
-        print("[B3] OK  route_entry（standalone + closure-bound twin）入口查 get_group_runtime + is_stopped()")
+        print("[B3] OK  route_entry（standalone + closure-bound twin）已删 is_stopped() 守卫（Option B·②）")
 
-    # B4 runtime None → 守卫跳过（向后兼容 vh39）—— 真 StateGraph 直调
+    # B4 is_session_capped 守卫仍在（50 封顶保留）+ 仍查 get_group_runtime
+    if "is_session_capped" not in re_body:
+        errs.append("[B4] standalone route_entry 缺 is_session_capped（50 封顶守卫应保留）")
+    if "is_session_capped" not in bre_body:
+        errs.append("[B4] build_route_entry（closure-bound twin）缺 is_session_capped（应保留）")
+    if "get_group_runtime" not in re_body or "get_group_runtime" not in bre_body:
+        errs.append("[B4] route_entry / build_route_entry 缺 get_group_runtime（cap 守卫需取 runtime）")
+    if not any(e.startswith("[B4]") for e in errs):
+        print("[B4] OK  route_entry（standalone + twin）仍查 get_group_runtime + is_session_capped（50 封顶保留）")
+
+    # B5 runtime None → route_entry 按原逻辑分叉（cap 守卫跳过，向后兼容 vh39）
     try:
         class _M:
             def __init__(self, aid): self.agent_id = aid; self.agent_name = aid; self.agent_role = "r"
 
         db_members = [_M("w1"), _M("w2")]
-        async def _run_b4():
+        async def _run_b5():
             g = build_group_graph("g1", members, coordinator_id="c1")
             re_fn = build_route_entry(g._legal_handoff_targets)
             with patch("engine.worker.crud") as crud_mock, \
@@ -176,87 +183,37 @@ async def assert_contract() -> list[str]:
                     "incoming_message": "帮我重构", "incoming_sender": "user",
                     "incoming_kind": "coordinator_reply", "turn_count": 0,
                 })
-        cmd = await _run_b4()
+        cmd = await _run_b5()
         if cmd.goto == "__end__":
-            errs.append(f"[B4] runtime None 时 route_entry 应按原逻辑分叉（非命中 stop END），实际 goto={cmd.goto!r}")
+            errs.append(f"[B5] runtime None 时 route_entry 应按原逻辑分叉（非命中 cap END），实际 goto={cmd.goto!r}")
         else:
-            print(f"[B4] OK  runtime None → 守卫跳过，route_entry 按原逻辑分叉 goto={cmd.goto!r}（向后兼容 vh39）")
+            print(f"[B5] OK  runtime None → cap 守卫跳过，route_entry 按原逻辑分叉 goto={cmd.goto!r}（向后兼容 vh39）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[B4] runtime-None 跳过测试异常：{type(e).__name__}: {e}")
+        errs.append(f"[B5] runtime-None 跳过测试异常：{type(e).__name__}: {e}")
 
-    # B3-run 真 route_entry 命中 stop → END（注入 stopped runtime）
-    try:
-        class _StoppedRT:
-            def is_stopped(self): return True
-        async def _run_b3run():
-            g = build_group_graph("g1", members, coordinator_id="c1")
-            re_fn = build_route_entry(g._legal_handoff_targets)
-            with patch("engine.worker.get_group_runtime", return_value=_StoppedRT()):
-                return await re_fn({
-                    "group_id": "g1", "coordinator_id": "c1",
-                    "incoming_message": "@后端 来一下", "incoming_sender": "user",
-                    "incoming_kind": "", "turn_count": 0,
-                })
-        cmd = await _run_b3run()
-        if cmd.goto != "__end__":
-            errs.append(f"[B3-run] stop 命中应 goto=END（不选发言者），实际 {cmd.goto!r}")
-        else:
-            print("[B3-run] OK  route_entry 命中 stop → goto=END（协作式停止，不选发言者）")
-    except Exception as e:  # noqa: BLE001
-        errs.append(f"[B3-run] route_entry 停止直调异常：{type(e).__name__}: {e}")
-
-    # ── C. make_agent_node 协作式停止 ───────────────────────
-    # C5 make_agent_node 入口查 get_group_runtime + is_stopped 命中即 END（不调 brain）
+    # ── C. make_agent_node is_stopped 守卫已删 ──────────────
     man_body = _fn_body(w_src, "make_agent_node")
-    if "get_group_runtime" not in man_body or "is_stopped()" not in man_body:
-        errs.append("[C5] make_agent_node 未查 get_group_runtime + is_stopped（停止守卫缺失）")
+    # C6 make_agent_node 不再查 is_stopped（Option B·② 删）
+    if "is_stopped()" in man_body:
+        errs.append("[C6] make_agent_node 仍查 is_stopped()（Option B·② 应删该守卫）")
     else:
-        print("[C5] OK  make_agent_node 入口查 get_group_runtime + is_stopped()")
+        print("[C6] OK  make_agent_node 已删 is_stopped() 守卫（Option B·②）")
 
-    # C5-run 真 make_agent_node 命中 stop → END + brain 未调
-    try:
-        brain_called: list[str] = []
-        async def _fake_stream(*a, **k):
-            brain_called.append("called")
-            return ("r1", '{"action":"chat","content":"hi","reasoning":"r"}', 5, 50, "m1", 0, "")
-        class _StoppedRT2:
-            def is_stopped(self): return True
-        async def _run_c5run():
-            node = build_agent_node("w1", "前端", "fe", "", "c1")
-            with patch("engine.worker._stream_brain_decision", side_effect=_fake_stream), \
-                 patch("engine.worker._unified_reply", AsyncMock()), \
-                 patch("engine.worker._build_context_from_db", AsyncMock(return_value="ctx")), \
-                 patch("engine.worker._format_display_msg", side_effect=lambda s, c: c), \
-                 patch("engine.worker.get_llm_config", return_value={"model": "m1"}), \
-                 patch("engine.worker.crud") as crud_mock, \
-                 patch("engine.worker.find_mentions", return_value=[]), \
-                 patch("engine.worker.resolve_mention", return_value=None), \
-                 patch("engine.worker.get_group_runtime", return_value=_StoppedRT2()):
-                crud_mock.list_group_members_with_agent = AsyncMock(return_value=[])
-                crud_mock.list_agents = AsyncMock(return_value=[])
-                cmd = await node({
-                    "group_id": "g1", "coordinator_id": "c1",
-                    "turn_count": 0, "recent_speakers": [],  # not already-spoke → reaches stop check
-                    "incoming_message": "接", "incoming_sender": "user",
-                })
-            return cmd, brain_called
-        cmd, brain = await _run_c5run()
-        if cmd.goto != "__end__":
-            errs.append(f"[C5-run] stop 命中应 goto=END，实际 {cmd.goto!r}")
-        elif brain:
-            errs.append(f"[C5-run] stop 命中后不应调 brain，实际 brain_called={brain}")
-        else:
-            print("[C5-run] OK  make_agent_node 命中 stop → goto=END + brain 未调（不 mid-stream 强切，不发言）")
-    except Exception as e:  # noqa: BLE001
-        errs.append(f"[C5-run] make_agent_node 停止直调异常：{type(e).__name__}: {e}")
+    # C7 is_session_capped 守卫仍在（50 封顶保留）+ record_speech 仍在
+    if "is_session_capped" not in man_body:
+        errs.append("[C7] make_agent_node 缺 is_session_capped（50 封顶守卫应保留）")
+    if "record_speech" not in man_body:
+        errs.append("[C7] make_agent_node 缺 record_speech（发言计数应保留）")
+    if not any(e.startswith("[C7]") for e in errs):
+        print("[C7] OK  make_agent_node 仍查 is_session_capped + record_speech（50 封顶 + 计数保留）")
 
-    # C6 runtime None → 守卫跳过（make_agent_node 正常发言，向后兼容 vh40）
+    # C8 runtime None → make_agent_node 正常发言（cap 守卫跳过，向后兼容 vh40）
     try:
         brain_called2: list[str] = []
         async def _fake_stream2(*a, **k):
             brain_called2.append("called")
             return ("r1", '{"action":"chat","content":"hi","reasoning":"r"}', 5, 50, "m1", 0, "")
-        async def _run_c6():
+        async def _run_c8():
             node = build_agent_node("w1", "前端", "fe", "", "c1")
             with patch("engine.worker._stream_brain_decision", side_effect=_fake_stream2), \
                  patch("engine.worker._unified_reply", AsyncMock()), \
@@ -275,93 +232,103 @@ async def assert_contract() -> list[str]:
                     "incoming_message": "接", "incoming_sender": "user",
                 })
             return cmd, brain_called2
-        cmd, brain = await _run_c6()
+        cmd, brain = await _run_c8()
         if not brain:
-            errs.append("[C6] runtime None 时 make_agent_node 应正常发言（调 brain），实际 brain 未调")
+            errs.append("[C8] runtime None 时 make_agent_node 应正常发言（调 brain），实际 brain 未调")
         else:
-            print("[C6] OK  runtime None → 守卫跳过，make_agent_node 正常发言（向后兼容 vh40）")
+            print("[C8] OK  runtime None → cap 守卫跳过，make_agent_node 正常发言（向后兼容 vh40）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[C6] runtime-None agent 测试异常：{type(e).__name__}: {e}")
+        errs.append(f"[C8] runtime-None agent 测试异常：{type(e).__name__}: {e}")
 
-    # ── D. 端到端协作式停止 ─────────────────────────────────
-    # D7 真 GroupRuntime + 群图：request_stop() 后 route_entry / 下一节点入口命中 → END
+    # ── D. cancel_turn live——硬切中断活跃回合（替代原 D7 request_stop live）──
+    # D9 真 GroupRuntime + 群图：invoke_turn 跑到一半 cancel_turn → CancelledError 断流 → 回合终止
     try:
-        async def _run_d7():
+        async def _run_d9():
             rt = GroupRuntime(_FakeGroup())
             await rt.compile_graph(members)
-            # request_stop BEFORE invoke_turn (soft stop set)
-            rt.request_stop()
-            # invoke_turn starts: reset_stop clears it (invoke_turn calls reset_stop at start)
-            # so to actually hit the guard we set AFTER reset_stop — call request_stop
-            # via a race: set stop, then invoke, route_entry should see is_stopped True
-            # BUT invoke_turn resets stop at start. To test the cooperative stop mid-turn
-            # we invoke with stop already set AFTER reset — so set it just before ainvoke
-            # by NOT relying on invoke_turn's reset. Instead test route_entry directly
-            # inside a real invoke with the runtime installed + stop set:
-            # simpler: patch _resolve_leader_identity/_resolve_group_config + ainvoke
-            # so we can set stop AFTER reset_stop but BEFORE ainvoke runs route_entry.
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
             rt._resolve_group_config = AsyncMock(return_value=(False, ""))
-            captured = {}
-            real_ainvoke = rt._graph.ainvoke
-            async def wrap_ainvoke(turn_input, config=None):
-                # set stop RIGHT BEFORE ainvoke runs route_entry (after invoke_turn's reset_stop)
-                rt.request_stop()
-                captured["turn_input"] = dict(turn_input)
-                return await real_ainvoke(turn_input, config=config)
-            rt._graph.ainvoke = wrap_ainvoke
+            # 让 ainvoke 阻塞（模拟「活跃回合跑到一半」）——用 Event gate，cancel 后断流。
+            entered = asyncio.Event()
+            async def _blocking_ainvoke(turn_input, config=None):
+                entered.set()  # 通知主流程：ainvoke 已进入（_current_task 已就位）
+                # 阻塞直到被 cancel（CancelledError 传入此 await）
+                await asyncio.sleep(3600)
+            rt._graph.ainvoke = _blocking_ainvoke  # type: ignore
             rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
             with patch("engine.group_runtime.emit_agent_status", AsyncMock()):
-                result = await rt.invoke_turn(incoming_kind="coordinator_reply", incoming_message="hi")
-            return result
-        result = await _run_d7()
-        # route_entry hit is_stopped → END. The graph result should be non-error (turn ended cleanly).
-        if result is None:
-            errs.append("[D7] request_stop 后 invoke_turn 应正常 END（route_entry 命中 stop → END），实际 None")
+                task = asyncio.create_task(
+                    rt.invoke_turn(incoming_kind="coordinator_reply", incoming_message="hi")
+                )
+                # 等 ainvoke 进入（_current_task 已 set）
+                await asyncio.wait_for(entered.wait(), timeout=5.0)
+                # 此时回合活跃：cancel_turn 应返 True 并 task.cancel
+                cancelled = rt.cancel_turn()
+                # 等任务结束——应抛 CancelledError
+                raised_cancel = False
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    raised_cancel = True
+            return cancelled, raised_cancel, rt._current_task
+        cancelled, raised_cancel, cur_task = await _run_d9()
+        if cancelled is not True:
+            errs.append(f"[D9] 活跃回合 cancel_turn 应返 True，实际 {cancelled!r}")
+        elif not raised_cancel:
+            errs.append("[D9] cancel_turn 后 invoke_turn 应抛 CancelledError（硬切断流），实际未抛")
+        elif cur_task is not None:
+            errs.append(f"[D9] cancel 后 _current_task 应清空（finally _end_turn），实际 {cur_task!r}")
         else:
-            print(f"[D7] OK  request_stop 后 invoke_turn route_entry 命中 stop → END（协作式，不 mid-stream 强切）")
+            print("[D9] OK  cancel_turn 中断活跃回合：返 True + CancelledError 断流 + _current_task 清空（硬切生效）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[D7] 端到端协作式停止测试异常：{type(e).__name__}: {e}")
+        errs.append(f"[D9] cancel_turn live 测试异常：{type(e).__name__}: {e}")
 
-    # ── E. 守卫位置（停止守卫在防连发之后、brain 之前）──────
-    # E8 make_agent_node 源码顺序：already_spoke → stop check → brain call
+    # D10 cancel_turn 幂等：无活跃回合 → 返 False（no-op，不报错）
     try:
-        # Search the WHOLE make_agent_node function body (string .find gives the
-        # first occurrence, which for already_spoke/get_group_runtime/_stream is
-        # the guard-block assignment, not a docstring mention). Use the first
-        # *statement* occurrence: assignment (``already_spoke =``), the guard
-        # call (``get_group_runtime()``), and the brain call.
-        idx_already = man_body.find("already_spoke =")
-        idx_stop = man_body.find("get_group_runtime()")
-        idx_brain = man_body.find("await _stream_brain_decision")
-        if idx_already < 0 or idx_stop < 0 or idx_brain < 0:
-            errs.append(f"[E8] make_agent_node 守卫顺序基准缺失（already_spoke=/get_group_runtime()/_stream 位置）")
-        elif not (idx_already < idx_stop < idx_brain):
-            errs.append(f"[E8] 顺序应 already_spoke < stop < brain，实际 {idx_already}/{idx_stop}/{idx_brain}")
+        async def _run_d10():
+            rt = GroupRuntime(_FakeGroup())
+            # 无活跃回合（_current_task=None）
+            return rt.cancel_turn()
+        d10 = await _run_d10()
+        if d10 is not False:
+            errs.append(f"[D10] 无活跃回合 cancel_turn 应返 False（幂等 no-op），实际 {d10!r}")
         else:
-            print("[E8] OK  make_agent_node 守卫顺序：防连发 → 停止 → brain（停止守卫先于 brain）")
+            print("[D10] OK  无活跃回合 cancel_turn → 返 False（幂等 no-op，不报错）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[E8] 守卫顺序测试异常：{type(e).__name__}: {e}")
+        errs.append(f"[D10] cancel_turn 幂等测试异常：{type(e).__name__}: {e}")
+
+    # ── E. 守卫位置（is_stopped 已删，顺序：防连发 → cap → brain）──────────
+    # E11 make_agent_node 源码顺序：already_spoke → is_session_capped → brain call
+    try:
+        idx_already = man_body.find("already_spoke =")
+        idx_cap = man_body.find("is_session_capped")
+        idx_brain = man_body.find("await _stream_brain_decision")
+        if idx_already < 0 or idx_cap < 0 or idx_brain < 0:
+            errs.append(f"[E11] make_agent_node 守卫顺序基准缺失（already_spoke=/is_session_capped/_stream 位置）")
+        elif not (idx_already < idx_cap < idx_brain):
+            errs.append(f"[E11] 顺序应 already_spoke < is_session_capped < brain，实际 {idx_already}/{idx_cap}/{idx_brain}")
+        else:
+            print("[E11] OK  make_agent_node 守卫顺序：防连发 → cap → brain（is_stopped 已删不在该链上）")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"[E11] 守卫顺序测试异常：{type(e).__name__}: {e}")
 
     # ── F. 向后兼容 ──────────────────────────────────────────
-    # F9 main import OK
+    # F12 main import OK
     try:
         import main  # noqa: F401
-        print("[F9] OK  main 全量 import OK（worker/group_graph 加 contextvar 无 cycle）")
+        print("[F12] OK  main 全量 import OK（删 is_stopped 守卫无 cycle）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[F9] main import 异常（import cycle？）：{type(e).__name__}: {e}")
+        errs.append(f"[F12] main import 异常（import cycle？）：{type(e).__name__}: {e}")
 
-    # F10 vh39/vh40/vh43 不破
+    # F13 vh39/vh40/vh43 不破
     try:
-        # vh39 route_entry kind fork still works (runtime None → skip guard)
-        # vh40 防连发 still works (stop guard after already_spoke, before brain)
-        # vh43 invoke_turn lifecycle (set_group_runtime added, finally clears — no leak)
-        # Re-run key assertions quickly:
+        # vh39 route_entry kind fork still works (runtime None → cap skip)
+        # vh40 防连发 still works (cap guard after already_spoke, before brain)
+        # vh43 invoke_turn lifecycle (set_group_runtime still set/clear — no leak)
         rt = GroupRuntime(_FakeGroup())
         await rt.compile_graph(members)
-        # invoke_turn still callable + sets/clears runtime
         rt._resolve_leader_identity = AsyncMock(return_value={"agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp"})
         rt._resolve_group_config = AsyncMock(return_value=(False, ""))
         rt._graph.ainvoke = AsyncMock(return_value={"dispatch_plan": []})
@@ -370,17 +337,17 @@ async def assert_contract() -> list[str]:
             await rt.invoke_turn(incoming_kind="coordinator_reply", incoming_message="hi")
         # after invoke, runtime contextvar should be None (finally cleared)
         if worker_mod.get_group_runtime() is not None:
-            errs.append(f"[F10] invoke_turn 后 get_group_runtime 应 None（finally 清），实际 {worker_mod.get_group_runtime()!r}")
+            errs.append(f"[F13] invoke_turn 后 get_group_runtime 应 None（finally 清），实际 {worker_mod.get_group_runtime()!r}")
         else:
-            print("[F10] OK  vh39/vh40/vh43 不破（invoke_turn 加 set/clear group_runtime 无回归，finally 清 slot）")
+            print("[F13] OK  vh39/vh40/vh43 不破（invoke_turn 仍 set/clear group_runtime 无回归，finally 清 slot）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[F10] 兼容检查异常：{type(e).__name__}: {e}")
+        errs.append(f"[F13] 兼容检查异常：{type(e).__name__}: {e}")
 
     return errs
 
 
 def main() -> int:
-    print("=== VH44 回归：route_entry + agent 节点入口协作式停止守卫（StopSignal·task-17）===\n")
+    print("=== VH44 回归：Option B·② 删 route_entry + make_agent_node 的 is_stopped 守卫 + cancel_turn live ===\n")
     errs = asyncio.run(assert_contract())
     if errs:
         print("\nFAIL:")
@@ -390,12 +357,12 @@ def main() -> int:
         return 1
     print("\n=== 结果: PASS ===")
     print(
-        "route_entry + agent 节点入口协作式停止守卫锁定：\n"
-        "  · A set/get_group_runtime contextvar + invoke_turn/resume_plan set(self) + finally 清；\n"
-        "  · B route_entry（standalone + closure-bound twin）入口查 is_stopped 命中即 END + runtime None 跳过；\n"
-        "  · C make_agent_node 入口查 is_stopped 命中即 END（brain 未调）+ runtime None 正常发言；\n"
-        "  · D 端到端 request_stop 后 route_entry 命中 → END（不 mid-stream 强切）；\n"
-        "  · E 守卫顺序 防连发 → 停止 → brain；\n"
+        "Option B·② 删节点入口 is_stopped 守卫锁定：\n"
+        "  · A contextvar set/get_group_runtime 保留（record_speech/cap 仍用）+ invoke_turn/resume_plan set(self)+finally 清；\n"
+        "  · B route_entry（standalone + closure-bound twin）已删 is_stopped() 守卫 + is_session_capped 仍在 + runtime None 跳过；\n"
+        "  · C make_agent_node 已删 is_stopped() 守卫 + is_session_capped/record_speech 仍在 + runtime None 正常发言；\n"
+        "  · D cancel_turn live 中断活跃回合（返 True + CancelledError 断流 + _current_task 清空）+ 幂等无活跃返 False；\n"
+        "  · E 守卫顺序 防连发 → cap → brain（is_stopped 已删）；\n"
         "  · F main import OK 无 cycle + vh39/vh40/vh43 不破。"
     )
     return 0

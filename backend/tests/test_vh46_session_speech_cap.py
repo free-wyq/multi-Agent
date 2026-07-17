@@ -275,17 +275,19 @@ async def assert_contract() -> list[str]:
         print("[D9] OK  make_agent_node chat/ask 路径发言后调 record_speech（+1）")
 
     # D10 record_speech 不在 execute 分支（派工不计）
-    #   record_speech 应在 `else:` (chat/ask) 分支内，不在 `if action == "execute":` 内。
-    idx_record = man_body.find("record_speech")
-    idx_else = man_body.find("else:")  # the chat/ask else branch
-    # the execute branch push_task; record_speech must be AFTER the else (chat/ask path)
+    #   record_speech 应在 chat/ask else 分支内，不在 ``if action == "execute":`` (push_task) 内。
+    #   用第一个非注释 ``record_speech()`` 调用（skipping the cap-guard comment that
+    #   mentions record_speech）定位真实调用点，再与 push_task 比较。
+    import re as _re
+    rec_calls = [m.start() for m in _re.finditer(r"\bawait\s+rt_speak\.record_speech\(\)", man_body)]
+    idx_record = rec_calls[0] if rec_calls else -1
     idx_push_task = man_body.find("push_task(group_id, agent_id, agent_id")
     if idx_push_task < 0 or idx_record < 0:
-        errs.append("[D10] make_agent_node 缺 push_task 或 record_speech 基准（无法判 execute 不计）")
+        errs.append("[D10] make_agent_node 缺 push_task 或 record_speech() 调用基准（无法判 execute 不计）")
     elif idx_record < idx_push_task:
-        errs.append("[D10] record_speech 应在 execute 分支(push_task)之后（execute 派工不计会话发言）")
+        errs.append("[D10] record_speech() 应在 execute 分支(push_task)之后（execute 派工不计会话发言）")
     else:
-        print("[D10] OK  record_speech 在 chat/ask 分支（execute 派工不计，避免派工一轮烧光额度）")
+        print("[D10] OK  record_speech() 在 chat/ask 分支（execute 派工不计，避免派工一轮烧光额度）")
 
     # ── E. reset 清零 ────────────────────────────────────────
     # E11 reset_session 清 _speech_count + _cap_emitted
@@ -376,16 +378,16 @@ async def assert_contract() -> list[str]:
     except Exception as e:  # noqa: BLE001
         errs.append(f"[H14] main import 异常（import cycle？）：{type(e).__name__}: {e}")
 
-    # H15 vh44/vh45 不破（协作式停止守卫 + stop-turn 端点仍就位）
+    # H15 Option B·② 后：route_entry is_stopped 守卫已删，但 is_session_capped 仍在
     try:
-        # route_entry still checks is_stopped (vh44) — the cap guard is additive,
-        # does not replace the stop guard. Both present in source.
-        if "is_stopped()" not in re_body:
-            errs.append("[H15] route_entry 缺 is_stopped（vh44 协作式停止守卫被误删）")
+        # Option B·② 删了 route_entry 的 is_stopped 协作式软停守卫。封顶守卫
+        # (is_session_capped) 是保留的停的兜底入口之一，必须在 route_entry 里仍在。
+        if "is_stopped()" in re_body:
+            errs.append("[H15] route_entry 仍查 is_stopped（Option B·② 应删该守卫）")
         elif "is_session_capped" not in re_body:
             errs.append("[H15] route_entry 缺 is_session_capped（封顶守卫未就位）")
         else:
-            print("[H15] OK  vh44 is_stopped 守卫仍在 + 封顶守卫就位（additive，不替换）")
+            print("[H15] OK  Option B·② 后 route_entry is_stopped 守卫已删 + 封顶守卫仍在")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[H15] 兼容检查异常：{type(e).__name__}: {e}")
 
