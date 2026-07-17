@@ -51,20 +51,22 @@ _REPLY_CB: contextvars.ContextVar = contextvars.ContextVar(
     "worker_reply_cb", default=None
 )
 
-# The per-group ``GroupRuntime`` whose cooperative stop event this node should
-# consult at entry (task-17: route_entry + each agent node先查 ``is_stopped()``
-# 命中即不发言直接返回 END，协作式停止). A contextvar (not a module global) for
-# the same reason as ``_REPLY_CB``: the group graph runs ONE ainvoke per turn per
-# group, but multiple groups' turns run concurrently as separate asyncio tasks
-# (each a ``GroupRuntime.invoke_turn``), so a module global would let group A's
-# ``request_stop`` bleed into group B's agent nodes. Each ``invoke_turn`` task
-# copies the context at creation, so the runtime it set is the one its own agent
-# nodes see. Mirrors the coordinator's ``_GRAPH_INSTANCE`` / ``_PENDING_PLAN_VIEW``
-# contextvars (per-task copy, concurrent engines don't cross-talk). Default
-# ``None`` (the resident worker graph path / a group graph invoked outside a
-# ``GroupRuntime`` turn) → ``get_group_runtime()`` returns ``None`` + the
-# stop-check guard is skipped (no runtime → no cooperative stop, the node runs as
-# before — backward compatible with the resident engine).
+# The per-group ``GroupRuntime`` this node should consult for the cross-turn
+# speech cap (``is_session_capped()`` / ``record_speech()``). ``GroupRuntime.
+# invoke_turn`` / ``resume_plan`` install it before ``ainvoke`` so ``route_entry``
+# + every agent node (``make_agent_node``) read it via ``get_group_runtime()``.
+# A contextvar (not a module global) for the same reason as ``_REPLY_CB``: the
+# group graph runs ONE ainvoke per turn per group, but multiple groups' turns
+# run concurrently as separate asyncio tasks (each a ``GroupRuntime.invoke_turn``
+# turn), so a module global would let group A's runtime bleed into group B's
+# agent nodes. Each ``invoke_turn`` task copies the context at creation, so the
+# runtime it set is the one its own agent nodes see. Mirrors the coordinator's
+# ``_GRAPH_INSTANCE`` / ``_PENDING_PLAN_VIEW`` contextvars (per-task copy,
+# concurrent engines don't cross-talk). Default ``None`` (the resident worker
+# graph path / a group graph invoked outside a ``GroupRuntime`` turn) →
+# ``get_group_runtime()`` returns ``None`` → the speech-cap guards are skipped
+# (no runtime → no cap; the node runs as before — backward compatible with the
+# resident engine).
 _GROUP_RUNTIME: contextvars.ContextVar = contextvars.ContextVar(
     "group_runtime", default=None
 )
@@ -83,15 +85,17 @@ def set_reply_callback(cb: Any) -> None:
 def set_group_runtime(rt: Any) -> None:
     """Install the per-group ``GroupRuntime`` for the duration of one turn.
 
-    Task-17: ``GroupRuntime.invoke_turn`` / ``resume_plan`` call this right
-    before ``ainvoke`` so the group graph's ``route_entry`` + every agent node
-    (``make_agent_node``) can consult ``rt.is_stopped()`` at entry (cooperative
-    soft stop — on hit return ``Command(goto=END)`` instead of speaking).
-    Sets it in the *current task's* context (contextvars), so concurrent group
-    turns (each its own ``invoke_turn`` task) each see their own runtime.
-    ``GroupRuntime.invoke_turn``'s ``finally`` clears it (``set_group_runtime
-    (None)``) so the slot doesn't leak into the next turn (paired with the
-    ``_REPLY_CB`` clear, mirroring the resident engine's per-invoke lifecycle).
+    ``GroupRuntime.invoke_turn`` / ``resume_plan`` call this right before
+    ``ainvoke`` so the group graph's ``route_entry`` + every agent node
+    (``make_agent_node``) can consult ``rt.is_session_capped()`` /
+    ``rt.record_speech()`` (the cross-turn speech cap — ``SESSION_SPEECH_CAP``,
+    the stop backstop alongside ``cancel_turn``; Option B removed the cooperative
+    soft-stop layer so this is no longer about ``is_stopped``). Sets it in the
+    *current task's* context (contextvars), so concurrent group turns (each its
+    own ``invoke_turn`` task) each see their own runtime. ``GroupRuntime.
+    invoke_turn``'s ``finally`` clears it (``set_group_runtime(None)``) so the
+    slot doesn't leak into the next turn (paired with the ``_REPLY_CB`` clear,
+    mirroring the resident engine's per-invoke lifecycle).
     """
     _GROUP_RUNTIME.set(rt)
 
@@ -99,13 +103,12 @@ def set_group_runtime(rt: Any) -> None:
 def get_group_runtime() -> Any:
     """Return the current turn's ``GroupRuntime`` (or ``None``).
 
-    Called by ``make_agent_node`` / ``route_entry`` entry guards to decide
-    whether to yield (``is_stopped()`` True → ``Command(goto=END)``). ``None``
-    (no runtime installed — the resident worker graph path, or a group graph
-    invoked outside a ``GroupRuntime`` turn) → the guard is skipped (no
-    cooperative stop; the node runs as before). The resident engine path never
-    installs a runtime, so the stop-check is a pure no-op there (backward
-    compatible).
+    Called by ``make_agent_node`` / ``route_entry`` for the speech-cap guards
+    (``is_session_capped()`` / ``record_speech()``). ``None`` (no runtime
+    installed — the resident worker graph path, or a group graph invoked outside
+    a ``GroupRuntime`` turn) → the cap guards are skipped (no runtime → no cap;
+    the node runs as before). The resident engine path never installs a runtime,
+    so the cap check is a pure no-op there (backward compatible).
     """
     return _GROUP_RUNTIME.get()
 
@@ -670,8 +673,8 @@ async def make_agent_node(
     # 派工是中心化任务（DAG 扇出 N 个 worker 各跑一步），不是来回对话，挡它会让派工
     # 永远完不成（deadlock）。闲聊接龙撞顶正是要拦的目标。runtime None（驻留 worker 图 /
     # 群图在 GroupRuntime 之外被 invoke）→ 无计数器，守卫跳过（向后兼容）。
-    # （Option B·②删了 is_stopped 协作式软停守卫；本封顶守卫保留，停的兜底入口之一。
-    # contextvar get_group_runtime/set_group_runtime 保留——record_speech/cap 仍用。）
+    # Option B 后两停入口之一（cancel_turn 硬切 + 本 50 封顶）。contextvar
+    # get_group_runtime/set_group_runtime 保留——record_speech/cap 用。
     if not is_dispatch_fanout:
         rt_cap = get_group_runtime()
         if rt_cap is not None and rt_cap.is_session_capped():

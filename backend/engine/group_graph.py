@@ -280,7 +280,7 @@ async def route_entry(state: GroupState) -> Command:
     # worker 跑完派工步骤的回报（agent_reply + task_id）是中心化 DAG 收尾，挡它
     # 会致派工步骤永远停在 dispatched（split-brain 死锁），所以 report-back 必须先
     # 放过。闲聊接龙撞顶正是要拦的目标——它无 task_id，走不到 report-back 早返回，
-    # 被本守卫拦下。（Option B·②删了 is_stopped 协作式软停守卫，本封顶守卫保留。）
+    # 被本守卫拦下。这是 Option B 后两停入口之一（cancel_turn 硬切 + 本 50 封顶）。
     rt = worker_mod.get_group_runtime()
     if rt is not None and rt.is_session_capped():
         logger.debug(
@@ -383,7 +383,7 @@ def build_route_entry(handoff_targets: set[str]):
         # 不选发言者直接 END。跨回合累加、只在 reset_session（/new）清零——这正是拦住
         # 多回合成语接龙的关键。放在 report-back 早返回之后，让中心化派工回报照常收尾
         # （挡它会 split-brain 死锁）；闲聊接龙无 task_id 走不到 report-back，被本守卫拦下。
-        # （Option B·②删了 is_stopped 协作式软停守卫；本封顶守卫保留，停的兜底入口之一。）
+        # Option B 后两停入口之一（cancel_turn 硬切 + 本 50 封顶）。
         rt = worker_mod.get_group_runtime()
         if rt is not None and rt.is_session_capped():
             logger.debug(
