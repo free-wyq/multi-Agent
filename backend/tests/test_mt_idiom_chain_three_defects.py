@@ -20,11 +20,12 @@
     形成 A→B→A→A 连发」堵死）。锁见 vh40。
   · **route_entry 闲聊分叉**（_looks_central / _is_report_back）— 闲聊 / @人 goto agent
     节点，协调者不被触达（问题2修复核心）。锁见 vh39。
-  · **request_stop 软停 + cancel_turn 硬停双层**（task17/task23）— ``route_user_message``
-    识别「停/stop/中断」关键词 → ``rt.request_stop()``（**短路在 invoke_turn 之前**，不
-    路由给任何发言者、不开新回合——这正是问题3「停」反驱动新循环的修复）；UI 停止按钮
-    → ``POST /groups/{id}/stop-turn`` → ``rt.cancel_turn()``（先 set 再 task.cancel 断流）。
-    锁见 vh44/vh45。前置 BUG「group 路径派工事件断层 emit_task_dispatched」已修（vh54）。
+  · **停止入口两件套（Option B 后）** — Option B 删了入站停关键词（``停/stop/中断`` 不再
+    短路 ``request_stop``）。停止只剩两入口：UI 停止按钮 → ``POST /groups/{id}/stop-turn``
+    → ``rt.cancel_turn()``（task.cancel 断流）；系统内置 ``SESSION_SPEECH_CAP=50`` 跨回合
+    封顶兜底。一条裸「停」消息现在当普通消息路由（无 @ → coordinator 中心化路径，@人 →
+    agent 节点），不再被特殊解释为停止信号。锁见 vh44/vh45/vh46。前置 BUG「group 路径派工
+    事件断层 emit_task_dispatched」已修（vh54）。
 
 本测试是 **live e2e**（起真后端 + 真 LLM，建多 agent 群发接龙，抓 WS 事件流）。
 沿用 MT-09~MT-14 自测模式（httpx HTTP 真源 + WS 抓事件流 + reload 触发引擎启动 +
@@ -41,12 +42,11 @@
   · **协调者不插话（HARD）**：接龙回合（去中心化路径）期间无 coordinator_think 事件
     （协调者大脑未被触达）+ 协调者不在 agent_reply 序列（不抢话）。route_entry 闲聊分叉
     goto agent 节点，协调者根本不被触达——这是 route_entry 分叉生效的直接证据。
-  · **喊停能停（HARD）**：核心缺陷是「停」被当普通消息推给协调者 → **驱动新一轮循环**
-    （火上浇油）。修复是 ``_is_stop_phrase`` 在 ``invoke_turn`` **之前**短路 →
-    ``request_stop()``（只 set event，不开新回合）。故断言：发「停」后短窗口内 **无新
-    agent_reply / coordinator_think 事件**（「停」没驱动新循环）。再验 stop-turn 端点
-    返回 ``{ok, cancelled, message}`` 结构（无活跃回合 cancelled=False 是幂等 no-op，
-    不算失败——与自然完成不竞态）。
+  · **喊停能停（HARD）= stop-turn 端点**：Option B 删停关键词后，「能停」的真正入口是
+    UI 停止按钮 → ``POST /groups/{id}/stop-turn`` → ``cancel_turn``（task.cancel mid-stream
+    断流）。故本测试的「能停」HARD 断言落在 stop-turn 端点结构（``{ok, cancelled, message}``）
+    + 幂等（无活跃回合 cancelled=False 是合法 no-op）。原「停关键词短路」段已改写为验证
+    「停」不再被特殊短路——当普通消息落库（user_input），不再触发 request_stop 软停。
 
 为何不强制 LLM 接出合法成语 / 多跳 handoff：LLM 输出不确定，可能接不上或改规则。
 本测试验「三缺陷修复机制」，非「接龙接得对」。HARD 落在结构证据，SOFT 落在接龙质量。
@@ -85,7 +85,8 @@ STARTER = (
     "接不上就说接不上。开始吧。"
 )
 
-# 停止关键词（route_user_message 的 _is_stop_phrase 命中集：停/停止/中断/stop）。
+# 原停止关键词（route_user_message 已删 _is_stop_phrase 命中集，Option B 删停关键词入站）。
+# 「停」现在当普通消息路由（无 @ → coordinator 中心化路径，@人 → agent 节点），不再短路。
 STOP_WORD = "停"
 
 
@@ -446,17 +447,20 @@ async def main() -> int:
         _info("无 coordinator_plan（接龙未被误判 dispatch 拆计划）",
               len(coord_plan_events) == 0, f"plan={len(coord_plan_events)}")
 
-        # ── 6. 缺陷③：喊停能停（HARD）—— 「停」不驱动新循环 ──
-        print("\n[check 6] 缺陷③ 喊停能停：发「停」→ 不驱动新循环（_is_stop_phrase 短路）")
+        # ── 6. 缺陷③：喊停能停（HARD）—— 「停」不再短路，当普通消息落库 ──
+        # Option B 删了入站停关键词（_is_stop_phrase 已删），「停」不再触发 request_stop 软停。
+        # 本段断言改写为：「停」被当普通消息接收（落 user_input），不再被特殊短路。真正
+        # 的「能停」HARD 断言落在 check 7 的 stop-turn 端点（cancel_turn 硬切）。
+        print("\n[check 6] 缺陷③ 喊停能停：停关键词已删，「停」当普通消息落库（不短路）")
         # 等上一回合彻底静默（确保无在途回合）
         await asyncio.sleep(3.0)
         msgs_before_stop = await list_messages(probe_group_id, limit=100)
         reply_before = len([m for m in msgs_before_stop if m.get("type") == "agent_reply"])
-        think_before = 0  # think 事件不入库（仅 WS），用窗口内事件计数
 
-        # 发「停」+ 抓 STOP_QUIET 窗口事件流。核心断言：「停」不驱动新循环——
-        # route_user_message 的 _is_stop_phrase 命中 → request_stop → 短路在 invoke_turn
-        # 之前，不路由给任何发言者、不开新回合。故窗口内无新 agent_reply / coordinator_think。
+        # 发「停」+ 抓 STOP_QUIET 窗口事件流。Option B 后「停」不再短路——它当普通消息
+        # 走 route_user_message（无 @ → coordinator 中心化路径，可能触发协调者一轮回复）。
+        # 故本段不再断言「窗口内无新 agent_reply」（那已不成立）。改断言「停」自身被系统
+        # 接收（落 user_input），证明入站删了停关键词短路后「停」不被特殊处理/丢弃。
         async def _send_stop():
             await asyncio.sleep(0.3)
             msg = await send_user_message(probe_group_id, STOP_WORD)
@@ -469,42 +473,24 @@ async def main() -> int:
             stop_type_counts[t] = stop_type_counts.get(t, 0) + 1
         print(f"      [stop-events] 收到 {len(stop_events)} 条; 分布={stop_type_counts}")
 
-        # 「停」自身会落一条 user_input（send_message 在 route_user_message 前落库 +
-        # emit_message_added），这是正常的（「停」被系统接收）。但「停」不该驱动任何
-        # agent_reply / coordinator_think（短路在 invoke_turn 前）。
-        new_agent_replies = [
-            e for e in stop_events
-            if e.get("type") == "agent_reply" and e.get("sender_id") != "user"
-        ]
-        new_coord_thinks = [e for e in stop_events if e.get("type") == "coordinator_think"]
-        print(f"      [stop] 窗口内新 agent_reply={len(new_agent_replies)} "
-              f"coordinator_think={len(new_coord_thinks)}")
-
-        # HARD 核心：「停」不驱动新循环——窗口内无新 agent_reply（「停」没让任何 agent 发言）
-        if _check("「停」未驱动新 agent_reply（_is_stop_phrase 短路，不开新回合）",
-                  len(new_agent_replies) == 0,
-                  f"new_agent_replies={len(new_agent_replies)}"):
-            print(f"      ✓ route_user_message 识别停关键词 → request_stop（短路在 invoke_turn 前）")
-        else:
-            errs.append(f"[stop] 「停」驱动了 {len(new_agent_replies)} 条新 agent_reply"
-                        f"（停关键词未短路，火上浇油缺陷未修）")
-        # HARD：「停」不触达协调者大脑（不驱动 coordinator_think）
-        if _check("「停」未触达 coordinator_think（不驱动协调者新循环）",
-                  len(new_coord_thinks) == 0,
-                  f"new_coord_thinks={len(new_coord_thinks)}"):
-            pass
-        else:
-            errs.append(f"[stop] 「停」触达 coordinator_think={len(new_coord_thinks)}（驱动新循环）")
-        # SOFT：「停」自身 user_input 落库（系统接收了停止指令，非丢弃）
+        # Option B 后「停」当普通消息：send_message 在 route_user_message 前落库 +
+        # emit_message_added，故「停」自身会落一条 user_input（系统接收，非丢弃）。
+        # 不再断言「停」不驱动新循环——删了停关键词后，「停」无 @ → coordinator 中心化路径，
+        # 协调者可能回复一轮（这是 Option B 的预期行为：停止走按钮，不再走关键词）。
         stop_user_inputs = [e for e in stop_events if e.get("type") == "user_input"]
-        _info("「停」自身 user_input 落库（系统接收停止指令，非丢弃）",
-              len(stop_user_inputs) >= 1, f"user_input={len(stop_user_inputs)}")
+        if _check("「停」被当普通消息接收（落 user_input，停关键词短路已删）",
+                  len(stop_user_inputs) >= 1, f"user_input={len(stop_user_inputs)}"):
+            print(f"      ✓ Option B 删停关键词入站：「停」不再短路 request_stop，当普通消息落库")
+        else:
+            errs.append(f"[stop] 「停」未落 user_input（停关键词删后应作普通消息接收）："
+                        f"stop_user_inputs={len(stop_user_inputs)}")
 
         # ── 7. stop-turn 端点契约（HARD）—— 硬停端点结构 + 幂等 ──
-        print("\n[check 7] stop-turn 端点契约：{ok, cancelled, message} 结构 + 幂等 no-op")
+        # Option B 后「能停」的真正 HARD 入口：UI 停止按钮 → stop-turn → cancel_turn 硬切。
+        print("\n[check 7] stop-turn 端点契约（Option B 后「能停」HARD 入口）：{ok, cancelled, message} + 幂等")
         # 无活跃回合时调 stop-turn → cancelled=False（幂等 no-op，与自然完成不竞态），
-        # 不算失败。有活跃回合 → cancelled=True。本场景上一回合已 END，「停」也没开新
-        # 回合，故预期 cancelled=False（无活跃回合可停）。核心验端点结构 + 不报错。
+        # 不算失败。有活跃回合 → cancelled=True。本场景上一回合已 END，故预期 cancelled=False
+        # （无活跃回合可停）。核心验端点结构 + 不报错——这才是「喊停能停」的硬切入口。
         resp = await stop_turn(probe_group_id)
         print(f"      [stop-turn] resp={resp}")
         if _check("stop-turn 响应 {ok, cancelled, message} 结构",
@@ -552,8 +538,8 @@ async def main() -> int:
     print("    一次（A→B→A 的第三个 A 被守卫堵死，回合内 agent 唯一，无连发）；")
     print("  · [缺陷②·协调者不插话] route_entry 闲聊/@mention 分叉 goto agent 节点：")
     print("    接龙回合无 coordinator_think / 协调者不在发言序列（不被触达/不抢话）；")
-    print("  · [缺陷③·喊停能停] _is_stop_phrase 在 invoke_turn 前短路 → request_stop：")
-    print("    发「停」后窗口内无新 agent_reply / coordinator_think（不驱动新循环，火上浇油修复）；")
+    print("  · [缺陷③·喊停能停] Option B 删停关键词入站：「停」当普通消息落库（不再短路 request_stop）；")
+    print("    真正「能停」入口 = stop-turn 端点（cancel_turn 硬切）+ SESSION_SPEECH_CAP 50 封顶；")
     print("    stop-turn 端点 {ok, cancelled, message} 结构正确 + 幂等 no-op。")
     print("  · 收尾 DELETE 探针群 → 全局无残留。")
     return 0

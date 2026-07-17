@@ -439,8 +439,7 @@ async def assert_contract() -> list[str]:
         try:
             # patch crud + registry so the function reaches the no-mention branch
             with patch("engine.mention.crud") as crud_mock, \
-                 patch("engine.mention.find_mentions", return_value=[]), \
-                 patch("engine.mention._is_stop_phrase", return_value=False):
+                 patch("engine.mention.find_mentions", return_value=[]):
                 # a group with a coordinator so it reaches the no-mention -> coordinator
                 # branch where the converge guard raises.
                 class _G:

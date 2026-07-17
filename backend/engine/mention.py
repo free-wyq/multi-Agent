@@ -68,41 +68,6 @@ def clear_group_routes(group_id: str) -> None:
     _a2a_turns.pop(group_id, None)
 
 
-# task-20: inbound 停关键词。用户在群里发这些词 → GroupRuntime.request_stop() 协作式
-# 软停（只 set stop_event，当前发言者跑完当前 step，下一节点让步，回合在节点边界 END）。
-# 区别于 UI 停止按钮（POST /groups/{id}/stop-turn → cancel_turn 硬停，先 set 再 task.cancel
-# 断流）。独立于 @mention 路由——一条「停」消息优先解释为停止信号而非交给某发言者。
-_STOP_PHRASES = ("停", "停止", "中断", "stop")
-
-
-def _is_stop_phrase(content: str) -> bool:
-    """Whether ``content`` is a stop request (cooperative soft-stop trigger).
-
-    Matches the stop phrases (``停`` / ``停止`` / ``中断`` / ``stop``) as a
-    whole-word / trimmed-token check, NOT a substring — ``「请停下来」`` matches
-    (the message's intent is stop), but a normal message that merely *contains*
-    「停」 like ``「方案先停一停讨论下」`` is borderline; we match on a stripped
-    token equality so only a short stop intent trips it (the message IS a stop
-    command, not a sentence containing the character). Case-insensitive for the
-    English ``stop``.
-    """
-    if not content:
-        return False
-    stripped = content.strip().lower()
-    if not stripped:
-        return False
-    # exact / lead-token match: "停", "停止", "中断", "stop", "stop。" etc.
-    for phrase in _STOP_PHRASES:
-        p = phrase.lower()
-        if stripped == p or stripped.startswith(p):
-            # ensure the rest (after the phrase) is only trailing punctuation /
-            # whitespace, not more content (so "停止" matches but not "停止器描述")
-            rest = stripped[len(p):].lstrip("，。！？.,!?、 \t\n")
-            if not rest:
-                return True
-    return False
-
-
 def find_mentions(content: str) -> list[str]:
     """Scan ``content`` for ``@name`` tokens, stripping trailing punctuation.
 
@@ -281,13 +246,6 @@ async def route_user_message(group_id: str, content: str, *, converge: bool = Fa
     of pushing a notify to the resident coordinator ``AgentEngine``. The graph's
     ``route_entry`` forks the turn:
 
-      · **stop keyword** (``停`` / ``stop`` / ``中断`` / ``停止``) →
-        ``rt.request_stop()`` — cooperative soft stop (only ``_stop_event.set()``;
-        the current speaker finishes its step, the next node yields → turn ENDs
-        gracefully at a node boundary, NOT mid-stream). Distinct from the UI
-        stop button (``POST /groups/{id}/stop-turn`` → ``cancel_turn`` hard stop).
-        A stop with no active turn is a documented no-op (the event is cleared at
-        the next ``invoke_turn``'s start).
       · **@mention** → ``invoke_turn(incoming_kind="agent_reply"``,
         ``incoming_data=None``) — a peer handoff (no ``task_id``), so
         ``route_entry`` hands the turn to the @mentioned agent node
@@ -295,6 +253,14 @@ async def route_user_message(group_id: str, content: str, *, converge: bool = Fa
       · **no @mention** → ``invoke_turn(incoming_kind="coordinator_reply")`` —
         engineering demand, ``route_entry`` routes to the Leader's ``classify``
         (centralized path).
+
+    **Stop entries (Option B)**: Option B removed the inbound stop-keyword
+    path (``停`` / ``stop`` / ``中断`` no longer short-circuit to
+    ``request_stop``). Stopping now has two entries only — the UI stop button
+    (``POST /groups/{id}/stop-turn`` → ``cancel_turn`` hard stop) and the
+    session speech cap (``SESSION_SPEECH_CAP=50`` cross-turn backstop). A bare
+    「停」 message is therefore routed like any ordinary chat message (no @ →
+    coordinator central path, @人 → agent node), NOT as a stop signal.
 
     **@收束 回合收敛** (task ``converge-turn-design``): ``converge=True`` is the
     one-shot「收束」switch (UI toggle + @人 → a new turn that converges). It is
@@ -337,26 +303,6 @@ async def route_user_message(group_id: str, content: str, *, converge: bool = Fa
             group_id, "coordinator_reply", "user", group.coordinator_id, content, None,
         )
         return
-
-    # stop keyword → cooperative soft stop (task-20). Short-circuits both the
-    # @mention and the coordinator paths — a 停 message stops the active turn
-    # rather than routing to a speaker.
-    if _is_stop_phrase(content):
-        # local import: registry imports mention at module load (for
-        # route_mentions / clear_group_routes), so a top-level ``from
-        # engine.registry import registry`` would cycle. Defer to call time —
-        # the singleton exists by the time an inbound message routes.
-        from engine.registry import registry  # noqa: PLC0415
-
-        rt = await registry.ensure_runtime(group_id)
-        if rt is not None:
-            rt.request_stop()
-            logger.debug(
-                "[mention] route_user_message 停关键词命中 group=%s → request_stop（软停）",
-                group_id,
-            )
-            return
-        # no runtime (cold/compile-failed group) → nothing active to stop, no-op.
 
     from engine.registry import registry  # noqa: PLC0415 — defer to break the
     # registry→mention import cycle (registry imports mention at load time).
