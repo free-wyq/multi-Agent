@@ -713,6 +713,7 @@ class GroupRuntime:
         incoming_message: str = "",
         incoming_sender: str = "user",
         incoming_data: dict[str, Any] | None = None,
+        converge: bool = False,
     ) -> dict[str, Any] | None:
         """Run one group-graph turn = one ``graph.ainvoke`` = one cancellable Task.
 
@@ -769,6 +770,14 @@ class GroupRuntime:
             incoming_data: the notify's data dict (e.g. a worker report-back's
                 ``{task_id, success}`` for ``node_handle_reply``, or a
                 ``plan_resume`` payload).
+            converge: @收束 回合收敛 (task ``converge-turn-design``). ``True`` =
+                a 收束回合——the @mentioned agent replies once then ENDs without
+                handoff (``make_agent_node`` forces ``next_speaker=None`` on
+                ``state["converge"]``). Only meaningful on the decentralized
+                @mention path; injected into the initial state so the agent node
+                sees it. Default ``False`` (normal turns handoff as usual). The
+                caller (``route_user_message``) must reject a 收束 turn with no
+                @mention (收束必须 @ 收口对象) before invoking.
 
         Returns:
             the graph result dict (the final GroupState), or ``None`` if the
@@ -806,6 +815,11 @@ class GroupRuntime:
                 incoming_kind, incoming_message, incoming_sender, incoming_data,
                 leader, group_config,
             )
+            # @收束 回合收敛（converge-turn-design）：注入 converge 标志到初始 state，
+            # 让 make_agent_node 末端读到后强制 next_speaker=None → 回一句即 END 不 handoff。
+            # 仅去中心化 @mention 路径有意义（route_user_message 在无 @ 时拒绝收束）。
+            if converge:
+                turn_input["converge"] = True
             thread_id = self._next_thread_id()
             config = {"configurable": {"thread_id": thread_id}}
 

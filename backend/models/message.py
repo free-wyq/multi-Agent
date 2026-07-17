@@ -34,6 +34,15 @@ class MessageCreatePayload(BaseModel):
     type: str | None = Field(default=None)
     content: str | None = None
     data: dict[str, Any] | None = None
+    # @收束 回合收敛开关 (converge-turn-design). Optional (default False) so
+    # existing callers are unaffected. When True the message is a one-shot 收束
+    # turn: route_user_message forwards it to invoke_turn(converge=True), which
+    # injects the flag into GroupState so make_agent_node forces next_speaker=None
+    # (the @mentioned agent replies once then ENDs without handoff). Only
+    # meaningful on the @mention path; a 收束 turn with no @mention is rejected
+    # (400) by the API. Not persisted on the Message row (it is a per-turn
+    # routing flag, not message metadata).
+    converge: bool = False
 
 
 class BusEventData(BaseModel):

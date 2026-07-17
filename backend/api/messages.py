@@ -13,7 +13,7 @@ engine's asyncio.Queue inbox, waking its run loop.
 """
 from __future__ import annotations
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from engine.mention import route_user_message
 from events import emit_message_added
@@ -38,8 +38,19 @@ async def send_message(payload: MessageCreatePayload) -> Message:
     msg = await crud.create_message(payload)
     # push the user message over the WS bus
     await emit_message_added(msg.model_dump())
-    # route by @mention -> target agent, else -> coordinator (wakes engine inbox)
-    await route_user_message(msg.group_id, msg.content or "")
+    # route by @mention -> target agent, else -> coordinator (wakes engine inbox).
+    # ``converge`` (converge-turn-design): one-shot @收束 switch — only the
+    # @mention path may 收束 (the agent replies once then ENDs, no handoff).
+    # ``route_user_message`` raises ValueError on a 收束 turn with no @mention;
+    # surface that as a 400 so the frontend's toggle validation has a server-side
+    # backstop. ``MessageCreatePayload.converge`` is optional (default False) so
+    # existing callers are unaffected.
+    converge = bool(getattr(payload, "converge", False))
+    try:
+        await route_user_message(msg.group_id, msg.content or "", converge=converge)
+    except ValueError as e:
+        # 收束必须 @ 收口对象 — the toggle was on but the message had no @人.
+        raise HTTPException(status_code=400, detail=str(e)) from e
     return msg
 
 

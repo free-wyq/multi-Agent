@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
-import { BulbOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { BulbOutlined, CompressOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
   groupApi,
@@ -487,6 +487,18 @@ export default function ChatPanel({
   const [slashQuery, setSlashQuery] = useState('')
   const slashCommands = slashOpen ? matchSlashCommands(slashQuery) : []
 
+  // ── @收束 一次性开关（converge-turn-design）──────────────────────
+  // Option B 删停关键词后去中心化「人工停止」入口空缺的柔性收口。点亮 → 下条消息以收束
+  // 回合发（@某 agent → 该 agent 回一句即 END 不 handoff，回合自然收敛）→ 发完自动灭。
+  // 开关亮但消息无 @ → handleSendMessage 前端拦截 toast「收束必须选择 @ 收口对象」不发。
+  // 仅去中心化路径：中心化收口走 plan 全 done / summarize，不需要 @收束。开关是 UI 控件，
+  // 不解析消息内容——不重蹈停关键词的语义歧义。纯加性，converge=false 时一切照旧。
+  // 切群时复位（收束是当前群一次性意图，跨群不应残留）。
+  const [convergeActive, setConvergeActive] = useState(false)
+  useEffect(() => {
+    setConvergeActive(false)
+  }, [chatGroupId])
+
   const mentionCandidates = members.filter((m) =>
     getMemberDisplayName(m).toLowerCase().includes(mentionQuery.toLowerCase()),
   )
@@ -814,9 +826,17 @@ export default function ChatPanel({
 
   const handleSendMessage = async () => {
     if (!chatInput.trim() || !chatGroupId || sending) return
+    // @收束 前端拦截（converge-turn-design）：开关亮但消息无 @ → 不发，toast 提示。
+    // 收束必须 @ 收口对象（@某成员后再开收束开关）。后端也会 400 兜底，但前端先拦避免无效请求。
+    if (convergeActive && !/@\S/.test(chatInput)) {
+      message.warning('收束必须选择 @ 收口对象（先 @ 某成员再开收束开关）')
+      return
+    }
     setSending(true)
     const content = chatInput.trim()
+    const wasConverge = convergeActive
     setChatInput('')
+    setConvergeActive(false)
     setMentionOpen(false)
     setSlashOpen(false)
     // 发送即跟到底：用户主动发消息必然想看回复，强制贴底，回复/流式自动滚入视野。
@@ -860,6 +880,9 @@ export default function ChatPanel({
         receiver_id: 'broadcast',
         type: 'user_input',
         content,
+        // @收束（converge-turn-design）：wasConverge=发送前开关是否亮。透传到后端
+        // invoke_turn(converge=True) → make_agent_node 强制 next_speaker=None 回一句即 END。
+        converge: wasConverge,
       })
       setChatMessages((prev) => {
         const alreadyExists = prev.some((m) => m.id === sent.id)
@@ -869,6 +892,8 @@ export default function ChatPanel({
     } catch {
       setChatMessages((prev) => prev.filter((m) => m.id !== tempId))
       setChatInput(content)
+      // 发送失败时恢复收束开关（一次性开关只在发送成功后灭——失败重来仍可收束）。
+      if (wasConverge) setConvergeActive(true)
       message.error('发送失败')
     } finally {
       setSending(false)
@@ -1439,11 +1464,35 @@ export default function ChatPanel({
               value={chatInput}
               onChange={handleInputChange}
               onKeyDown={handleInputKeyDown}
-              placeholder="输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行（智能体忙碌时回车会先打断当前任务）"
+              placeholder={
+                convergeActive
+                  ? '收束模式：@ 某成员让其回一句即收束（回复后不再 handoff）。再点「收束」取消'
+                  : '输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行（智能体忙碌时回车会先打断当前任务）'
+              }
               disabled={sending}
               autoSize={{ minRows: 1, maxRows: 6 }}
               style={{ flex: 1, resize: 'none' }}
             />
+            {/* @收束 一次性开关（converge-turn-design）：点亮后下条消息以收束回合发，
+                @某 agent → 回一句即 END 不 handoff。发完自动灭。仅去中心化柔性收口。 */}
+            <Tooltip
+              title={
+                convergeActive
+                  ? '收束已开启：下条消息 @ 某成员 → 其回一句即收束，不再 handoff（再点取消）'
+                  : '收束：@ 某成员让其回一句即收束（回复后不再 handoff），用于柔性收口'
+              }
+            >
+              <Button
+                type={convergeActive ? 'primary' : 'default'}
+                ghost={convergeActive}
+                icon={<CompressOutlined />}
+                onClick={() => setConvergeActive((v) => !v)}
+                disabled={sending}
+                aria-pressed={convergeActive}
+              >
+                收束
+              </Button>
+            </Tooltip>
             <Button
               type="primary"
               icon={<SendOutlined />}

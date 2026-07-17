@@ -180,6 +180,13 @@ export interface MessageCreatePayload {
   type?: string
   content?: string
   data?: Record<string, unknown>
+  /**
+   * @收束 回合收敛开关（converge-turn-design）。一次性开关：开启后下条消息以收束回合发
+   * （@某 agent → 该 agent 回一句即 END 不 handoff，回合自然收敛），发完自动灭。仅 @mention
+   * 路径有意义；开关亮但消息无 @ → 后端 400 拒绝「收束必须 @ 收口对象」。
+   * 默认 false，向后兼容既有调用方。后端透传到 invoke_turn(converge=True) 注入 GroupState。
+   */
+  converge?: boolean
 }
 
 // ── HTTP 工具 ────────────────────────────────────────────────

@@ -171,6 +171,14 @@ class GroupState(TypedDict, total=False):
         list of agent_ids that have spoken this turn. Nodes / ``route_entry``
         consult it to enforce "same agent not driven twice in one turn"
         (顺序乱根因②). Cleared at turn boundary (paired with ``turn_count`` reset).
+      · ``converge`` (bool, last-value) — @收束 回合收敛标志 (task
+        ``converge-turn-design``). Injected by ``invoke_turn(converge=True)``;
+        ``make_agent_node`` reads it at its tail and forces ``next_speaker=None``
+        so the speaker replies once then ENDs without handoff. Fills the
+        「人工停止」gap left by Option B's stop-keyword removal on the decentralized
+        path (a one-shot UI switch + @人 → a new turn that converges after one
+        reply). Default False (normal turns handoff as usual). Purely additive —
+        does not touch the handoff cap / session cap / 防连发 / recursion_limit.
       · ``auto_confirm`` / ``leader_strategy`` — group-config flags injected per
         ``invoke_turn`` from ``GroupEntity.config`` (same source as
         ``CoordinatorState.auto_confirm`` / ``leader_strategy``), kept verbatim
@@ -207,6 +215,17 @@ class GroupState(TypedDict, total=False):
     # turn control (reset each invoke_turn; bound handoff chain length + anti-loop)
     turn_count: int
     recent_speakers: Annotated[list[str], append_list]
+
+    # @收束 回合收敛（task: converge-turn-design）——Option B 删停关键词后去中心化
+    # 「人工停止」入口空缺的柔性收口。last-value（无 reducer）channel，与
+    # ``turn_count`` / ``recent_speakers`` 同层：``invoke_turn(converge=True)`` 注入，
+    # ``make_agent_node`` 末端查 ``state.get("converge")`` 命中即把 ``next_speaker``
+    # 强制 None → 走 END 不 handoff（agent 回一句即收敛）。默认 False（正常回合照旧
+    # handoff）。bool 可序列化进 checkpointer 无碍。**仅去中心化路径**——收束走
+    # @mention→agent 节点分叉，converge 标志只在 make_agent_node 末端起作用，
+    # route_entry 零改动。纯加性，不碰已有护栏（handoff 链 8 / 会话封顶 50 / 防连发 /
+    # recursion_limit 互不影响）。详见 memory ``converge-turn-design``。
+    converge: bool
 
     # group config (injected per invoke_turn from GroupEntity.config)
     auto_confirm: bool

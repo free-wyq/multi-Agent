@@ -865,6 +865,24 @@ async def make_agent_node(
     # field exists on GroupState for future per-turn memos without a schema
     # change.)
 
+    # ── @收束 回合收敛守卫（converge-turn-design）──────────────────────
+    # Option B 删停关键词后去中心化「人工停止」入口空缺的柔性收口：UI 开「收束」开关 +
+    # @某 agent 发一条 → invoke_turn(converge=True) 注入 ``converge`` 标志 → 这里在
+    # handoff 决策（_resolve_handoff_target）之后、``if next_speaker is None`` 之前强制
+    # ``next_speaker = None``，让 agent 回一句即 END 不 handoff，回合自然收敛。
+    #
+    # 落点精准：brain 照跑（生成那句收尾回复已 _unified_reply emit）、record_speech 照计
+    # （收束回复算 1 条发言，受 SESSION_SPEECH_CAP 正常约束），只把 next_speaker 强制 None。
+    # 只影响 is_dispatch_fanout=False 的闲聊/handoff 路径（派工 fan-out 本就 next_speaker=None
+    # 走 END，无影响）。**收束单回合单回复**：要多段收尾做两次 @收束，不做链上 N 个都回完才停。
+    if not is_dispatch_fanout and state.get("converge") and next_speaker is not None:
+        logger.debug(
+            "[worker %s] agent-node @收束守卫命中：converge=True，强制 next_speaker=None "
+            "（回一句即 END 不 handoff，回合收敛）",
+            agent_name,
+        )
+        next_speaker = None
+
     if next_speaker is None:
         return Command(goto=END, update=update)
     # handoff to the peer agent node. The group graph registers agent nodes

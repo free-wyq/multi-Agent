@@ -273,7 +273,7 @@ async def route_mentions(
         _a2a_turns[group_id] = _a2a_turns.get(group_id, 0) + 1
 
 
-async def route_user_message(group_id: str, content: str) -> None:
+async def route_user_message(group_id: str, content: str, *, converge: bool = False) -> None:
     """Route an inbound user message onto the group's decentralized swarm graph.
 
     task-19/20: the production inbound path now drives the per-group
@@ -296,9 +296,23 @@ async def route_user_message(group_id: str, content: str) -> None:
         engineering demand, ``route_entry`` routes to the Leader's ``classify``
         (centralized path).
 
+    **@收束 回合收敛** (task ``converge-turn-design``): ``converge=True`` is the
+    one-shot「收束」switch (UI toggle + @人 → a new turn that converges). It is
+    ONLY meaningful on the @mention path — 收束必须 @ 收口对象. A 收束 turn with
+    no @mention raises ``ValueError`` (the API turns it into a 400) so a bare
+    收束 message never routes to a speaker or the Leader. On the @mention path
+    it forwards ``converge=True`` to ``invoke_turn``, which injects it into the
+    initial state so ``make_agent_node`` forces ``next_speaker=None`` (agent
+    replies once, then ENDs without handoff — the turn converges). Fills the
+    「人工停止」gap left by Option B's stop-keyword removal on the decentralized
+    path. Purely additive — ``converge=False`` (default) changes nothing.
+
     **Dual-track fallback**: if the group has no ``GroupRuntime`` (cold group /
     compile failure / pre-load race), degrades to the legacy ``push_notify``
     path so the resident engine still drives the turn — additive, not a flag.
+    A 收束 turn with no runtime degrades the same way (the resident engine has
+    no converge semantics; the message still routes, just no convergence — the
+    UI switch is best-effort against a cold runtime).
 
     **single_chat bypass**: a degenerate single-agent group (``config.
     single_chat=True``) has no collaboration surface — one agent, no handoff,
@@ -312,6 +326,8 @@ async def route_user_message(group_id: str, content: str) -> None:
     and break that streaming contract for zero collaboration benefit. So a
     single_chat group always takes the legacy ``push_notify`` path to its
     resident worker engine — the group graph is for multi-agent groups only.
+    A 收束 toggle on a single_chat group is accepted but a no-op (single agent
+    → no handoff to suppress).
     """
     group = await crud.get_group(group_id)
     # single_chat → resident worker engine (worker-brain streaming contract,
@@ -357,17 +373,27 @@ async def route_user_message(group_id: str, content: str) -> None:
                 # the legacy notify when no runtime exists.
                 rt = await registry.ensure_runtime(group_id)
                 if rt is not None:
+                    # @收束 (converge-turn-design): only the @mention path may
+                    # 收束 (must @ the converging agent). ``converge`` is
+                    # forwarded into invoke_turn's initial state so make_agent_node
+                    # forces next_speaker=None (reply once → END, no handoff).
                     await rt.invoke_turn(
                         incoming_kind="agent_reply",
                         incoming_message=content,
                         incoming_sender="user",
                         incoming_data=None,
+                        converge=converge,
                     )
                     return
                 await push_notify(
                     group_id, "agent_reply", "user", target_id, content, None
                 )
                 return  # route to the first @mentioned agent only
+    # no mention hit -> coordinator (centralized path). A 收束 turn with no
+    # @mention is invalid (收束必须 @ 收口对象) — reject before routing so a
+    # bare 收束 message neither reaches a speaker nor the Leader.
+    if converge:
+        raise ValueError("收束必须 @ 收口对象（@某成员后再开收束开关）")
     # no mention hit -> coordinator (centralized path)
     if group and group.coordinator_id:
         rt = await registry.ensure_runtime(group_id)  # local import above
