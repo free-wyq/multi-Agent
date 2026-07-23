@@ -100,7 +100,7 @@ async def main() -> int:
         "system_prompt": "",
     }
     eng = AgentEngine(
-        agent_def, "group_boundary_interrupt", coordinator_id="agent_coord_boundary", single_chat=False
+        agent_def, "group_boundary_interrupt", coordinator_id="agent_coord_boundary"
     )
     assert eng.graph_kind == "coordinator"
 

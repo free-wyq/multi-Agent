@@ -217,15 +217,22 @@ def assert_contract() -> list[str]:
         else:
             print("[D13] OK  registry _reply 保留 route_mentions 直接调用（engine 持有上下文）")
 
-    # ── E. 行为零变 ──
-    # [14] persist_agent_reply message dict shape 6 key
+    # ── E. 行为零变（Path C 严格改名 group_id→conversation_id 后，message dict key
+    #     是 conversation_id，非 group_id；persist_agent_reply 入参 group_id 仍叫
+    #     group_id 是历史命名，落盘时映射到 conversation_id 字段）──
+    # [14] persist_agent_reply message dict shape 7 key（conversation_id 替 group_id）
     keys = set(re.findall(r'"(\w+)":', pa_body))
-    expected = {"group_id", "task_id", "sender_id", "receiver_id", "type", "content", "data"}
+    expected = {"conversation_id", "task_id", "sender_id", "receiver_id", "type", "content", "data"}
     missing = expected - keys
     if missing:
-        errs.append(f"[E14] persist_agent_reply message dict 缺 key {missing}")
+        errs.append(f"[E14] persist_agent_reply message dict 缺 key {missing}（Path C 改名后应为 conversation_id 非 group_id）")
     else:
-        print(f"[E14] OK  message dict 6 key 齐全（{sorted(expected)}，与原三份一致）")
+        print(f"[E14] OK  message dict 7 key 齐全（{sorted(expected)}，Path C 改名 group_id→conversation_id）")
+    # [14b] message dict 不应再含 group_id key（严格改名）
+    if '"group_id":' in pa_body:
+        errs.append("[E14b] persist_agent_reply message dict 仍含 group_id key（Path C 严格改名后应为 conversation_id）")
+    else:
+        print("[E14b] OK  message dict 无 group_id key（Path C 严格改名 group_id→conversation_id）")
 
     # [15] agent_reply dict 不再在三处重复（只在 reply.py）
     dup_count = sum(

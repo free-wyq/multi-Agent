@@ -474,13 +474,14 @@ async def assert_contract() -> list[str]:
         errs.append(f"[H12] main import 异常（import cycle？）：{type(e).__name__}: {e}")
 
     # H13 MessageCreatePayload.converge 默认 False（向后兼容既有调用方）
+    # Path C 严格改名：group_id → conversation_id（MessageCreatePayload 字段已改名）
     try:
         from models import MessageCreatePayload  # type: ignore
-        payload = MessageCreatePayload(group_id="g1", sender_id="user", content="hi")
+        payload = MessageCreatePayload(conversation_id="g1", sender_id="user", content="hi")
         if getattr(payload, "converge", None) is not False:
             errs.append(f"[H13] MessageCreatePayload.converge 默认应 False，实际 {getattr(payload, 'converge', '<missing>')!r}")
         else:
-            print("[H13] OK  MessageCreatePayload.converge 默认 False（既有调用方不受影响）")
+            print("[H13] OK  MessageCreatePayload.converge 默认 False（既有调用方不受影响，Path C 改名 conversation_id）")
     except Exception as e:  # noqa: BLE001
         errs.append(f"[H13] MessageCreatePayload 兼容检查异常：{type(e).__name__}: {e}")
 

@@ -3,28 +3,32 @@
 > 本文档是**单一真源**，消歧义 B26 审计发现的「两套平行分类」与「三套 id 命名空间」。
 > 锁契约见 `backend/tests/test_vh23_naming_namespace_consistency.py`。
 > **B26 只文档化 + 加交叉引用注释，不改任何运行时语义**（与 B24/B25 审计类任务同型）。
+>
+> **Path C 更新（单聊分实体）**：`single_chat` flag 已删除。单聊现为独立 `ConversationEntity`，
+> 单聊 engine 构造时 `coordinator_id=""`（单聊无协调者概念）→ `is_coordinator=False` →
+> 自然走 worker 图。身份派生链从「`single_chat` 输入 → `graph_kind` 派生」简化为
+> 「`coordinator_id` 输入 → `is_coordinator` 派生 → `graph_kind` 派生」。
 
 ---
 
-## 一、两套身份分类轴（非平行，是输入→派生）
+## 一、身份分类轴（输入→派生，非平行）
 
-审计发现 `graph_kind` 与 `single_chat` 看似两套平行分类，实则是**输入→派生**关系：
-`single_chat` 是输入（群级配置标志），`graph_kind` 是派生输出（编译哪张 LangGraph 图）。
-它们不是两个独立维度，而是同一条身份派生链上的两环。混淆「平行」会误以为可独立翻转其一。
+Path C 后只剩一条身份派生链：`coordinator_id`（输入）→ `is_coordinator`（派生）→
+`graph_kind`（派生）。旧 `single_chat` 输入轴已删除（单聊分实体后由 `ConversationEntity`
+独立承载，单聊 engine 的 `coordinator_id=""` 使 `is_coordinator=False` 自然走 worker 图）。
 
 ### 1.1 身份派生链（registry.py `AgentEngine.__init__`，startup-baked，生命周期内不变）
 
 | 字段 | 层 | 类型 | 来源 | 作用 |
 |---|---|---|---|---|
-| `coordinator_id` | 输入（群级） | `str` | `GroupEntity.coordinator_id`（建群/换群主时落库） | 该群谁是协调者 |
-| `single_chat` | 输入（群级配置） | `bool` | `GroupEntity.config["single_chat"]`（前端建单聊群时传 `true` 落库） | 单聊群里唯一 agent 行为应是「个体」非「调度者」 |
-| `is_coordinator` | 派生（agent 级） | `bool` | `self.agent_id == coordinator_id`（registry.py:100） | 该 agent 是否是本群协调者 |
+| `coordinator_id` | 输入（群级） | `str` | `GroupEntity.coordinator_id`（群聊）/ `""`（单聊 ConversationEntity，无协调者概念） | 该群谁是协调者；单聊为空串 → `is_coordinator=False` |
+| `is_coordinator` | 派生（agent 级） | `bool` | `self.agent_id == coordinator_id`（registry.py:100） | 该 agent 是否是本群协调者（单聊 engine 恒 False） |
 | `graph_kind` | 派生（agent 级） | `"coordinator" \| "worker"` | 见下真值表 | 编译哪张 LangGraph 图 |
 
-### 1.2 graph_kind 派生真值表（registry.py:126）
+### 1.2 graph_kind 派生真值表（registry.py:131）
 
 ```python
-if self.is_coordinator and not self.single_chat:
+if self.is_coordinator:
     self.graph = build_coordinator_graph()
     self.graph_kind = "coordinator"
 else:
@@ -32,23 +36,24 @@ else:
     self.graph_kind = "worker"
 ```
 
-| is_coordinator | single_chat | graph_kind | 语义 |
+| is_coordinator | 场景 | graph_kind | 语义 |
 |---|---|---|---|
-| `True`  | `False` | `"coordinator"` | 群聊 Leader，跑调度图 |
-| `True`  | `True`  | `"worker"` | 单聊群唯一 agent（虽是 coordinator_id 但行为个体），跑 worker 图 |
-| `False` | `*`     | `"worker"` | 普通成员，跑 worker 图 |
+| `True`  | 群聊 Leader（`agent_id == coordinator_id`） | `"coordinator"` | 群聊协调者，跑调度图 |
+| `False` | 群聊普通成员 | `"worker"` | 普通成员，跑 worker 图 |
+| `False` | 单聊 engine（`coordinator_id=""` → `is_coordinator=False`） | `"worker"` | 单聊=退化的多智能体，跑 worker 图（无 supervisor） |
 
-**消歧义要点**：`single_chat=True` 把一个 `is_coordinator=True` 的 agent 降级成 worker 图——
-这是「单聊 = 退化的多智能体」共识（supervisor 只在多 agent 里存在）。故 `single_chat` 不是
-`graph_kind` 的平行兄弟，而是 `graph_kind` 派生公式的一个**输入项**。
+**消歧义要点**：Path C 后单聊 engine 的 `coordinator_id=""` 使 `is_coordinator=False` →
+自然走 worker 图。旧 `single_chat=True` 把 `is_coordinator=True` 的 agent 降级成 worker 图
+的逻辑，现已由「单聊 engine 构造时 `coordinator_id=""`」等效实现——单聊无协调者概念，
+`is_coordinator` 恒 False，无需额外 flag。
 
 ### 1.3 两轴各读处（勿混「输入」与「派生」）
 
-- `single_chat`（输入）读处：
-  - `registry.py:126` 选图公式（`not self.single_chat`）
-  - `registry.py:722` `sys_for_invoke` 守卫（单聊不加 `TEAM_INTERACTION_SUFFIX`，保持原 persona）
-  - `registry.py:1054` `AgentRegistry.ensure_engine` 从群配置取 `single = bool((g.config or {}).get("single_chat"))` 传给 `AgentEngine`
-  - 前端 `src/contexts/SelectionContext.tsx` / `Sidebar.tsx` / `ChatView.tsx`：find-or-create 单聊群、过滤多智能体列表、单聊 UI 分支
+- `coordinator_id`（输入）读处：
+  - `registry.py:131` 选图公式（`if self.is_coordinator:`，`is_coordinator` 由 `coordinator_id` 派生）
+  - `registry.py:803` `sys_for_invoke` 守卫（`if not self.is_coordinator and self.coordinator_id:` 加 `TEAM_INTERACTION_SUFFIX`，单聊 engine `coordinator_id=""` 使守卫短路 → 不加 suffix）
+  - `registry.py` `load_from_store` 分两遍：群聊遍历 groups 传群 `coordinator_id`；单聊遍历 conversations 传 `coordinator_id=""`
+  - `registry.py` `_run_worker_task` report-back 用 `self.coordinator_id`（缓存，不二次查库）
 - `graph_kind`（派生）读处：
   - `registry.py:224` `_handle_task` 看门狗仅 worker 装（MT-17：协调者 LLM hang 由 httpx 兜底，不在此 kill coordinator 图）
   - `registry.py:279` `_execute_body` 分流（coordinator → 合成 notify 触发图；worker → `execute_agent_task`）
@@ -57,7 +62,7 @@ else:
 
 ### 1.4 时效口径（B11 已锁，此处重申避免与命名混淆）
 
-身份层 4 字段（`coordinator_id` / `is_coordinator` / `graph_kind` / `single_chat` / `system_prompt`）
+身份层字段（`coordinator_id` / `is_coordinator` / `graph_kind` / `system_prompt`）
 皆 **startup-baked**（`__init__` 落定，生命周期内不再变）。换群主只落 DB 行不重建驻留引擎
 （pending-restart）。配置层（`auto_confirm` / `leader_strategy`）才是 per-notify 现读。
 详见 `test_vh8_coordinator_id_freshness_contract.py`。
@@ -95,7 +100,7 @@ else:
 
 | 项 | 值 |
 |---|---|
-| 形状 | 两型：<br>① 驻留引擎图：`f"{group_id}:{agent_id}"`（registry.py:132，稳定 per (group,agent)）<br>② `create_react_agent`（agent_loop.py:257）：`task_id or str(uuid4())`（per-execution） |
+| 形状 | 两型：<br>① 驻留引擎图：`f"{group_id}:{agent_id}"`（registry.py:143，稳定 per (group,agent)；Path C 单聊 engine 的 `group_id` 实为 `conversation_id`，同款稳定键）<br>② `create_react_agent`（agent_loop.py:257）：`task_id or str(uuid4())`（per-execution） |
 | 作用域 | ① 跨 invoke 持久化图状态（memory/dispatch_plan/recent_routes/interrupt）；② 单次 task 执行的 tool 多轮检查点 |
 | 不碰撞保证 | ① 稳定键复用→跨 invoke 状态延续；② 用 task_id（若有）或新鲜 uuid4→每次执行独立检查点，不与历史 task 串话 |
 | 跨命名空间复用 | 见 2.1：agent_loop 的 thread_id 在有 task_id 时复用 task_id（task-scoped 检查点） |
@@ -110,13 +115,18 @@ else:
 
 ---
 
-## 三、B26 审计结论
+## 三、B26 审计结论（Path C 更新）
 
-1. **「两套平行分类」实为输入→派生**：`single_chat`（输入群级标志）→ `graph_kind`（派生，编译哪张图）。
-   非两个可独立翻转的维度。已在本章 1.1–1.3 显式拆解输入/派生/读处。
+1. **身份派生链简化**：Path C 删除 `single_chat` flag 后，派生链从
+   「`single_chat` 输入 → `graph_kind` 派生」简化为
+   「`coordinator_id` 输入 → `is_coordinator` 派生 → `graph_kind` 派生」。
+   单聊 engine 的 `coordinator_id=""` 使 `is_coordinator=False` → 自然走 worker 图，
+   等效旧 `single_chat=True` 降级逻辑，但无需额外 flag（单聊分实体后由 `ConversationEntity`
+   独立承载）。已在本章 1.1–1.3 显式拆解输入/派生/读处。
 2. **「三套 id 命名空间」形状/作用域/复用规则各异，且有意的跨命名空间复用**（task_id 兼作
    agent_loop thread_id；reply_id 塞进 task_token 的 task_id 槽靠前缀判别）。非碰撞 bug，
    是设计。已在本章 2.1–2.4 显式标注每处复用与判别规则。
 3. **不改语义**：B26 只文档化 + 在 2 个最易混淆点加交叉引用注释（registry.py 选图分支、
-   agent_loop thread_id 赋值），不动任何运行时逻辑。契约测 `test_vh23` 锁住形状/前缀/复用规则
-   防未来回归。
+   agent_loop thread_id 赋值），不动任何运行时逻辑。Path C 更新文档与测试断言形态
+   （`single_chat` 断言改为 `coordinator_id=""` / `is_coordinator=False` 断言），
+   不改运行时语义。契约测 `test_vh23` 锁住形状/前缀/复用规则防未来回归。

@@ -93,7 +93,7 @@ async def main() -> int:
         "system_prompt": "",
     }
     eng = AgentEngine(
-        agent_def, "group_unit_interrupt", coordinator_id="agent_coord_unit", single_chat=False
+        agent_def, "group_unit_interrupt", coordinator_id="agent_coord_unit"
     )
     if eng.graph_kind != "coordinator":
         errs.append(f"expected coordinator graph_kind, got {eng.graph_kind!r}")

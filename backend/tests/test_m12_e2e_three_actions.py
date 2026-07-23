@@ -178,7 +178,7 @@ def _build_engine(group_id: str, coord_id: str) -> AgentEngine:
     agent_def = {
         "id": coord_id, "name": "E2ECoord", "role": "coordinator", "system_prompt": "",
     }
-    return AgentEngine(agent_def, group_id, coordinator_id=coord_id, single_chat=False)
+    return AgentEngine(agent_def, group_id, coordinator_id=coord_id)
 
 
 def _build_facade(eng: AgentEngine) -> _RuntimeFacade:

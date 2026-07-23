@@ -30,9 +30,11 @@ coordinator 纳入/排除（做法 A 图级二选一）。
    10. config=None → "centralized"；config={} → "centralized"；
        config={"collaboration_mode": "junk"} → "centralized"（无效值兜底）.
 
-  F. 向后兼容锁——resident 引擎路径 + single_chat 不破
+  F. 向后兼容锁——resident 引擎路径 + 单聊不进群图
    11. ``_resolve_group_config`` group-row miss 返默认三元组（False, "", "centralized"）.
-   12. single_chat 路径不读 collaboration_mode（mention.py single_chat bypass 不进群图）.
+   12. 单聊走 route_direct_message 不进群图（Path C 后 single_chat bypass 删除，单聊由
+       ConversationEntity 独立承载，api/messages.py 按 crud.get_group 探活分流到
+       route_direct_message，不读 collaboration_mode）.
 """
 from __future__ import annotations
 
@@ -258,24 +260,29 @@ def assert_contract() -> list[str]:
     except Exception as e:  # noqa: BLE001
         errs.append(f"[F12] group-row miss 检查异常：{type(e).__name__}: {e}")
 
-    # F13 single_chat 不读 collaboration_mode（mention.py single_chat bypass）
+    # F13 单聊走 route_direct_message 不进群图（Path C 后 single_chat bypass 删除）
+    #   单聊由 ConversationEntity 独立承载，api/messages.py 按 crud.get_group 探活分流：
+    #   群聊（group is not None）走 route_user_message（群图 + collaboration_mode）；
+    #   单聊（group is None）走 route_direct_message（驻留 worker engine，不进群图，不读
+    #   collaboration_mode）。断言 api/messages.py 含 route_direct_message 分流 +
+    #   engine/direct.py 存在 route_direct_message 函数。
     try:
-        mention_py = (BACKEND / "engine" / "mention.py").read_text(encoding="utf-8")
-        # route_user_message 的 single_chat bypass 分支在 route_entry 之前 return，
-        # 不进群图——collaboration_mode 是群图 route_entry 才读的字段，single_chat
-        # 路径 push_notify 到驻留 worker engine，不读 collaboration_mode。
-        single_chat_block = re.search(
-            r"if group and \(group\.config or \{\}\)\.get\(\"single_chat\"\).*?\n        return",
-            mention_py, re.S,
-        )
-        if not single_chat_block:
-            errs.append("[F13] mention.py single_chat bypass 块未找到（route_user_message 早期 return）")
-        elif "collaboration_mode" in single_chat_block.group(0):
-            errs.append("[F13] single_chat bypass 不应读 collaboration_mode")
+        messages_py = (BACKEND / "api" / "messages.py").read_text(encoding="utf-8")
+        direct_py = (BACKEND / "engine" / "direct.py").read_text(encoding="utf-8")
+        if "route_direct_message" not in messages_py:
+            errs.append("[F13] api/messages.py 缺 route_direct_message 分流（Path C 单聊不进群图）")
+        elif "route_user_message" not in messages_py or "route_direct_message" not in messages_py:
+            errs.append("[F13] api/messages.py 未按 get_group 探活分流（群聊 route_user_message / 单聊 route_direct_message）")
+        elif "def route_direct_message" not in direct_py:
+            errs.append("[F13] engine/direct.py 缺 route_direct_message 函数定义")
         else:
-            print("[F13] OK  single_chat bypass 不读 collaboration_mode（不进群图）")
+            # 确认 route_direct_message 不读 collaboration_mode（单聊不进群图）
+            if "collaboration_mode" in direct_py:
+                errs.append("[F13] route_direct_message 不应读 collaboration_mode（单聊不进群图）")
+            else:
+                print("[F13] OK  单聊走 route_direct_message 不进群图（Path C 由 ConversationEntity 承载，不读 collaboration_mode）")
     except Exception as e:  # noqa: BLE001
-        errs.append(f"[F13] single_chat 检查异常：{type(e).__name__}: {e}")
+        errs.append(f"[F13] 单聊分流检查异常：{type(e).__name__}: {e}")
 
     return errs
 
@@ -297,7 +304,7 @@ def main() -> int:
         "  · C _resolve_group_config 返三元组 + _build_turn_input 注入 collaboration_mode；\n"
         "  · D _resolve_members mode 条件化（centralized 排除 / decentralized 纳入 coordinator）；\n"
         "  · E 老群组兜底（None/{} / 缺 key / 无效值 → 'centralized'）；\n"
-        "  · F 向后兼容（group-row miss 默认三元组 + single_chat 不读 mode）。"
+        "  · F 向后兼容（group-row miss 默认三元组 + 单聊走 route_direct_message 不进群图）。"
     )
     return 0
 

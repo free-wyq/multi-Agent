@@ -1,22 +1,31 @@
-"""VH23 回归：全仓命名一致性审计锁契约（task B26）.
+"""VH23 回归：全仓命名一致性审计锁契约（task B26，Path C 更新）.
 
-锁住 B26 审计——「两套身份分类轴」(graph_kind vs single_chat) 与「三套 id 命名空间」
-(reply_id / task_id / thread_id) 的形状/作用域/复用规则 + 文档化消歧义（不改语义）.
+锁住 B26 审计——「身份分类轴」(coordinator_id 输入 → is_coordinator → graph_kind 派生) 与
+「三套 id 命名空间」(reply_id / task_id / thread_id) 的形状/作用域/复用规则 + 文档化消歧义.
 
-B26 审计结论（两轴非平行是输入→派生；三套 id 有意跨命名空间复用 + 前缀判别）：
+**Path C 更新**：``single_chat`` flag 已删除。单聊现为独立 ``ConversationEntity``，单聊 engine
+构造时 ``coordinator_id=""``（单聊无协调者概念）→ ``is_coordinator=False`` → 自然走 worker 图。
+身份派生链从「``single_chat`` 输入 → ``graph_kind`` 派生」简化为
+「``coordinator_id`` 输入 → ``is_coordinator`` 派生 → ``graph_kind`` 派生」。
 
-  ── 两套身份分类轴（输入→派生，非平行） ──
-    single_chat（输入·群级配置 bool）→ graph_kind（派生·编译哪张图 str）.
-    非两个可独立翻转的维度。single_chat=True 把 is_coordinator=True 的 agent 降级
-    成 worker 图（单聊=退化的多智能体，supervisor 只在多 agent 里存在）.
+旧 ``single_chat`` 断言全部改为 ``coordinator_id`` / ``is_coordinator`` 断言（Path C 严格改名）。
 
-    派生真值表（registry.py:126）：
-      is_coordinator=True  + single_chat=False → graph_kind="coordinator"
-      is_coordinator=True  + single_chat=True  → graph_kind="worker"  （降级）
-      is_coordinator=False + single_chat=*     → graph_kind="worker"
+B26 审计结论（一轴输入→派生；三套 id 有意跨命名空间复用 + 前缀判别）：
 
-    两轴各有读处（勿混「输入」与「派生」）：
-      single_chat 读处：选图公式 / sys_for_invoke 守卫 / ensure_engine 取群配置 / 前端 4 处
+  ── 身份分类轴（输入→派生，非平行） ──
+    coordinator_id（输入·群级配置 str）→ is_coordinator（派生·agent 级 bool）→
+    graph_kind（派生·编译哪张图 str）.
+
+    派生真值表（registry.py:131）：
+      is_coordinator=True  → graph_kind="coordinator"  （群聊 Leader，跑调度图）
+      is_coordinator=False → graph_kind="worker"       （普通成员 / 单聊 engine）
+
+    单聊 engine（Path C）：coordinator_id="" → is_coordinator=False → worker 图
+    （等效旧 single_chat=True 降级逻辑，但无需 flag——单聊分实体后由 ConversationEntity 承载）.
+
+    各读处（勿混「输入」与「派生」）：
+      coordinator_id 读处：选图公式 / sys_for_invoke 守卫 / load_from_store 分两遍 /
+                          _run_worker_task report-back
       graph_kind 读处：_handle_task 看门狗 / _execute_body 分流 / _handle_notify coord 分支 /
                       reset_session aupdate_state(END)
 
@@ -28,7 +37,7 @@ B26 审计结论（两轴非平行是输入→派生；三套 id 有意跨命名
               2 处生成（coordinator._stream_coordinator_decision:1348 + worker._stream_brain_decision:161）.
               落 coordinator_token/reasoning/stats 的 data.reply_id + agent_reply.data["reply_id"].
               有意塞进 task_token 事件的 task_id 槽——前端靠 `task_` 前缀判别分流.
-    thread_id：两型. ① 驻留引擎图 f"{group_id}:{agent_id}"（registry.py:132 稳定键）;
+    thread_id：两型. ① 驻留引擎图 f"{group_id}:{agent_id}"（registry.py:143 稳定键）;
               ② create_react_agent task_id-or-uuid（agent_loop.py:257 per-exec 键）.
               LangGraph MemorySaver 检查点键，跨 invoke 持久化图状态.
 
@@ -39,19 +48,22 @@ B26 审计结论（两轴非平行是输入→派生；三套 id 有意跨命名
 
 B26 只文档化 + 加交叉引用注释（registry 选图分支 / agent_loop thread_id 赋值 / worker reply_id
 生成 / coordinator reply_id 生成 / useBusEvent 前缀判别 / docs/naming-conventions.md），不动运行时语义.
+Path C 更新：single_chat 断言改 coordinator_id/is_coordinator 断言，不改运行时.
 纯静态契约（读源码断言，不依赖后端在线），与 test_vh1-vh22 同款风格.
 
 六段契约：
 
-  A. graph_kind 派生公式（输入→派生，非两套平行分类）
-    1. 选图分支 ``if self.is_coordinator and not self.single_chat:`` 仍在（派生公式）.
+  A. graph_kind 派生公式（输入→派生，Path C 后无 single_chat 维度）
+    1. 选图分支 ``if self.is_coordinator:`` 仍在（Path C 简化后公式）.
     2. graph_kind 取值仅 "coordinator" / "worker"（无第三值，无拼写漂移）.
     3. graph_kind 注释含「输入→派生」口径说明（B26 加的交叉引用，指向 docs/naming-conventions.md §1）.
-    4. single_chat 是选图公式的**输入项**（`not self.single_chat`），非 graph_kind 平行兄弟.
+    4. coordinator_id 是选图公式的**输入项**（经 is_coordinator 派生 graph_kind），非 graph_kind 平行兄弟.
 
   B. 两轴各有读处（勿混输入与派生）
-    5. single_chat 读 sys_for_invoke 守卫（`if not self.single_chat:` 加 TEAM_INTERACTION_SUFFIX）.
-    6. single_chat 读 ensure_engine 取群配置（`bool((g.config or {}).get("single_chat"))`）.
+    5. coordinator_id 读 sys_for_invoke 守卫（`if not self.is_coordinator and self.coordinator_id:` 加
+       TEAM_INTERACTION_SUFFIX，单聊 engine coordinator_id="" 使守卫短路）.
+    6. coordinator_id 读 load_from_store 分两遍（群聊遍历 groups 传群 coordinator_id；
+       单聊遍历 conversations 传 coordinator_id=""）.
     7. graph_kind 读 _handle_task 看门狗（`if self.graph_kind == "worker"` 装 MT-17 看门狗）.
     8. graph_kind 读 reset_session aupdate_state（`if self.graph_kind == "coordinator"` 清 interrupt）.
 
@@ -73,7 +85,7 @@ B26 只文档化 + 加交叉引用注释（registry 选图分支 / agent_loop th
   F. 跨命名空间判别（前端前缀分流 + 后端 exact 匹配）
    18. useBusEvent.ts ``key.startsWith('task_')`` 判真 task 流式 vs worker 单聊 reply_id.
    19. agent_reply.task_id exact 匹配 task_complete/failed（B22 回填，reload-safe）.
-   20. docs/naming-conventions.md 存在（B26 单一真源文档，含两轴 + 三 id + 判别速查）.
+   20. docs/naming-conventions.md 存在（B26 单一真源文档，含身份轴 + 三 id + 判别速查）.
 """
 from __future__ import annotations
 
@@ -116,11 +128,11 @@ def assert_contract() -> list[str]:
     if not init_body:
         errs.append("[setup] AgentEngine.__init__ 函数体未找到")
     else:
-        # [1] 选图分支 if is_coordinator and not single_chat
-        if not re.search(r"if\s+self\.is_coordinator\s+and\s+not\s+self\.single_chat\s*:", init_body):
-            errs.append("[A1] 缺选图分支 `if self.is_coordinator and not self.single_chat:`（派生公式破）")
+        # [1] 选图分支 if is_coordinator（Path C 简化后公式，无 single_chat）
+        if not re.search(r"if\s+self\.is_coordinator\s*:", init_body):
+            errs.append("[A1] 缺选图分支 `if self.is_coordinator:`（Path C 派生公式）")
         else:
-            print("[A1] OK  选图分支 `if is_coordinator and not single_chat:` 在（输入→派生公式）")
+            print("[A1] OK  选图分支 `if self.is_coordinator:` 在（Path C 输入→派生公式，无 single_chat）")
         # [2] graph_kind 取值仅 coordinator/worker
         gk_values = set(re.findall(r'self\.graph_kind\s*(:\s*str\s*)?=\s*["\'](\w+)["\']', init_body))
         gk_strs = {v for _, v in gk_values} if gk_values else set()
@@ -137,26 +149,36 @@ def assert_contract() -> list[str]:
             errs.append("[A3] graph_kind 选图分支缺「输入→派生」口径注释（B26 交叉引用缺失）")
         else:
             print("[A3] OK  graph_kind 注释含「输入→派生」口径（指向 naming-conventions.md §1）")
-        # [4] single_chat 是选图公式的输入项（not self.single_chat）
-        if "not self.single_chat" not in init_body:
-            errs.append("[A4] 选图公式缺 `not self.single_chat`（single_chat 非输入项）")
+        # [4] coordinator_id 是选图公式的输入项（经 is_coordinator 派生 graph_kind）
+        # Path C 后 single_chat 删除，选图公式改为 if self.is_coordinator:（is_coordinator 由
+        # coordinator_id 派生）。断言 coordinator_id 在 __init__ 赋值 + is_coordinator 派生。
+        if "self.coordinator_id" not in init_body or "self.is_coordinator" not in init_body:
+            errs.append("[A4] 选图公式缺 coordinator_id/is_coordinator（Path C 后 coordinator_id 是输入项）")
         else:
-            print("[A4] OK  single_chat 是选图公式输入项（`not self.single_chat`，非 graph_kind 平行兄弟）")
+            print("[A4] OK  coordinator_id 是选图公式输入项（经 is_coordinator 派生 graph_kind，Path C 无 single_chat）")
 
     # ── B. 两轴各有读处 ──
-    # [5] single_chat 读 sys_for_invoke 守卫
+    # [5] coordinator_id 读 sys_for_invoke 守卫（Path C 后守卫改 if not is_coordinator and coordinator_id）
     notify_body = _fn_body_py(registry, "_handle_notify", is_async=True)
     if not notify_body:
         errs.append("[setup] _handle_notify 函数体未找到")
-    elif "if not self.single_chat:" not in notify_body:
-        errs.append("[B5] _handle_notify 缺 `if not self.single_chat:` 守卫（sys_for_invoke 不加互动语义）")
+    elif not re.search(r"if\s+not\s+self\.is_coordinator\s+and\s+self\.coordinator_id\s*:", notify_body):
+        errs.append("[B5] _handle_notify 缺 `if not self.is_coordinator and self.coordinator_id:` 守卫（Path C 后单聊 engine coordinator_id=\"\" 使守卫短路）")
     else:
-        print("[B5] OK  single_chat 读 sys_for_invoke 守卫（`if not self.single_chat:` 加 TEAM_INTERACTION_SUFFIX）")
-    # [6] single_chat 读 ensure_engine 取群配置
-    if not re.search(r'bool\(\(g\.config\s+or\s+\{\}\)\.get\(["\']single_chat["\']\)\)', registry):
-        errs.append("[B6] ensure_engine 缺 `(g.config or {}).get('single_chat')`（single_chat 未从群配置取）")
+        print("[B5] OK  coordinator_id 读 sys_for_invoke 守卫（`if not is_coordinator and coordinator_id:` 加 TEAM_INTERACTION_SUFFIX，单聊短路）")
+    # [6] coordinator_id 读 load_from_store 分两遍（群聊 groups 传群 coordinator_id；
+    #     单聊 conversations 传 coordinator_id=""）
+    if "conversations" not in registry or "coordinator_id" not in registry:
+        errs.append("[B6] load_from_store 缺 conversations 遍历或 coordinator_id（Path C 分两遍）")
     else:
-        print("[B6] OK  single_chat 读 ensure_engine 取群配置（bool((g.config or {}).get('single_chat'))）")
+        # 检查 load_from_store 里有 conversations 遍历（单聊 engine 传 coordinator_id=""）
+        load_body = _fn_body_py(registry, "load_from_store", is_async=True)
+        if not load_body:
+            errs.append("[B6] load_from_store 函数体未找到")
+        elif "conversations" not in load_body:
+            errs.append("[B6] load_from_store 缺 conversations 遍历（Path C 分两遍建单聊 engine）")
+        else:
+            print("[B6] OK  coordinator_id 读 load_from_store 分两遍（群聊 groups + 单聊 conversations，单聊传 coordinator_id=\"\"）")
     # [7] graph_kind 读 _handle_task 看门狗
     if 'if self.graph_kind == "worker"' not in registry:
         errs.append("[B7] 缺 `if self.graph_kind == 'worker'`（看门狗未按 graph_kind 分流）")
@@ -285,9 +307,9 @@ def main() -> int:
         return 1
     print("\n=== 结果: PASS ===")
     print(
-        "B26 全仓命名一致性审计锁定：\n"
-        "  · A graph_kind 派生公式（single_chat 输入 → graph_kind 派生，非两套平行分类）；\n"
-        "  · B 两轴各有读处（single_chat 读选图/sys_for_invoke/ensure_engine；graph_kind 读看门狗/分流/reset）；\n"
+        "B26 全仓命名一致性审计锁定（Path C 更新）：\n"
+        "  · A graph_kind 派生公式（coordinator_id 输入 → is_coordinator 派生 → graph_kind 派生，无 single_chat）；\n"
+        "  · B 两轴各有读处（coordinator_id 读选图/sys_for_invoke/load_from_store；graph_kind 读看门狗/分流/reset）；\n"
         "  · C task_id 命名空间（task_+hex 前缀 + _next_id 唯一入口 + 复用作 thread_id）；\n"
         "  · D reply_id 命名空间（裸 hex 无前缀 + 2 处生成 + 落 data + 三处 emit）；\n"
         "  · E thread_id 命名空间（驻留图稳定键 + per-exec 键两型共存）；\n"
