@@ -709,11 +709,11 @@ export default function GroupInfoDrawer({
               showCount
             />
           </Form.Item>
-          {/* 协作模式 Segmented（单聊群隐藏——single_chat 不进群图，mode 对单聊无意义）。
+          {/* 协作模式 Segmented（Path C 后单聊是独立 ConversationEntity 不经此 Drawer，
+              故此组件只在群聊场景渲染——group 存在即群聊，无需 single_chat 守卫）。
               中心化：群主主导，supervisor 子图拆计划派工。
               去中心化：纯 swarm，裸消息群主当首发（swarm default_active_agent），@群主合法 handoff。
               切换触发后端 recompile_group 重编译群图（做法 A 图级二选一）。 */}
-          {!group?.config?.single_chat && (
             <Form.Item
               name="collaboration_mode"
               label="协作模式"
@@ -726,7 +726,6 @@ export default function GroupInfoDrawer({
                 ]}
               />
             </Form.Item>
-          )}
         </Form>
       </Modal>
     </>

@@ -60,10 +60,14 @@ function formatRelativeTime(iso: string | null | undefined): string {
  */
 export default function SessionsCard({ groups, messages, currentGroupId }: SessionsCardProps) {
   // 按 group_id 聚合消息：统计每会话消息数 + 最后一条消息
+  // Path C: Message.group_id 改 optional（后端 emit 双 key，conversation_id 主 +
+  // group_id 兼容），fallback 到 conversation_id（两者值相同）。
   const stats = new Map<string, { count: number; last: Message | null }>()
   for (const g of groups) stats.set(g.id, { count: 0, last: null })
   for (const m of messages) {
-    const s = stats.get(m.group_id)
+    const gid = m.group_id ?? m.conversation_id
+    if (!gid) continue
+    const s = stats.get(gid)
     if (!s) continue
     s.count += 1
     if (!s.last || new Date(m.created_at).getTime() > new Date(s.last.created_at).getTime()) {

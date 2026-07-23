@@ -66,8 +66,9 @@ export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarP
   // Collapse 展开态：默认两个分组都展开（首屏即见列表）。
   const [openKeys, setOpenKeys] = useState<string[]>(['agents', 'groups'])
 
-  // 多智能体列表过滤掉单聊群（single_chat 群不显示在多智能体分组，只在智能体分组以单聊形式进入）。
-  const multiAgentGroups = groups.filter((g) => !g.config?.single_chat)
+  // Path C：单聊是独立 ConversationEntity（不在 groups 里），groups 列表天然不含单聊，
+  // 无需再过滤 config.single_chat。单聊在「智能体」分组以单聊会话形式进入（selectAgent）。
+  const multiAgentGroups = groups
 
   // 选中任一列表项后切回聊天视图（广场页 → 聊天的直觉切换）。
   const wrapSelect = (fn: (id: string) => void) => (id: string) => {
@@ -120,7 +121,7 @@ export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarP
                 label: <GroupLabel title="多智能体" count={multiAgentGroups.length} />,
                 children: <GroupsPanel
                   groups={multiAgentGroups}
-                  activeGroupId={activeGroup && !activeGroup.config?.single_chat ? activeGroup.id : null}
+                  activeGroupId={activeGroup ? activeGroup.id : null}
                   onSelect={wrapSelect(selectGroup)}
                   agents={agents}
                   onCreated={refreshAll}

@@ -9,6 +9,7 @@ import {
   parseStats,
   safeRecord,
   type AgentDefinition,
+  type Conversation,
   type FinalizedStats,
   type Group,
   type GroupMember,
@@ -361,8 +362,10 @@ interface FinalizedBubble {
 }
 
 interface ChatPanelProps {
-  /** 当前会话的群组（null/未选群时展示占位）。 */
-  group: Group | null
+  /** 当前会话的群组（null/未选群时展示占位）。
+   *  Path C：单聊传 ConversationEntity（字段形状兼容——coordinator_id 镜像 agent_id，
+   *  ChatPanel 读 group.coordinator_id 的代码零改）。 */
+  group: Group | Conversation | null
   /** 全部智能体（用于头像角色色 + 发送者名解析 + @mention 候选）。 */
   agents: AgentDefinition[]
   /** 当前群成员（用于 @mention 候选 + 高亮 mention）。 */
@@ -753,6 +756,8 @@ export default function ChatPanel({
         if (prev.some((m) => m.id === wsMsgId)) return prev
         return [...prev, {
           id: wsMsgId,
+          // Path C: conversation_id（后端 emit 双 key，conversation_id 主 + group_id 兼容）
+          conversation_id: chatGroupId || '',
           group_id: chatGroupId || '',
           task_id: log.taskId || null,
           sender_id: log.agentId,
@@ -865,6 +870,8 @@ export default function ChatPanel({
     const tempId = `temp-${Date.now()}`
     const optimisticMsg: Message = {
       id: tempId,
+      // Path C: conversation_id（后端 emit 双 key 兼容）
+      conversation_id: chatGroupId,
       group_id: chatGroupId,
       task_id: null,
       sender_id: 'user',
@@ -878,7 +885,8 @@ export default function ChatPanel({
 
     try {
       const sent = await messageApi.send({
-        group_id: chatGroupId,
+        // Path C: conversation_id（后端 MessageCreatePayload 字段已改名）
+        conversation_id: chatGroupId,
         sender_id: 'user',
         receiver_id: 'broadcast',
         type: 'user_input',
@@ -920,6 +928,8 @@ export default function ChatPanel({
           ...prev,
           {
             id: `slash-${name}-${Date.now()}`,
+            // Path C: conversation_id（后端 emit 双 key 兼容）
+            conversation_id: chatGroupId || '',
             group_id: chatGroupId || '',
             task_id: null,
             sender_id: 'system',

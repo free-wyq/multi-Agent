@@ -89,6 +89,38 @@ export interface Group {
   updated_at: string
 }
 
+/**
+ * 单聊会话实体（Path C 单聊分实体，独立于 Group）。
+ *
+ * 单聊不再用 config.single_chat===true 的 GroupEntity，改为独立 ConversationEntity。
+ * coordinator_id 字段镜像 agent_id 让 ChatPanel（读 group.coordinator_id）零改。
+ */
+export interface Conversation {
+  id: string
+  agent_id: string
+  name: string
+  /** 镜像 agent_id，让 ChatPanel 读 group.coordinator_id 的代码零改（C2 共享该共享的）。 */
+  coordinator_id: string
+  created_at: string
+  updated_at: string
+}
+
+/** POST /api/conversations body（find-or-create 语义）。 */
+export interface ConversationCreatePayload {
+  agent_id: string
+  name?: string
+}
+
+// ── Conversation API ───────────────────────────────────────
+export const conversationApi = {
+  list: () => http<Conversation[]>('GET', '/api/conversations'),
+  /** find-or-create：已有该 agent 的单聊则返回，否则新建。 */
+  create: (body: ConversationCreatePayload) =>
+    http<Conversation>('POST', '/api/conversations', body),
+  get: (id: string) => http<Conversation | null>('GET', `/api/conversations/${id}`),
+  delete: (id: string) => http<boolean>('DELETE', `/api/conversations/${id}`),
+}
+
 export interface GroupMember {
   id: string
   group_id: string
@@ -132,7 +164,10 @@ export type TaskStatus = 'submitted' | 'working' | 'completed' | 'failed' | 'can
 
 export interface Task {
   id: string
-  group_id: string
+  /** Path C 严格改名：group_id→conversation_id（后端 TaskEntity 字段已改名）。 */
+  conversation_id: string
+  /** legacy 兼容字段（后端如回灌 group_id 旧字段不破）。 */
+  group_id?: string
   parent_task_id: string | null
   title: string
   description: string | null
@@ -152,7 +187,10 @@ export interface Task {
 }
 
 export interface TaskCreatePayload {
-  group_id: string
+  /** Path C 严格改名：group_id→conversation_id（后端 TaskCreatePayload 字段已改名）。 */
+  conversation_id: string
+  /** legacy 兼容字段。 */
+  group_id?: string
   title: string
   description?: string
   assigned_agent_id?: string
@@ -162,7 +200,10 @@ export interface TaskCreatePayload {
 
 export interface Message {
   id: string
-  group_id: string
+  /** Path C 严格改名：group_id→conversation_id（后端 emit 双 key：conversation_id 主 + group_id 兼容前端）。 */
+  conversation_id: string
+  /** legacy 兼容字段：后端 emit_message_added 双 key 回灌 group_id=conversation_id，前端旧代码读此字段不破。 */
+  group_id?: string
   task_id: string | null
   sender_id: string
   receiver_id: string
@@ -173,7 +214,8 @@ export interface Message {
 }
 
 export interface MessageCreatePayload {
-  group_id: string
+  /** Path C 严格改名：group_id→conversation_id（后端 MessageCreatePayload 字段已改名）。 */
+  conversation_id: string
   task_id?: string
   sender_id: string
   receiver_id?: string
@@ -482,8 +524,8 @@ export const taskApi = {
 // ── Message API ─────────────────────────────────────────────
 
 export const messageApi = {
-  listByGroup: (groupId: string, limit = 100) =>
-    http<Message[]>('GET', '/api/messages', undefined, { groupId, limit: String(limit) }),
+  listByGroup: (conversationId: string, limit = 100) =>
+    http<Message[]>('GET', '/api/messages', undefined, { conversationId, limit: String(limit) }),
   /**
    * SC-08 /sessions：不带 groupId 一次拉所有群组的消息（后端 list_messages(groupId=None)
    * 不加 group 过滤，按 created_at 排序后取最近 limit 条）。前端按 group_id 聚合统计会话。
@@ -498,8 +540,8 @@ export const messageApi = {
   listByTask: (taskId: string, limit = 100) =>
     http<Message[]>('GET', `/api/messages/by-task/${taskId}`, undefined, { limit: String(limit) }),
   send: (body: MessageCreatePayload) => http<Message>('POST', '/api/messages', body),
-  clearByGroup: (groupId: string) =>
-    http<boolean>('DELETE', '/api/messages', undefined, { groupId }),
+  clearByGroup: (conversationId: string) =>
+    http<boolean>('DELETE', '/api/messages', undefined, { conversationId }),
 }
 
 // ── Skill API ───────────────────────────────────────────────

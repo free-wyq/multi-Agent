@@ -26,7 +26,7 @@ const { Text } = Typography
  * SelectionContext 集中持有复用。GroupInfoDrawer 的 onChanged 调 refreshAll 同步群组/成员变更。
  */
 export default function ChatView() {
-  const { agents, activeGroup, refreshAll } = useSelection()
+  const { agents, activeGroup, activeConversation, refreshAll } = useSelection()
   const { groupId, agentStatuses, coordStreaming } = useBusEventContext()
   const { tts, updateTts } = useSettings()
 
@@ -49,7 +49,7 @@ export default function ChatView() {
   }, [groupId])
 
   // 未选群：占位引导。
-  if (!groupId || !activeGroup) {
+  if (!groupId || !(activeGroup || activeConversation)) {
     return (
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--surface-raised)' }}>
         <Empty description="请在左侧选择智能体或群组开始对话" />
@@ -57,10 +57,11 @@ export default function ChatView() {
     )
   }
 
-  const isSingleChat = !!activeGroup.config?.single_chat
-  // 单聊：群主即被选 agent；群聊：成员数 +1（含用户）。
+  // Path C：单聊由独立 ConversationEntity 承载（不再读 config.single_chat）。
+  const isSingleChat = !!activeConversation
+  // 单聊：被选 agent；群聊：null（群聊标题显 group.name + 成员数）。
   const singleAgent = isSingleChat
-    ? agents.find((a) => a.id === activeGroup.coordinator_id)
+    ? agents.find((a) => a.id === activeConversation?.agent_id)
     : null
 
   // 执行中 agent（StopTaskButton 入口，群聊头部）。task-25：放宽为识别去中心化回合的
@@ -69,7 +70,7 @@ export default function ChatView() {
   // （task-26 起按钮调 groupApi.stopTurn 群图整回合硬停，不依赖 task_id）。coordStreaming
   // 是全局 Map（跨群组 reply_id），但 useBusEvent 按当前 groupId 订阅 WS，非本群事件不会进
   // 该 Map，故 length>0 即「本群有活跃流式」。
-  const coordinatorId = activeGroup.coordinator_id
+  const coordinatorId = activeGroup?.coordinator_id ?? activeConversation?.coordinator_id ?? ''
   const hasActiveStream =
     !!groupId &&
     (Object.keys(coordStreaming).length > 0 ||
@@ -109,11 +110,11 @@ export default function ChatView() {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
           <Text strong style={{ fontSize: 15, flexShrink: 0 }}>
-            {isSingleChat ? (singleAgent?.name ?? '单聊') : activeGroup.name}
+            {isSingleChat ? (singleAgent?.name ?? activeConversation?.name ?? '单聊') : (activeGroup?.name ?? '群聊')}
           </Text>
           {/* 协作模式 Tag（仅群聊显示，单聊不显）。中心化蓝 / 去中心化橙。
               config.collaboration_mode 缺省时兜底 centralized（老群组兼容）。 */}
-          {!isSingleChat && (
+          {!isSingleChat && activeGroup && (
             <Tag
               color={
                 (activeGroup.config?.collaboration_mode as string) === 'decentralized'
@@ -179,9 +180,12 @@ export default function ChatView() {
         </div>
       </div>
 
-      {/* 聊天主区：ChatPanel 隐藏自带头部（本组件已画统一标题区） */}
+      {/* 聊天主区：ChatPanel 隐藏自带头部（本组件已画统一标题区）
+          Path C：单聊 ConversationEntity 也有 coordinator_id（镜像 agent_id），
+          ChatPanel 读 group.coordinator_id 渲染流式气泡 sender 不破，故单聊传
+          activeConversation（形状兼容，coordinator_id 字段镜像 agent_id）。 */}
       <ChatPanel
-        group={activeGroup}
+        group={activeGroup ?? activeConversation ?? null}
         agents={agents}
         members={members}
         loading={membersLoading}
@@ -190,7 +194,7 @@ export default function ChatView() {
       />
 
       {/* 群信息抽屉（仅群聊有，单聊无群管理） */}
-      {!isSingleChat && (
+      {!isSingleChat && activeGroup && (
         <GroupInfoDrawer
           open={infoOpen}
           onClose={() => setInfoOpen(false)}

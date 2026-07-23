@@ -3,9 +3,11 @@ import type { ReactNode } from 'react'
 
 import {
   agentApi,
+  conversationApi,
   groupApi,
   systemApi,
   type AgentDefinition,
+  type Conversation,
   type Group,
 } from '../services/api'
 import { useBusEventContext } from './BusEventContext'
@@ -13,45 +15,57 @@ import { useBusEventContext } from './BusEventContext'
 /**
  * SelectionContext — 左右布局的「选择模型」单一真源（布局重构 2026-07-11）。
  *
- * 背景：三栏+路由布局退役后，单聊/群聊都收敛到「一个 groupId + ChatPanel」。
+ * 背景：三栏+路由布局退役后，单聊/群聊都收敛到「一个会话 id + ChatPanel」。
  * 左侧 Sidebar 的智能体列表和多智能体列表点击后都走 setGroupId，但单聊需要
- * find-or-create 一个 config.single_chat===true 的群组（群主=被选 agent）。
- * 这个 find-or-create 逻辑 + groups/agents/status 共享数据的加载，集中在本 context，
- * Sidebar（触发选择）和 ChatView（消费 groups/agents/members 渲染 ChatPanel）共享。
+ * find-or-create 一个 ConversationEntity（Path C 后单聊独立实体，不再用
+ * config.single_chat===true 的 GroupEntity）。
+ * 这个 find-or-create 逻辑 + groups/agents/conversations/status 共享数据的加载，
+ * 集中在本 context，Sidebar（触发选择）和 ChatView（消费 groups/agents/members
+ * 渲染 ChatPanel）共享。
  *
  * 持有：
- *  - groups / agents / agentStatusMap：首屏加载一次，selectAgent 创建单聊群后刷新 groups。
- *  - selectAgent(agentId)：find-or-create 单聊群组 → setGroupId（走 BusEventContext）。
+ *  - groups / agents / conversations / agentStatusMap：首屏加载一次，selectAgent
+ *    创建单聊会话后刷新 conversations。
+ *  - selectAgent(agentId)：find-or-create 单聊会话 → setConversationId（走 BusEventContext）。
  *  - selectGroup(groupId)：直接 setGroupId。
- *  - activeKind / activeAgentId：从当前 groupId + groups 派生（单聊群→agent，多智能体群→group），
- *    供 Sidebar 高亮 + ChatView 标题区判断单聊/群聊用——无需额外 state，纯派生避免漂移。
+ *  - activeKind / activeAgentId：从当前 groupId + groups/conversations 派生
+ *    （单聊 conversation→agent，多智能体群→group），供 Sidebar 高亮 + ChatView
+ *    标题区判断单聊/群聊用——无需额外 state，纯派生避免漂移。
  *
  * Provider 必须在 BusEventProvider 内使用（selectAgent/selectGroup 调 setGroupId）。
+ *
+ * Path C（单聊分实体）：single_chat flag 删除，单聊由独立 ConversationEntity 承载。
+ * selectAgent 改调 POST /api/conversations（find-or-create），activeKind 从 activeConversation
+ * vs activeGroup 派生（不再读 config.single_chat）。
  */
 
 /** 智能体运行时状态（从 systemApi.listAllStatus 派生，与 AgentPage STATUS_MAP 对齐）。 */
 type AgentStatus = 'idle' | 'executing' | 'offline'
 
 export interface SelectionContextValue {
-  /** 全部群组（含单聊群 config.single_chat===true）。 */
+  /** 全部群组（多智能体群聊，不含单聊——Path C 后单聊是独立 ConversationEntity）。 */
   groups: Group[]
+  /** 全部单聊会话（Path C 独立实体）。 */
+  conversations: Conversation[]
   /** 全部智能体。 */
   agents: AgentDefinition[]
   /** agentId → 运行时状态（idle/executing/offline），用于左栏状态圆点。 */
   agentStatusMap: Record<string, AgentStatus>
   /** 数据加载中态。 */
   loading: boolean
-  /** 重新拉取 groups + agents + 全量状态（selectAgent 创建单聊群后、GroupInfoDrawer 改群后调用）。 */
+  /** 重新拉取 groups + conversations + agents + 全量状态（selectAgent 创建单聊后调用）。 */
   refreshAll: () => Promise<void>
 
-  /** 当前选中类型：单聊群→'agent'，多智能体群→'group'，未选→null。纯派生。 */
+  /** 当前选中类型：单聊会话→'agent'，多智能体群→'group'，未选→null。纯派生。 */
   activeKind: 'agent' | 'group' | null
   /** 当前选中的 agent id（仅 activeKind==='agent' 时非 null）。纯派生。 */
   activeAgentId: string | null
-  /** 当前 groupId 对应的群组对象（null=未选）。 */
+  /** 当前 groupId 对应的群组对象（null=未选或当前是单聊）。 */
   activeGroup: Group | null
+  /** 当前 conversationId 对应的单聊会话对象（null=未选或当前是群聊）。 */
+  activeConversation: Conversation | null
 
-  /** 选智能体进单聊：find-or-create single_chat 群组 → setGroupId。 */
+  /** 选智能体进单聊：find-or-create ConversationEntity → setGroupId（conversation id）。 */
   selectAgent: (agentId: string) => Promise<void>
   /** 选多智能体群组进群聊：直接 setGroupId。 */
   selectGroup: (groupId: string) => void
@@ -65,9 +79,12 @@ export interface SelectionProviderProps {
 
 export function SelectionProvider({ children }: SelectionProviderProps) {
   // setGroupId 来自 BusEventContext（App 层 state 经 provider 下发）。
+  // Path C：setGroupId 接收的 id 可能是 group_id（群聊）或 conversation_id（单聊），
+  // ChatPanel/BusEventContext 按 id 订阅 WS 通道，机制不变。
   const { groupId, setGroupId } = useBusEventContext()
 
   const [groups, setGroups] = useState<Group[]>([])
+  const [conversations, setConversations] = useState<Conversation[]>([])
   const [agents, setAgents] = useState<AgentDefinition[]>([])
   const [agentStatusMap, setAgentStatusMap] = useState<Record<string, AgentStatus>>({})
   const [loading, setLoading] = useState(false)
@@ -75,8 +92,13 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
   const refreshAll = useCallback(async () => {
     setLoading(true)
     try {
-      const [gData, aData] = await Promise.all([groupApi.list(), agentApi.list()])
+      const [gData, cData, aData] = await Promise.all([
+        groupApi.list(),
+        conversationApi.list(),
+        agentApi.list(),
+      ])
       setGroups(gData)
+      setConversations(cData)
       setAgents(aData)
       // SA-04：单次拉全所有群组所有 agent 状态（GET /api/status 一次返回
       // {group_id: AgentStatusInfo[]}），合并成 {agentId: status}。与 AgentPage 同逻辑。
@@ -103,56 +125,55 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
     void refreshAll()
   }, [refreshAll])
 
-  // 当前 groupId 对应的群组对象。
+  // 当前 groupId 对应的群组对象（群聊场景）。
   const activeGroup = useMemo(
     () => groups.find((g) => g.id === groupId) ?? null,
     [groups, groupId],
   )
+  // 当前 conversationId 对应的单聊会话对象（单聊场景）。
+  const activeConversation = useMemo(
+    () => conversations.find((c) => c.id === groupId) ?? null,
+    [conversations, groupId],
+  )
 
-  // 派生：单聊群（config.single_chat===true）→ activeKind='agent'，否则 'group'。
-  const isSingleChat = !!activeGroup?.config?.single_chat
-  const activeKind: 'agent' | 'group' | null = activeGroup
+  // 派生：单聊会话（activeConversation 存在）→ activeKind='agent'，否则 'group'。
+  // Path C：不再读 config.single_chat，改看 activeConversation vs activeGroup。
+  const isSingleChat = !!activeConversation
+  const activeKind: 'agent' | 'group' | null = (activeGroup || activeConversation)
     ? isSingleChat
       ? 'agent'
       : 'group'
     : null
-  const activeAgentId = isSingleChat ? activeGroup?.coordinator_id ?? null : null
+  const activeAgentId = isSingleChat ? activeConversation?.agent_id ?? null : null
 
   /**
-   * 选智能体进单聊：find-or-create 单聊群组。
+   * 选智能体进单聊：find-or-create ConversationEntity。
    *
-   * 先在已加载 groups 里找 config.single_chat===true 且 coordinator_id===agentId 的群；
-   * 找到直接 setGroupId。没找到则 groupApi.create（name=agent.name，coordinator_id=agentId，
-   * config:{single_chat:true}）→ 刷新 groups → setGroupId(新群 id)。这样单聊也复用 ChatPanel，
-   * 该 group 的 coordinator 就是被选中的 agent，单聊时群主直接回话。
+   * Path C：不再 groupApi.create({config:{single_chat:true}})，改调
+   * conversationApi.create({agent_id})（后端 POST /api/conversations find-or-create
+   * 语义：已有该 agent 的单聊则返回，否则新建）。成功后刷新 conversations 列表
+   * → setGroupId(created.id)（conversation id 作 BusEventContext 的 groupId 角色，
+   * WS 通道 bus-event:{conversationId} 机制不变）。
    */
   const selectAgent = useCallback(
     async (agentId: string) => {
-      const existing = groups.find(
-        (g) => g.config?.single_chat === true && g.coordinator_id === agentId,
-      )
+      // 先在已加载 conversations 里找该 agent 的单聊
+      const existing = conversations.find((c) => c.agent_id === agentId)
       if (existing) {
         setGroupId(existing.id)
         return
       }
-      const agent = agents.find((a) => a.id === agentId)
-      const name = agent?.name ?? '单聊'
       try {
-        const created = await groupApi.create({
-          name,
-          coordinator_id: agentId,
-          config: { single_chat: true },
-        })
-        // 刷新 groups 列表让新单聊群出现在左栏「多智能体」之外（单聊群不显示在多智能体分组，
-        // 但出现在 groups 数据里供 activeGroup 派生）。
-        const gData = await groupApi.list()
-        setGroups(gData)
+        const created = await conversationApi.create({ agent_id: agentId })
+        // 刷新 conversations 列表让新单聊出现在左栏「智能体」分组
+        const cData = await conversationApi.list()
+        setConversations(cData)
         setGroupId(created.id)
       } catch {
         /* 创建失败静默——后续可加 toast。避免阻塞选择交互。 */
       }
     },
-    [groups, agents, setGroupId],
+    [conversations, setGroupId],
   )
 
   const selectGroup = useCallback(
@@ -165,6 +186,7 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
   const value = useMemo<SelectionContextValue>(
     () => ({
       groups,
+      conversations,
       agents,
       agentStatusMap,
       loading,
@@ -172,11 +194,13 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeKind,
       activeAgentId,
       activeGroup,
+      activeConversation,
       selectAgent,
       selectGroup,
     }),
     [
       groups,
+      conversations,
       agents,
       agentStatusMap,
       loading,
@@ -184,6 +208,7 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeKind,
       activeAgentId,
       activeGroup,
+      activeConversation,
       selectAgent,
       selectGroup,
     ],
