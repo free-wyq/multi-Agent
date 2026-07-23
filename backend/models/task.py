@@ -14,7 +14,10 @@ class Task(BaseModel):
     model_config = ConfigDict(extra="allow")
 
     id: str
-    group_id: str
+    # conversation_id: holds either a group_id (group-chat task) or a
+    # conversation_id (single-chat task). Renamed from group_id (Path C strict
+    # rename) — semantically neutral FK to either entity.
+    conversation_id: str
     parent_task_id: str | None = None
     title: str
     description: str | None = None
@@ -36,7 +39,7 @@ class Task(BaseModel):
 class TaskCreatePayload(BaseModel):
     model_config = ConfigDict(extra="allow")
 
-    group_id: str
+    conversation_id: str
     title: str
     description: str | None = None
     assigned_agent_id: str | None = None

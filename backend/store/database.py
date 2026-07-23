@@ -94,6 +94,70 @@ def _migrate_schema() -> None:
         _ensure_column(conn, "skills", "requires_tools", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "skills", "triggers", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "skills", "outputs", "JSON NOT NULL DEFAULT '[]'")
+        # Path C (single-chat entity split, strict rename ``group_id`` →
+        # ``conversation_id`` on Message/Task): development-period data is
+        # disposable (user 拍板: 不写迁移脚本，直接 drop+recreate). When the
+        # legacy ``group_id`` column is still present on ``messages``/``tasks``
+        # (pre-rename schema), drop those tables so ``create_all`` rebuilds them
+        # with ``conversation_id``. Runs at import (here) AND in ``init_db`` so
+        # tests that import ``main`` without triggering the FastAPI lifespan
+        # still see the renamed schema. A fresh DB is unaffected (no group_id
+        # column → skip).
+        try:
+            msgs_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+            if "group_id" in msgs_cols and "conversation_id" not in msgs_cols:
+                conn.execute("DROP TABLE IF EXISTS messages")
+                conn.execute("DROP TABLE IF EXISTS tasks")
+                conn.commit()
+                logger.info("[database] Path C: dropped legacy messages/tasks (group_id→conversation_id)")
+        except Exception:
+            logger.debug("[database] Path C drop/recreate check failed", exc_info=True)
+
+        # Path C 收尾：drop 之后必须同步重建 messages/tasks/conversations 三张表，
+        # 因为 async ``Base.metadata.create_all`` 只在 ``init_db``（FastAPI lifespan）
+        # 里跑；测试 import ``main`` 不触发 lifespan，drop 完表没重建 →
+        # ``no such table: messages``。用一个同步 SQLAlchemy engine 对同一 DB 文件
+        # 跑 ``create_all``（只建这三张表，其余由 init_db 兜底），确保 import 后表
+        # 一定存在。对照当前 ``ConversationEntity``/``MessageEntity``/``TaskEntity``
+        # schema 建表，新库（无 legacy group_id）也建上，省一次 create_all 往返。
+        try:
+            from sqlalchemy import create_engine as _create_sync_engine
+
+            from store.entities import (
+                Base,
+                ConversationEntity,
+                MessageEntity,
+                TaskEntity,
+            )
+
+            # 同步 engine 指向同一 SQLite 文件；check_same_thread=False 与 async
+            # engine 一致（import 期单线程用完即弃，无并发问题）。
+            sync_engine = _create_sync_engine(
+                f"sqlite:///{DB_PATH}",
+                connect_args={"check_same_thread": False},
+            )
+            try:
+                Base.metadata.create_all(
+                    sync_engine,
+                    tables=[
+                        ConversationEntity.__table__,
+                        MessageEntity.__table__,
+                        TaskEntity.__table__,
+                    ],
+                )
+            finally:
+                sync_engine.dispose()
+            logger.info(
+                "[database] Path C: synced rebuild of messages/tasks/conversations OK"
+            )
+        except Exception:
+            # 重建失败不能吞——后续所有读 messages/tasks 的测试都会 no such table。
+            # 降级日志（debug）保留 traceback，便于诊断；不 raise 以免阻断 import
+            # （init_db 还有机会 create_all 兜底）。
+            logger.debug(
+                "[database] Path C: messages/tasks/conversations sync rebuild failed",
+                exc_info=True,
+            )
         conn.close()
     except Exception:
         # best-effort additive migration: pre-existing DBs that don't have a
@@ -137,10 +201,32 @@ async def init_db() -> None:
 
     ``create_all`` only adds missing tables, not columns; the additive column
     migration (``_migrate_schema``) runs at import for pre-existing DBs.
+
+    Path C (single-chat entity split, strict rename ``group_id`` →
+    ``conversation_id`` on Message/Task): development-period data is
+    disposable, so we drop the ``messages`` / ``tasks`` tables when their
+    schema no longer matches (presence of a ``group_id`` column signals the
+    pre-rename schema). ``create_all`` then rebuilds them with the new
+    ``conversation_id`` column. A fresh DB simply creates them new. This
+    mirrors the user's拍板决策「开发期数据可弃直接 drop+recreate 表，不写迁移脚本」.
     """
     from store.crud import load_active_provider_into_cache
     from store.entities import Base
     from store.seed import seed_demo_data
+
+    # Path C: if messages/tasks still have the legacy ``group_id`` column, drop
+    # them so create_all rebuilds with ``conversation_id``. Development-period
+    # data is disposable (user 拍板: 不写迁移脚本).
+    try:
+        conn = sqlite3.connect(str(DB_PATH))
+        msgs_cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+        if "group_id" in msgs_cols and "conversation_id" not in msgs_cols:
+            conn.execute("DROP TABLE IF EXISTS messages")
+            conn.execute("DROP TABLE IF EXISTS tasks")
+            conn.commit()
+        conn.close()
+    except Exception:
+        logger.debug("[database] Path C drop/recreate migration failed", exc_info=True)
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)

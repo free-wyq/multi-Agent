@@ -69,6 +69,36 @@ class GroupEntity(Base):
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
 
 
+class ConversationEntity(Base):
+    """A single-agent (1:1) conversation — the direct-chat counterpart of GroupEntity.
+
+    Path C (single-chat entity split): single-chat conversations are no longer
+    degenerate ``GroupEntity`` rows with ``config.single_chat=True``. They have
+    their own table + entity, with ``agent_id`` pointing to the single agent
+    (the conversation partner). The ``coordinator_id`` field mirrors
+    ``GroupEntity.coordinator_id`` (value=``agent_id``) so the frontend
+    ``ChatPanel`` — which reads ``group.coordinator_id`` — works unchanged
+    (C2 共享该共享的：ChatPanel 零改).
+
+    Messages and tasks reference a conversation via ``conversation_id``
+    (renamed from ``group_id`` — semantically neutral: holds either a
+    ``group_id`` or a ``conversation_id``). The WS channel
+    ``bus-event:{conversationId}`` reuses the same BusManager — one id one
+    channel, no protocol change.
+    """
+
+    __tablename__ = "conversations"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    agent_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    name: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # coordinator_id mirrors agent_id so ChatPanel (reads group.coordinator_id)
+    # works unchanged for single-chat conversations (C2 shared-UI principle).
+    coordinator_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+
+
 class MemberEntity(Base):
     __tablename__ = "members"
 
@@ -87,7 +117,10 @@ class TaskEntity(Base):
     __tablename__ = "tasks"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # conversation_id: holds either a group_id (group-chat task) or a
+    # conversation_id (single-chat task). Renamed from group_id (Path C strict
+    # rename) — semantically neutral FK to either entity.
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     parent_task_id: Mapped[str | None] = mapped_column(String, nullable=True)
     title: Mapped[str] = mapped_column(String, nullable=False)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
@@ -110,7 +143,10 @@ class MessageEntity(Base):
     __tablename__ = "messages"
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
-    group_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # conversation_id: holds either a group_id (group-chat message) or a
+    # conversation_id (single-chat message). Renamed from group_id (Path C
+    # strict rename) — semantically neutral FK to either entity.
+    conversation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
     task_id: Mapped[str | None] = mapped_column(String, nullable=True)
     sender_id: Mapped[str] = mapped_column(String, nullable=False)
     receiver_id: Mapped[str] = mapped_column(String, nullable=False)

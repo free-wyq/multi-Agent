@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models import (
     AgentDefinition,
+    Conversation,
+    ConversationCreatePayload,
     Group,
     GroupFile,
     GroupMember,
@@ -31,6 +33,7 @@ from models import (
 )
 from store.entities import (
     AgentEntity,
+    ConversationEntity,
     GroupEntity,
     LlmProviderEntity,
     McpConnectionEntity,
@@ -45,6 +48,7 @@ from store.entities import (
 _PREFIX_MAP = {
     "agent": "agent_",
     "group": "group_",
+    "conversation": "conv_",
     "member": "member_",
     "task": "task_",
     "msg": "msg_",
@@ -222,9 +226,10 @@ async def create_group(payload: Any) -> Group:
         coordinator_id=coord_id,
         description=payload.description,
         status="active",
-        # 透传 payload.config（single_chat 等群组级标记）。后端 GroupCreatePayload 用
-        # extra="allow" 容纳未声明字段，前端单聊建群时传 {single_chat:true} 落库后供
-        # 左栏区分单聊群（不显示在多智能体列表）。未传 config 时为 None（默认）。
+        # Path C: single_chat flag is retired — single-chat conversations live
+        # in the ``conversations`` table. GroupCreatePayload no longer accepts
+        # single_chat; config stays the free-form JSON column (auto_confirm /
+        # leader_strategy / collaboration_mode).
         config=payload.config if hasattr(payload, "config") else None,
         created_at=ts,
         updated_at=ts,
@@ -283,13 +288,130 @@ async def delete_group(group_id: str) -> bool:
         row = await db.get(GroupEntity, group_id)
         if not row:
             return False
-        # cascade: remove members + tasks + messages of this group
+        # cascade: remove members + tasks + messages of this group. Tasks and
+        # messages now use conversation_id (Path C rename) which holds the
+        # group_id for group-chat rows.
         await db.execute(delete(MemberEntity).where(MemberEntity.group_id == group_id))
-        await db.execute(delete(TaskEntity).where(TaskEntity.group_id == group_id))
-        await db.execute(delete(MessageEntity).where(MessageEntity.group_id == group_id))
+        await db.execute(delete(TaskEntity).where(TaskEntity.conversation_id == group_id))
+        await db.execute(delete(MessageEntity).where(MessageEntity.conversation_id == group_id))
         await db.delete(row)
         await db.commit()
         return True
+
+
+# ── Conversation helpers (Path C single-chat entity split) ─────────
+
+
+def _conversation_to_model(c: ConversationEntity) -> Conversation:
+    return Conversation.model_validate(
+        {
+            "id": c.id,
+            "agent_id": c.agent_id,
+            "name": c.name,
+            # coordinator_id mirrors agent_id so ChatPanel (reads
+            # group.coordinator_id) works unchanged for single-chat.
+            "coordinator_id": c.coordinator_id or c.agent_id,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+        }
+    )
+
+
+async def list_conversations() -> list[Conversation]:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ConversationEntity).order_by(ConversationEntity.created_at)
+            )
+        ).scalars().all()
+        return [_conversation_to_model(r) for r in rows]
+
+
+async def get_conversation(conversation_id: str) -> Conversation | None:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ConversationEntity, conversation_id)
+        return _conversation_to_model(row) if row else None
+
+
+async def create_conversation(payload: Any) -> Conversation:
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    agent_id = payload.agent_id
+    # name defaults to the agent's name when omitted.
+    name = getattr(payload, "name", None) or ""
+    if not name:
+        agent = await get_agent(agent_id)
+        name = agent.name if agent else "单聊"
+    entity = ConversationEntity(
+        id=_next_id("conversation"),
+        agent_id=agent_id,
+        name=name,
+        # coordinator_id mirrors agent_id so ChatPanel reads group.coordinator_id
+        # and gets the right sender for single-chat (C2 shared-UI principle).
+        coordinator_id=agent_id,
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _conversation_to_model(entity)
+
+
+async def delete_conversation(conversation_id: str) -> bool:
+    """Delete a conversation + cascade-clear its messages and tasks.
+
+    Mirrors ``delete_group`` cascade semantics: tasks and messages referencing
+    the conversation (via ``conversation_id``) are deleted first, then the
+    conversation row itself.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ConversationEntity, conversation_id)
+        if not row:
+            return False
+        await db.execute(
+            delete(TaskEntity).where(TaskEntity.conversation_id == conversation_id)
+        )
+        await db.execute(
+            delete(MessageEntity).where(MessageEntity.conversation_id == conversation_id)
+        )
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def get_or_create_conversation(agent_id: str) -> Conversation:
+    """Find-or-create a single-chat conversation for ``agent_id``.
+
+    Used by ``POST /api/conversations`` (find-or-create semantics) and the
+    ``selectAgent`` frontend path. Returns the existing conversation for the
+    agent if one exists, otherwise creates a new one. A future hardening
+    pass could enforce a uniqueness constraint; for now the first match wins
+    (single-user local app, low risk of duplicates).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = (
+            await db.execute(
+                select(ConversationEntity)
+                .where(ConversationEntity.agent_id == agent_id)
+                .order_by(ConversationEntity.created_at)
+                .limit(1)
+            )
+        ).scalars().first()
+        if row is not None:
+            return _conversation_to_model(row)
+    payload = ConversationCreatePayload(agent_id=agent_id)
+    return await create_conversation(payload)
 
 
 # ── Member helpers ───────────────────────────────────────────────
@@ -370,7 +492,7 @@ def _task_to_model(t: TaskEntity) -> Task:
     return Task.model_validate(
         {
             "id": t.id,
-            "group_id": t.group_id,
+            "conversation_id": t.conversation_id,
             "parent_task_id": t.parent_task_id,
             "title": t.title,
             "description": t.description,
@@ -391,24 +513,24 @@ def _task_to_model(t: TaskEntity) -> Task:
     )
 
 
-async def list_tasks(group_id: str | None = None) -> list[Task]:
+async def list_tasks(conversation_id: str | None = None) -> list[Task]:
     from store.database import SessionLocal
 
     async with SessionLocal() as db:
         stmt = select(TaskEntity).order_by(TaskEntity.created_at)
-        if group_id:
-            stmt = stmt.where(TaskEntity.group_id == group_id)
+        if conversation_id:
+            stmt = stmt.where(TaskEntity.conversation_id == conversation_id)
         rows = (await db.execute(stmt)).scalars().all()
         return [_task_to_model(r) for r in rows]
 
 
-async def list_ready_tasks(group_id: str | None = None) -> list[Task]:
+async def list_ready_tasks(conversation_id: str | None = None) -> list[Task]:
     from store.database import SessionLocal
 
     async with SessionLocal() as db:
         stmt = select(TaskEntity).where(TaskEntity.status == "submitted").order_by(TaskEntity.created_at)
-        if group_id:
-            stmt = stmt.where(TaskEntity.group_id == group_id)
+        if conversation_id:
+            stmt = stmt.where(TaskEntity.conversation_id == conversation_id)
         rows = (await db.execute(stmt)).scalars().all()
         return [_task_to_model(r) for r in rows]
 
@@ -426,7 +548,7 @@ async def create_task(payload: Any) -> Task:
 
     entity = TaskEntity(
         id=_next_id("task"),
-        group_id=payload.group_id,
+        conversation_id=payload.conversation_id,
         parent_task_id=None,
         title=payload.title,
         description=payload.description,
@@ -516,7 +638,7 @@ def _message_to_model(m: MessageEntity) -> Message:
     return Message.model_validate(
         {
             "id": m.id,
-            "group_id": m.group_id,
+            "conversation_id": m.conversation_id,
             "task_id": m.task_id,
             "sender_id": m.sender_id,
             "receiver_id": m.receiver_id,
@@ -528,13 +650,13 @@ def _message_to_model(m: MessageEntity) -> Message:
     )
 
 
-async def list_messages(group_id: str | None = None, limit: int = 100) -> list[Message]:
+async def list_messages(conversation_id: str | None = None, limit: int = 100) -> list[Message]:
     from store.database import SessionLocal
 
     async with SessionLocal() as db:
         stmt = select(MessageEntity).order_by(MessageEntity.created_at)
-        if group_id:
-            stmt = stmt.where(MessageEntity.group_id == group_id)
+        if conversation_id:
+            stmt = stmt.where(MessageEntity.conversation_id == conversation_id)
         rows = (await db.execute(stmt)).scalars().all()
         msgs = [_message_to_model(r) for r in rows]
         return msgs[-limit:] if limit else msgs
@@ -565,7 +687,7 @@ async def create_message(payload: Any) -> Message:
 
     entity = MessageEntity(
         id=_next_id("msg"),
-        group_id=data["group_id"],
+        conversation_id=data["conversation_id"],
         task_id=data.get("task_id"),
         sender_id=data["sender_id"],
         receiver_id=data.get("receiver_id") or "broadcast",
@@ -581,11 +703,17 @@ async def create_message(payload: Any) -> Message:
     return _message_to_model(entity)
 
 
-async def clear_messages_by_group(group_id: str) -> bool:
+async def clear_messages_by_group(conversation_id: str) -> bool:
+    """Clear messages for a conversation (or group — conversation_id holds either).
+
+    Kept under the ``clear_messages_by_group`` name for API compat (DELETE
+    /api/messages?groupId=), but the parameter semantically is a conversation_id
+    (Path C rename: group_id → conversation_id).
+    """
     from store.database import SessionLocal
 
     async with SessionLocal() as db:
-        result = await db.execute(delete(MessageEntity).where(MessageEntity.group_id == group_id))
+        result = await db.execute(delete(MessageEntity).where(MessageEntity.conversation_id == conversation_id))
         await db.commit()
         return (result.rowcount or 0) > 0
 
@@ -597,6 +725,9 @@ async def list_files(group_id: str) -> list[GroupFile]:
 
     Returns top-level files with name/size/modified_at. Empty list if the
     workspace directory does not exist yet (no task has produced artifacts).
+    The ``group_id`` parameter here is the workspace key (Path C rename did not
+    touch the workspace path layout — workspaces remain keyed by group_id /
+    conversation_id on disk).
     """
     from engine.workspace import workspace_path
 

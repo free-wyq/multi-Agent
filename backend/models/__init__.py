@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from .agent import AgentCreatePayload, AgentDefinition
+from .conversation import Conversation, ConversationCreatePayload
 from .group import (
     Group,
     GroupConfig,
@@ -29,6 +30,8 @@ from .task import Task, TaskCreatePayload, TaskStatus
 __all__ = [
     "AgentDefinition",
     "AgentCreatePayload",
+    "Conversation",
+    "ConversationCreatePayload",
     "Group",
     "GroupConfig",
     "GroupCreatePayload",

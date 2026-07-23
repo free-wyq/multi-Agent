@@ -14,7 +14,10 @@ class Message(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     id: str
-    group_id: str
+    # conversation_id: holds either a group_id (group-chat message) or a
+    # conversation_id (single-chat message). Renamed from group_id (Path C
+    # strict rename) — semantically neutral FK to either entity.
+    conversation_id: str
     task_id: str | None = None
     sender_id: str
     receiver_id: str
@@ -27,7 +30,7 @@ class Message(BaseModel):
 class MessageCreatePayload(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    group_id: str
+    conversation_id: str
     task_id: str | None = None
     sender_id: str
     receiver_id: str | None = None
@@ -46,12 +49,17 @@ class MessageCreatePayload(BaseModel):
 
 
 class BusEventData(BaseModel):
-    """Event payload pushed over WebSocket `bus-event:{groupId}` channel."""
+    """Event payload pushed over WebSocket `bus-event:{conversationId}` channel.
+
+    ``conversation_id`` is the renamed ``group_id`` (Path C strict rename) —
+    holds either a group_id (group chat) or a conversation_id (single chat);
+    the WS channel mechanism is unchanged (one id one channel).
+    """
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
     id: str
-    group_id: str
+    conversation_id: str
     task_id: str | None = None
     sender_id: str
     receiver_id: str

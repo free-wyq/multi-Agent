@@ -175,7 +175,7 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
         # ── task ──
         task = TaskEntity(
             id="task_demo_1",
-            group_id="group_demo_1",
+            conversation_id="group_demo_1",
             parent_task_id=None,
             title="搭建登录页面",
             description="实现登录表单与校验",
@@ -198,7 +198,7 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
         # ── message ──
         message = MessageEntity(
             id="msg_demo_1",
-            group_id="group_demo_1",
+            conversation_id="group_demo_1",
             task_id=None,
             sender_id="user",
             receiver_id="broadcast",
