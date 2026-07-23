@@ -363,7 +363,9 @@ async def node_brain_decide(state: WorkerState) -> dict:
         logger.warning("[worker %s] brain decision failed: %s", state.get("agent_name"), e)
         decision = {
             "action": "chat",
-            "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
+            # 文案直说故障：原「有点卡壳能再说一遍」误导用户以为是自己没说清，
+            # 实为上游 LLM 服务不可用（5xx/超时/空响应，经 client.py 重试仍失败）。
+            "content": "模型服务暂时无响应，请稍等几秒后重试。",
             "reasoning": "llm_error",
         }
         stats = None
@@ -448,7 +450,9 @@ def _parse_brain_decision(raw: str) -> dict:
         if not recovered:
             return {
                 "action": "chat",
-                "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
+                # 解析失败兜底：真无 JSON / 空响应。文案直说故障（与 LLM 失败同款），
+                # 区别于「有点卡壳」——后者误导用户以为是自己没说清。
+                "content": "模型服务暂时无响应，请稍等几秒后重试。",
                 "reasoning": "parse_failed",
             }
         return {
@@ -791,7 +795,9 @@ async def make_agent_node(
         logger.warning("[worker %s] agent-node brain failed: %s", agent_name, e)
         decision = {
             "action": "chat",
-            "content": "抱歉，我这边有点卡壳，能再说一遍吗？",
+            # 文案直说故障：原「有点卡壳」误导用户以为是自己没说清，实为上游 LLM
+            # 服务不可用（5xx/超时/空响应，经 client.py 重试仍失败）。
+            "content": "模型服务暂时无响应，请稍等几秒后重试。",
             "reasoning": "llm_error",
         }
         stats = None

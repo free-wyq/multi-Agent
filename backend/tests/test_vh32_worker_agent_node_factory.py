@@ -242,7 +242,7 @@ def assert_contract() -> list[str]:
             errs.append("[B8] LLM 失败应兜底回复（_unified_reply 应被调）")
         else:
             args = ur.call_args
-            if args.args[2] != "抱歉，我这边有点卡壳，能再说一遍吗？":
+            if args.args[2] != "模型服务暂时无响应，请稍等几秒后重试。":
                 errs.append(f"[B8] 兜底回复文案不符，实际 {args.args[2]!r}")
             elif args.kwargs.get("data") is not None:
                 errs.append(f"[B8] LLM 失败应 data=None，实际 {args.kwargs.get('data')!r}")

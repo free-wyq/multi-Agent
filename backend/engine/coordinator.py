@@ -1005,7 +1005,10 @@ async def node_llm_decide(state: CoordinatorState) -> dict:
         logger.warning("[coordinator] LLM decision failed: %s", e)
         decision = {
             "action": "chat",
-            "content": "抱歉，我这边理解有点困难，能再说一次吗？",
+            # 文案直说故障：原「我这边理解有点困难」误导用户以为是自己没说清，
+            # 实为上游 LLM 服务不可用（5xx/超时/空响应，经 client.py 重试仍失败）。
+            # 让用户知道是服务端问题、稍后重试，而非反复重发同一句话。
+            "content": "模型服务暂时无响应，请稍等几秒后重试。",
             "plan": [],
         }
         reply_id, tokens, elapsed_ms, model, reasoning_tokens, reasoning_text = "", 0, 0, "", 0, ""
@@ -2017,9 +2020,11 @@ def _parse_coordinator_decision(raw: str) -> dict:
     """
     v = extract_json(raw)
     if v is None:
+        # 解析失败兜底：raw 为空（LLM 返空响应）或非 JSON 骨架。文案直说故障，
+        # 区别于「理解有点困难」——后者误导用户以为是自己的话没说清，实为上游问题。
         return {
             "action": "chat",
-            "content": "抱歉，我这边理解有点困难，能再说一次吗？",
+            "content": "模型服务暂时无响应，请稍等几秒后重试。",
             "plan": [],
         }
     action = str(v.get("action", "chat"))
