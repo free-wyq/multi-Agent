@@ -50,13 +50,122 @@ graph TB
 
 | 链路 | 走向 |
 |---|---|
-| 用户发消息 | React → `POST /api/messages` → `push_notify` → coordinator 的 inbox 队列唤醒 |
-| 协调者调度 | coordinator StateGraph `dispatch` 节点拆 DAG → `push_task` 给 worker inbox |
-| worker 执行 | worker `brain` 决策 → `agent_loop` 的 `create_react_agent` 跑 ReAct（工具在框架内，不调外部 CLI） |
-| 流式输出 | `astream_events` 的 `on_chat_model_stream` → `emit_task_token` → BusManager → WS → 前端气泡逐字渲染 |
-| 配置热切换 | `PUT /api/config` → `set_config` 写 os.environ → 引擎下次 invoke 的 `get_config()` 实时读到（CF-05，已验证） |
-| 状态聚合 | `GET /api/status` → `registry.list_all_status()` 一次拉全（SA-01/02，消除前端 N+1 轮询） |
+| 用户发消息 | React → `POST /api/messages` → `route_user_message` → `GroupRuntime.invoke_turn` 进群图 |
+| 入站分叉 | `route_entry`：report-back→classify / @mention→agent 节点 / 工程需求→classify / 裸闲聊→END |
+| 协调者调度 | `node_dispatch` 拆 DAG → `node_dispatch_next_group` 用 `Send` 扇出到各 agent 节点 |
+| worker 执行 | agent 节点 brain 决策 `execute` → `push_task` 给自己 inbox → `create_react_agent` ReAct |
+| 流式输出 | `astream_events` 的 `on_chat_model_stream` → `emit_task_token`/`emit_coordinator_token` → WS → 前端气泡逐字 |
+| 计划确认 | `POST /api/groups/{id}/plan/confirm` → `GroupRuntime.resume_plan` → `Command(resume=)` 唤醒中断的 dispatch |
+| 配置热切换 | `PUT /api/config` → `set_config` 写 os.environ → 引擎下次 invoke 的 `get_config()` 实时读到（CF-05） |
+| 状态聚合 | `GET /api/status` → `registry.list_all_status()` 一次拉全（消除前端 N+1 轮询） |
 | 定时任务 | APScheduler 触发 → 复用 `push_task` 注入 worker inbox，与人工派发同路径 |
+
+## 群组协作图：中心化 + 去中心化同图共存
+
+每个群组编译**一张** LangGraph `StateGraph(GroupState)`——协调者子图与成员节点 + handoff 边同图共存，共享 `GroupState`。唯一的分叉点是入口节点 `route_entry`（`engine/group_graph.py`），按消息 `incoming_kind` + 是否带 @mention 分流到两条路径。这就是「中心化调度」与「去中心化 A2A」的物理实现：不再是两套独立机制，而是同一张图里两条拓扑分支。
+
+```mermaid
+flowchart TB
+    START([START]) --> RE["route_entry<br/>入口分叉"]
+    RE -- "report-back agent_reply+task_id" --> CL["classify<br/>协调者子图入口"]
+    RE -- "@mention 成员" --> AG1["agent_id 节点<br/>成员节点"]
+    RE -- "工程/计划确认 kind" --> CL
+    RE -- "裸闲聊无 @" --> END1([END])
+
+    subgraph COORD["中心化 · 协调者子图"]
+        CL -- confirm_dispatch --> DNG["dispatch_next_group<br/>Send 扇出"]
+        CL -- handle_reply --> HRG["handle_reply_group<br/>MT-15/MT-14 恢复"]
+        CL -- 新需求 --> LLMD["llm_decide<br/>LLM 决策"]
+        LLMD -- chat --> CHAT["chat to END"]
+        LLMD -- dispatch --> DISP["dispatch<br/>interrupt 暂停"]
+        DISP -- auto_confirm / resume --> DNG
+        DISP -- 等确认 --> PAUSE["图暂停·内存态驻留"]
+        DNG -- "Send 并行" --> AG2["agent_id 节点"]
+        HRG --> DNG
+        HRG --> SUM["summarize_group to END"]
+        DNG -- 全完成 --> SUM
+    end
+
+    subgraph DECENT["去中心化 · 成员节点 + handoff"]
+        AG1 -- "@peer" --> AG3["agent_peer"]
+        AG3 -- "@peer" --> AG4["agent_peer"]
+        AG1 -- 无 @ --> END2([END])
+        AG3 -- 无 @ --> END3([END])
+    end
+```
+
+### 入口分叉决策（route_entry）
+
+`route_entry` 按固定优先级判定一条入站消息走哪条路径——@mention 是显式 opt-in，优先于 kind；worker 派工回报必须走中心化收尾，否则派工步骤永远停在 dispatched（split-brain 死锁）。
+
+```mermaid
+flowchart TB
+    IN(["incoming message"]) --> RB{"agent_reply + task_id?<br/>worker 派工回报"}
+    RB -- 是 --> CEN["classify 中心化<br/>handle_reply_group"]
+    RB -- 否 --> CAP{"撞 SESSION_SPEECH_CAP=50?"}
+    CAP -- 是 --> ENDCAP([END 跨回合兜底])
+    CAP -- 否 --> M{"@mention 成员?"}
+    M -- 是 --> DEC["agent_id 去中心化"]
+    M -- 否 --> LK{"工程/计划确认 kind 或线索?"}
+    LK -- 是 --> CEN
+    LK -- 否 --> ENDDEC([END 话筒落地])
+```
+
+### 中心化路径（协调者 owns）
+
+`build_coordinator_subnodes`（`coordinator.py`）把协调者 7 节点打包注入群图，状态读写切到 `GroupState`（与 `CoordinatorState` 共享键，节点代码零改——都是 `state.get(...)` duck-typed 访问）：
+
+| 节点 | 职责 | 路由 |
+|---|---|---|
+| `classify` | 识别入站意图（新需求/报回/确认派发） | `route_after_classify` → dispatch_next / handle_reply / llm_decide |
+| `llm_decide` | LLM 决策 action（chat/dispatch/ask） | `route_after_llm_decide` → chat / dispatch |
+| `dispatch` | 拆 DAG 计划 + `interrupt()` 暂停等人审 | `route_after_dispatch` → dispatch_next / END |
+| `dispatch_next_group` | `Send` 并行扇出 ready 步骤到各 agent 节点 | Command(goto=Send[]) → agent 节点 |
+| `handle_reply_group` | worker 报回后标 completed/failed + MT-15 失败恢复 + MT-14 步骤调整 | Command(goto=) → dispatch_next / summarize |
+| `summarize_group` | 全步骤完成收尾，emit 空 plan | Command(goto=END) |
+| `chat` | 回一句即 END | → END |
+
+**派工扇出**用 LangGraph `Send` 并行 fan-out 到各 `agent_<id>` 节点（非老路径的 `push_task` 到 worker inbox），DAG fail-fast + ready_steps 逻辑（`build_dispatch_sends` 单一真源）字节级一致。`dispatch_plan` 走 `replace_value` reducer 单一真源。
+
+### 去中心化路径（成员节点 + handoff）
+
+每个成员一个 `agent_<id>` 节点（`worker.py:make_agent_node`，`build_agent_node` 闭包绑身份）。节点干四件事：
+
+1. **入口守卫**——`agent_id` 已在 `recent_speakers` 则直接 END。handoff 串行只消「两节点同时跑」的抢序，但 LLM 仍可 @回已发言者形成 A→B→A→A 连发，本守卫把「同一 agent 一回合不被驱动两次」做成图内硬约束。
+2. **脑回路**——`_stream_brain_decision` 流式 LLM 决策（chat/execute/ask）+ 技能注入。
+3. **发言**——`_unified_reply` 持久化 + emit + 回调；execute 路径回「收到，我来…」+ `push_task` 给自己。
+4. **交话筒**——`_resolve_handoff_target` 解析回复里的 @mention：首个命中 wins，跳过自己、跳过协调者（去中心化路径 worker 不 @回 Leader，Leader 只经 `route_entry` 入）；命中 → `Command(goto="agent_<peer>")`，无 → `Command(goto=END)`。
+
+handoff 边是**动态**的（`Command.goto` 运行期从回复 @mention 决定），编译期只注册 `create_handoff_tool` 声明合法 goto 目标集，`route_entry` 校验解析到的目标是否注册（防陈旧成员列表 goto 不存在节点）。
+
+### 三层停止兜底（Option B 后）
+
+| 入口 | 作用域 | 机制 |
+|---|---|---|
+| UI 停止按钮 `cancel_turn` | 单回合硬切 | `task.cancel()` 中断 `ainvoke` |
+| `AGENT_NODE_MAX_HANDOFFS=8` | 单回合 handoff 链封顶 | `route_entry`/agent 节点每跳 bump+check |
+| `SESSION_SPEECH_CAP=50` | **跨回合**兜底 | `route_entry`+agent 节点入口查 `is_session_capped()`，撞顶 END；只在闲聊计，不挡派工 fan-out/report-back；`/new` reset 清零 |
+
+软停层（`request_stop`/`is_stopped`）已删，只留硬切 + 封顶两入口。`@收束`（`converge=True`）是 UI 一次性开关 + @人，让被 @ 的 agent 回一句即 END 不 handoff，填补去中心化路径的人工收口缺口。
+
+### GroupRuntime：群图回合控制器
+
+`AgentRegistry` 双轨维护 `_engines`（resident per-agent 引擎，持 inbox + worker/coordinator 图）+ `_runtimes`（group→`GroupRuntime`，群图回合控制器）。生产入站走 `GroupRuntime.invoke_turn`/`resume_plan`，`_engines` 退为 resident 兜底 + execute 派工执行体。冷群/编译失败时降级 `push_notify` 走 resident 引擎（additive 兜底，不丢消息）。一个 `GroupRuntime` 用 `_turn_lock` 串行化整群回合——用户聊天、计划 resume、每个 worker 报回都打同一 runtime，并发 `ainvoke` 会撞 `turn_count`/`current_speaker` last-value 通道（`InvalidUpdateError`），锁让它们排队而非交错，对齐 resident 引擎的串行 inbox 语义。
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> RUNNING: invoke_turn / resume_plan
+    RUNNING --> RUNNING: worker report-back 排队 _turn_lock
+    RUNNING --> PAUSED: node_dispatch interrupt()
+    PAUSED --> RUNNING: resume_plan Command resume
+    RUNNING --> IDLE: 回合 END normal
+    RUNNING --> IDLE: cancel_turn UI 硬切
+    note right of IDLE
+        GroupRuntime 持 compiled group graph
+        + _current_task + _turn_lock
+    end note
+```
 
 ## 功能架构图
 
@@ -123,37 +232,38 @@ sequenceDiagram
     actor U as 用户
     participant F as 前端
     participant API as FastAPI routes
-    participant REG as AgentRegistry
-    participant CO as Coordinator StateGraph
+    participant RT as GroupRuntime
+    participant GR as 群图 route_entry
+    participant CO as 协调者子图
     participant WK as Worker create_react_agent
     participant LLM as OpenAI 兼容端点
     participant BUS as BusManager → WS
 
     U->>F: 群聊提交需求
     F->>API: POST /api/messages
-    API->>REG: push_notify → coordinator
+    API->>RT: route_user_message → invoke_turn(coordinator_reply)
     API->>BUS: emit_message_added
     BUS-->>F: WS 推送用户消息
     F-->>U: 显示自己的消息
 
-    REG-->>CO: asyncio.Queue 唤醒
+    RT->>GR: graph.ainvoke
+    GR->>CO: 无 @mention → classify 中心化
     CO->>LLM: chat_completion 决策 action=dispatch
-    CO->>BUS: emit_coordinator_think + emit_coordinator_plan
-    CO->>CO: 默认 wait_confirm → graph END，计划驻留引擎内存
+    CO->>BUS: emit_coordinator_reasoning + emit_coordinator_plan
+    CO->>CO: 非 auto_confirm → interrupt() 图暂停·计划驻留
     BUS-->>F: WS 推送计划
     F-->>U: 计划卡片（确认继续 / 修改 / 直接干）
 
     U->>F: 点确认继续
     F->>API: POST /api/groups/{id}/plan/confirm
-    API->>REG: route_plan_confirm → push_notify(plan_confirm)
-    REG-->>CO: asyncio.Queue 唤醒
-    CO->>CO: classify 识别 plan_confirm → 直跳 dispatch_next（绕过 LLM）
-    CO->>REG: push_task → 第一个 worker
+    API->>RT: route_plan_resume → resume_plan
+    RT->>CO: Command(resume=) 唤醒中断的 dispatch
+    CO->>CO: dispatch_next_group → Send 扇出
+    CO->>WK: Send → agent 节点 execute 路径
     BUS-->>F: WS 推送派工
     F-->>U: 步骤徽标变「已派发」
 
-    REG-->>WK: asyncio.Queue 唤醒 worker
-    WK->>LLM: create_react_agent + astream_events
+    WK->>WK: push_task → create_react_agent + astream_events
     loop ReAct 循环
         LLM-->>WK: AIMessage(tool_calls)
         WK->>TOOLS: 执行框架内工具
@@ -163,11 +273,13 @@ sequenceDiagram
     end
     LLM-->>WK: 最终文本答案
     WK->>BUS: emit_task_complete + emit_agent_status(idle)
-    WK->>CO: push_notify 汇报
+    WK->>RT: report-back → invoke_turn(agent_reply + task_id)
     BUS-->>F: WS 推送完成
     F-->>U: 监控页状态徽标变完成
 
-    CO->>CO: action=continue 派发下一步 / summarize 汇总
+    RT->>GR: route_entry report-back 分叉 → classify
+    GR->>CO: handle_reply_group 标 completed + MT-15/MT-14
+    CO->>CO: dispatch_next 派发下一步 / summarize_group 收尾
     CO->>BUS: emit 最终汇总
     BUS-->>F: WS 推送汇总
     F-->>U: 查看交付物
@@ -217,34 +329,33 @@ sequenceDiagram
 
 ### 7. 两条协作路径 + @mention 防循环
 
-群组协作有**两条互补路径**，按任务形态分流、互不干涉：
+群组协作有**两条互补路径**，按任务形态分流、互不干涉——二者共存于同一张群图（见上节《群组协作图》），`route_entry` 按消息 kind + @mention 分叉：
 
 | | 中心化调度 | 去中心化 A2A |
 |--|------|------|
 | 适用 | 有明确步骤、可并行/依赖的工程任务（写代码、调研、交付物） | 来回互动型任务（成语接龙、你画我猜、多轮讨论、对话游戏） |
-| 入口 | coordinator `dispatch` 节点拆 DAG | coordinator `chat` 节点 @一个成员开局委派 + 讲清规则 |
-| 传递 | `dispatcher._dispatch_one` 直调 `push_task` → worker `execute` 重路径（create_react_agent ReAct） | `route_mentions` 调 `push_notify` → peer worker `brain→chat` 轻路径 |
-| 终止 | 全步骤完成 → `summarize` 汇总 | 成员接不上不再 @对方，话筒自然落地 |
+| 入口 | 裸工程需求 / `coordinator_reply` kind → `classify` → `dispatch` 拆 DAG | @成员 → `agent_<id>` 节点发言 |
+| 传递 | `dispatch_next_group` 用 `Send` 扇出到各 agent 节点（DAG fail-fast + ready_steps） | `make_agent_node` 脑回路→发言→`Command(goto="agent_<peer>")` handoff |
+| 终止 | 全步骤完成 → `summarize_group` 汇总 | 成员接不上不再 @对方，话筒自然落地 END |
 
-DAG 派发不经 `route_mentions`，A2A @mention 不进 create_react_agent——互动型来回对话不会被塞进带工具的 ReAct 重路径。协调者开局委派后即退场，不替成员接龙。
+派工扇出不解析 @mention，A2A handoff 不进 create_react_agent——互动型来回对话不会被塞进带工具的 ReAct 重路径。协调者在去中心化路径上不被触达（worker 不 @回 Leader），彻底消除「协调者每轮插话」老毛病。
 
-**@mention 防循环**（`route_mentions`，三层机制）：
-- **群级共享计数**：防循环 dict 按 group 共享（非 per-engine），前端@后端与后端@前端写进同一 dict，反向清键才打中——原来 per-engine 各自一个空 dict，反向清键打不中对方，接龙 4 轮即断。
-- **反向清键**：A→B push 后清 B→A，允许 A→B→A→B 持续交替；不清则来回 2 轮就被同方向 30s 拦死。
-- **同方向 30s 拦截**：A 连发两次 @B（中间无 B→A）仍被拦——保留死循环防护。
-- **轮次上限**：`_A2A_CAP`（默认 50，`MULTI_AGENT_A2A_TURNS` 可调）兜底防 LLM 失灵无限刷屏；用户每发新消息（`route_user_message`）重置计数，新一轮接龙从 0 数。
+**handoff 防连发/防死循环**（去中心化路径，图内三层约束）：
+- **图内防连发守卫**：`make_agent_node` 入口查 `recent_speakers`，`agent_id` 已在本回合发过言则直接 END——handoff 串行只消「两节点同时跑」的抢序，但 LLM 仍可 @回已发言者形成 A→B→A→A 连发，本守卫兜底。
+- **handoff 链封顶**：`AGENT_NODE_MAX_HANDOFFS=8` 限单回合 handoff 链长度（`route_entry`/agent 节点每跳 bump+check），防 LLM 失灵无限 handoff。
+- **跨回合封顶**：`SESSION_SPEECH_CAP=50` 跨回合累加（接龙是多个短回合），撞顶 END，`/new` reset 清零。只在闲聊计，不挡派工 fan-out/report-back。
 
 ### 8. 计划确认闭环（PL-02/PL-03）
 
-协调者拆解出协作计划后**默认不立即派发**——`node_dispatch` 广播计划后 graph END，计划驻留引擎内存态（`engine._dispatch_plan`，方案 B），等用户确认后再 resume，把「人审」补进自主规划流程：
+协调者拆解出协作计划后**默认不立即派发**——`node_dispatch` 广播计划后 `interrupt()` 暂停图，计划驻留 checkpointer 内存态（`dispatch_plan` 走 `replace_value` reducer 单一真源），等用户确认后 `resume_plan` 发 `Command(resume=<payload>)` 唤醒同 thread 继续，把「人审」补进自主规划流程：
 
-- **确认继续**：`POST /api/groups/{id}/plan/confirm` → `route_plan_confirm` 推 `plan_confirm` notify → `classify` 节点识别 → 直跳 `dispatch_next` fan-out，绕过 LLM 零成本恢复。
-- **直接干**：`POST /api/groups/{id}/plan/direct` → 置 `group.config.auto_confirm=True`，本群后续计划自动派发不再确认。
+- **确认继续**：`POST /api/groups/{id}/plan/confirm` → `route_plan_resume` → `GroupRuntime.resume_plan` → `Command(resume=)` 唤醒中断的 dispatch → `dispatch_next_group` 扇出。
+- **直接干**：`POST /api/groups/{id}/plan/direct` → 置 `group.config.auto_confirm=True`，本群后续计划 `node_dispatch` 跳过 `interrupt()` 直接扇出。
 - **修改**：`POST /api/groups/{id}/plan/modify` → patch 步骤指令/依赖后被改步复位 pending + 重广播 + 确认派发。
 
-前端 `PlanConfirmCard`（插在消息流顶部）展示步骤 + 状态徽标 + 三动作按钮，409 时静默从真源 `/api/groups/{id}/plan` 重拉驻留计划对齐。
+前端 `PlanConfirmCard`（插在消息流顶部）展示步骤 + 状态徽标 + 三动作按钮。双模渲染：有 pending 步骤 → 确认模式（Alert + 三按钮）；直接干飞行中（无 pending 未全完成）→ 只读进度模式（步骤徽标随 `coordinator_plan` 事件实时翻色，`node_handle_reply_group` 推进状态后 emit 推前端）。
 
-> 关键约束：非 dispatch 动作（chat/ask/continue）**不回写** `dispatch_plan`——否则 `replace_value` reducer 会用空 `[]` 抹掉驻留计划，确认卡片凭空消失、再点确认 409。`node_llm_decide` 只在 `action=dispatch` 时返回该 key，LangGraph 不跑 reducer 即保留驻留态。
+> 关键约束：非 dispatch 动作（chat/ask/continue）**不回写** `dispatch_plan`——否则 `replace_value` reducer 会用空 `[]` 抹掉驻留计划，确认卡片凭空消失。`node_llm_decide` 只在 `action=dispatch` 时返回该 key，LangGraph 不跑 reducer 即保留驻留态。
 
 ## 技术栈
 
@@ -329,16 +440,18 @@ multi-Agent/
       agents.py groups.py tasks.py messages.py
       skills.py mcp.py scheduled_tasks.py system.py websocket.py
     engine/                     # LangGraph 引擎层
-      registry.py              # AgentEngine + AgentRegistry（常驻 asyncio.Task）
-      coordinator.py           # 协调者 StateGraph（7 节点 + conditional edge）
-      worker.py                # Worker StateGraph（brain 决策）
+      registry.py              # AgentRegistry 双轨 _engines + _runtimes
+      group_runtime.py          # GroupRuntime 群图回合控制器（invoke_turn/resume_plan/cancel_turn）
+      group_graph.py            # per-group swarm StateGraph（route_entry 分叉 + 协调者子图 + agent 节点 + handoff 边）
+      coordinator.py           # 协调者子图节点（classify/llm_decide/dispatch/handle_reply_group/...）
+      worker.py                # 成员节点 make_agent_node + worker StateGraph（brain 决策）
       agent_loop.py            # create_react_agent + astream_events（ReAct 循环）
       agent_executor.py        # 桥接：技能注入 + MCP 注入 → run_agent_loop
       tools.py                 # @tool 框架内工具（read_file/write_file/...）
       mcp_manager.py           # langchain-mcp-adapters → BaseTool
       inbox.py                 # asyncio.Queue channel（push_task/push_notify 唤醒）
-      dispatcher.py             # DAG fan-out 派发
-      mention.py                # @mention 路由 + 群级共享防循环 + A2A 轮次上限
+      dispatcher.py             # DAG fan-out（dispatch_ready_steps / build_dispatch_sends 单一真源）
+      mention.py                # route_user_message（入站→GroupRuntime）+ @mention 解析
       workspace.py             # 工作区隔离 + safe_path
       scheduler.py             # APScheduler 定时触发
     llm/                       # OpenAI 兼容 HTTP + 提示词 + JSON 提取
@@ -363,9 +476,10 @@ multi-Agent/
 - [x] MCP 外部工具集成（langchain-mcp-adapters，M9）
 - [x] 定时任务（APScheduler + 复用 push_task + 执行历史，M8）
 - [x] 黑盒透明化 UI（typed BusEventData + LeaderPanel + WorkerTrace 监控，M11）
-- [x] 计划确认闭环（PL-02 确认/修改 + PL-03 直接干，引擎内存态驻留 + classify 绕过 LLM resume）
+- [x] 计划确认闭环（PL-02 确认/修改 + PL-03 直接干，interrupt 内存态驻留 + resume_plan Command 唤醒）
 - [x] Apache License 2.0 开源协议
-- [x] 去中心化 A2A 协作路径（worker↔worker @mention 来回对话，群级共享防循环 + 反向清键 + 轮次上限）
+- [x] 去中心化 A2A 协作路径（per-group swarm 群图：route_entry 分叉 + 成员节点 handoff + 图内防连发守卫）
+- [x] 单图双路径：中心化协调者子图 + 去中心化成员 handoff 同图共存，共享 GroupState
 - [x] 透明化统计：协调者/worker 回复均带「model · Ns · ↓ N tokens（含 N 推理）」状态行（流式采集真实 usage）
 - [x] 对话语音朗读（Web Speech API，自动朗读 + 气泡按需朗读）
 - [x] 顶部栏三视图切换（对话 / 智能体广场 / skill广场）+ 用户入口移至侧栏左下角
