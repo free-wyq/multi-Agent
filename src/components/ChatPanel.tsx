@@ -791,7 +791,10 @@ export default function ChatPanel({
     const el = messagesContainerRef.current
     if (!el) return
     const raf = requestAnimationFrame(() => {
-      el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
+      // 流式期每个 token（~50ms）都触发本 effect：用 'auto' 瞬切而非 'smooth'——
+      // smooth 动画未跑完就被下一帧改写目标 scrollTop，浏览器反复重算布局 → 视觉抖动 + 主线程占用；
+      // 流式结束高度突变时（reasoning 收起 / 气泡退场换 key）smooth 追高度会"抖一下"，瞬切杜绝。
+      el.scrollTo({ top: el.scrollHeight, behavior: 'auto' })
     })
     return () => cancelAnimationFrame(raf)
   }, [chatMessages, streamingBubbles, coordinatorStreamingBubbles, finalizedBubbles])
