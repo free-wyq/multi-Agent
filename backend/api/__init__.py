@@ -3,9 +3,11 @@ from __future__ import annotations
 
 from . import (
     agents,
+    conversations,
     groups,
     mcp,
     messages,
+    plan,
     scheduled_tasks,
     skills,
     system,
@@ -15,9 +17,11 @@ from . import (
 
 __all__ = [
     "agents",
+    "conversations",
     "groups",
     "mcp",
     "messages",
+    "plan",
     "scheduled_tasks",
     "skills",
     "system",

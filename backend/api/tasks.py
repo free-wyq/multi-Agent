@@ -89,7 +89,9 @@ async def stop_task(
         "task_id": task_id,
         "executing": executing,
         "queued": queued,
-        "group_id": result.get("group_id"),
+        # conversation_id holds either a group_id (group chat) or a
+        # conversation_id (single chat) — renamed from group_id (Path C).
+        "conversation_id": result.get("group_id"),
         "agent_id": result.get("agent_id"),
         "message": (
             "任务已停止（执行中已中断）"

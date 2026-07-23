@@ -14,6 +14,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from api import (
     agents,
+    conversations,
     groups,
     mcp,
     messages,
@@ -64,6 +65,7 @@ app.add_middleware(
 app.include_router(system.router)
 app.include_router(agents.router)
 app.include_router(groups.router)
+app.include_router(conversations.router)
 app.include_router(tasks.router)
 app.include_router(messages.router)
 app.include_router(skills.router)
