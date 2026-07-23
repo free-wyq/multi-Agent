@@ -213,6 +213,30 @@ def assert_contract() -> list[str]:
     except Exception as e:  # noqa: BLE001
         errs.append(f"[D10] _resolve_members decentralized 检查异常：{type(e).__name__}: {e}")
 
+    # D10b decentralized 模式 coordinator member 的 system_prompt == DECENTRALIZED_COORDINATOR_PROMPT
+    # （而非 coord_agent 原 prompt）。task #59：去中心化群主 agent 节点用「普通成员」口吻，
+    # 不用原 system_prompt（COORDINATOR_SYSTEM 那套会让群主想着拆计划派工）。
+    try:
+        from llm.prompts import DECENTRALIZED_COORDINATOR_PROMPT  # type: ignore
+        coord_member = next((m for m in members_d if m["agent_id"] == "c1"), None)
+        if coord_member is None:
+            errs.append("[D10b] decentralized 模式 coordinator 不在 members，无法断言 prompt")
+        elif coord_member.get("system_prompt") != DECENTRALIZED_COORDINATOR_PROMPT:
+            errs.append(
+                f"[D10b] decentralized coordinator.system_prompt 应为 DECENTRALIZED_COORDINATOR_PROMPT，"
+                f"实际 {coord_member.get('system_prompt')!r}"
+            )
+        else:
+            # 同时断言 agent_name/agent_role/mounted_skills 仍用 coord_agent 原值
+            if coord_member.get("agent_name") != "协调者":
+                errs.append(f"[D10b] decentralized coordinator.agent_name 应保留原值 '协调者'，实际 {coord_member.get('agent_name')!r}")
+            elif coord_member.get("agent_role") != "r":
+                errs.append(f"[D10b] decentralized coordinator.agent_role 应保留原值 'r'，实际 {coord_member.get('agent_role')!r}")
+            else:
+                print("[D10b] OK  decentralized coordinator.system_prompt == DECENTRALIZED_COORDINATOR_PROMPT（普通成员口吻，agent_name/role 保留原值）")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"[D10b] decentralized coordinator prompt 检查异常：{type(e).__name__}: {e}")
+
     # ── E. 老群组兜底（A3 已覆盖 None / {} / 无效值）─────────
     if not any(e.startswith("[A3]") or e.startswith("[A5]") for e in errs):
         print("[E11] OK  老群组兜底（None / {} / 缺 key / 无效值 → 'centralized'）已在 A3/A5 覆盖")

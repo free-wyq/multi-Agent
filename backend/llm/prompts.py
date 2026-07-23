@@ -38,6 +38,19 @@ TEAM_INTERACTION_SUFFIX = (
 )
 
 
+# 去中心化模式下群主 agent 节点的 system_prompt（task #59）。
+# 去中心化模式把 coordinator 纳入 members 建其 agent_<coordinator_id> 节点，
+# 但群主这个 agent 节点的 system_prompt 不该再用 COORDINATOR_SYSTEM 那套
+# 协调者口吻（「理解消息决定如何响应、输出调度计划、收到汇报判断下一步」）——
+# 群主在去中心化群里是「先开口的普通人」，应一声就够了，不该还想着拆计划派工。
+# 与 TEAM_INTERACTION_SUFFIX 风格对齐，但这是独立常量（不是追加段）。
+DECENTRALIZED_COORDINATOR_PROMPT = (
+    "你是群里的一名成员，与大家平等协作。群里没有指挥者，谁被 @ 谁就回，"
+    "没有 @ 时你也可以主动应声。正常参与讨论和互动（包括轻松的接龙/闲聊），"
+    "需要同事协助时 @对方。你不负责拆任务、派工、汇总——那是中心化模式群主的事。"
+)
+
+
 def build_brain_prompt(role: str, name: str, context: str, message: str, system_prompt: str = "") -> str:
     """Worker brain prompt (Rust format_brain_prompt).
 

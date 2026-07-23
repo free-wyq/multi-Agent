@@ -32,8 +32,14 @@ route_entry 两版严格同步（vh40 锁延续），改一处改两处。
    10. centralized 模式 @普通成员 → 成员 id（现状不破）.
    11. decentralized 模式 @普通成员 → 成员 id（现状不破）.
 
+  D2. centralized 用户消息 @群主 route_entry 层接管锁——task #60 修死胡同
+   12. centralized + 用户消息（coordinator_reply kind）@群主 → goto=classify（route_entry
+       层接管，不再死胡同 END）。
+   13. centralized + worker 回复（agent_reply kind）@群主 → goto=END（worker 层死胡同维持，
+       route_entry 不二次接管，话筒落地等用户下一条消息触发）。
+
   E. route_entry 两版同步锁——vh40 锁延续
-   12. 两版 route_entry 都含 collaboration_mode 分流逻辑（decentralized 裸消息群主首发）.
+   14. 两版 route_entry 都含 collaboration_mode 分流逻辑（decentralized 裸消息群主首发）.
 """
 from __future__ import annotations
 
@@ -263,6 +269,49 @@ def assert_contract() -> list[str]:
     except Exception as e:  # noqa: BLE001
         errs.append(f"[D11] decentralized @普通成员 检查异常：{type(e).__name__}: {e}")
 
+    # ── D2. centralized 用户消息 @群主 route_entry 层接管（task #60 修死胡同）──
+    # D12 centralized + 用户消息（coordinator_reply kind）@群主 → goto=classify
+    # （route_entry 层接管，不再死胡同 END）。_resolve_handoff_target 仍返 None（coord-skip），
+    # 但 _message_mentions_coordinator 检测到用户消息 @群主 → route_entry goto classify。
+    async def _run_user_at_coord(kind, message, mode):
+        # standalone route_entry 直调（_message_mentions_coordinator 在 group_graph 模块内）
+        with patch("engine.worker.crud") as crud_mock, \
+             patch("engine.worker.find_mentions", return_value=[]), \
+             patch("engine.worker.resolve_mention", return_value=None), \
+             patch("engine.group_graph.crud") as gcrud_mock, \
+             patch("engine.group_graph.find_mentions", return_value=["协调者"]), \
+             patch("engine.group_graph.resolve_mention", return_value=None):
+            crud_mock.list_group_members_with_agent = AsyncMock(return_value=db_members)
+            crud_mock.list_agents = AsyncMock(return_value=[])
+            gcrud_mock.list_group_members_with_agent = AsyncMock(return_value=db_members)
+            gcrud_mock.list_agents = AsyncMock(return_value=db_a)
+            return await route_entry({
+                "group_id": "g1", "coordinator_id": "c1",
+                "incoming_message": message, "incoming_sender": "user",
+                "incoming_kind": kind, "turn_count": 0,
+                "collaboration_mode": mode,
+            })
+
+    try:
+        cmd = asyncio.run(_run_user_at_coord("coordinator_reply", "@协调者 帮我看下", "centralized"))
+        if cmd.goto != "classify":
+            errs.append(f"[D12] centralized + 用户消息 @群主 应 goto=classify（修死胡同），实际 {cmd.goto!r}")
+        else:
+            print(f"[D12] OK  centralized + 用户消息 @群主 → goto={cmd.goto!r}（route_entry 接管修死胡同，task #60）")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"[D12] centralized 用户消息 @群主 直调异常：{type(e).__name__}: {e}")
+
+    # D13 centralized + worker 回复（agent_reply kind）@群主 → goto=END
+    # （worker 层死胡同维持，route_entry 不二次接管——话筒落地等用户下一条消息触发）。
+    try:
+        cmd = asyncio.run(_run_user_at_coord("agent_reply", "@协调者 你来", "centralized"))
+        if cmd.goto != "__end__":
+            errs.append(f"[D13] centralized + worker 回复(agent_reply) @群主 应 goto=END（死胡同维持），实际 {cmd.goto!r}")
+        else:
+            print(f"[D13] OK  centralized + worker 回复 @群主 → goto={cmd.goto!r}（死胡同维持，worker 层不接管）")
+    except Exception as e:  # noqa: BLE001
+        errs.append(f"[D13] centralized worker @群主 直调异常：{type(e).__name__}: {e}")
+
     # E12 两版都含 decentralized 分流分支（群主当首发）
     try:
         has_standalone_decentralized = "collaboration_mode == \"decentralized\"" in body_standalone
@@ -299,6 +348,8 @@ def main() -> int:
         "  · C 中心化裸消息 → classify（Leader 主导，不回归，两版同步）；\n"
         "  · D @群主 centralized→None（死胡同维持）/ decentralized→coordinator_id（修死胡同）；\n"
         "  · D @普通成员 两模式均正常 handoff（现状不破）；\n"
+        "  · D2 centralized 用户消息 @群主 → classify（route_entry 层接管修死胡同，task #60）；\n"
+        "  · D2 centralized worker 回复 @群主 → END（死胡同维持，worker 层不接管）；\n"
         "  · E 两版同步锁（vh40 延续）——都含 decentralized 分流分支（群主当首发）。"
     )
     return 0

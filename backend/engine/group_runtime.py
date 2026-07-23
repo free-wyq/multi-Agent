@@ -76,6 +76,7 @@ from engine import coordinator as coord_mod
 from engine import worker as worker_mod
 from engine.group_graph import build_group_graph
 from events import emit_agent_status
+from llm.prompts import DECENTRALIZED_COORDINATOR_PROMPT
 from models import get_collaboration_mode, get_leader_strategy
 
 if TYPE_CHECKING:
@@ -386,7 +387,10 @@ class GroupRuntime:
 
         # decentralized 模式：coordinator 不在 member_rows 里（它是群主不是成员），
         # 但要把它纳入 members 建其 agent 节点。从 agents 表取其 identity（name/role/
-        # system_prompt/mounted_skills），以「普通 member」身份加入（无编排权）。
+        # mounted_skills），system_prompt 用 DECENTRALIZED_COORDINATOR_PROMPT——去中心化
+        # 模式群主是「先开口的普通人」，不该用原 COORDINATOR_SYSTEM 那套协调者口吻
+        # （task #59）。agent_name/agent_role/mounted_skills 仍用 coord_agent 原值
+        # （身份还是那个 agent，只是去中心化模式下的行为 prompt 不同）。
         if mode == "decentralized" and self.coordinator_id:
             coord_agent = agents.get(self.coordinator_id)
             if coord_agent is not None and not any(
@@ -396,7 +400,9 @@ class GroupRuntime:
                     "agent_id": self.coordinator_id,
                     "agent_name": getattr(coord_agent, "name", "") or "",
                     "agent_role": getattr(coord_agent, "role", "") or "",
-                    "system_prompt": getattr(coord_agent, "system_prompt", "") or "",
+                    # task #59: 去中心化群主 agent 节点用「普通成员」口吻 prompt，
+                    # 不用原 system_prompt（COORDINATOR_SYSTEM 那套会让群主想着拆计划派工）。
+                    "system_prompt": DECENTRALIZED_COORDINATOR_PROMPT,
                     "mounted_skills": list(getattr(coord_agent, "mounted_skills", None) or []),
                 })
         return members

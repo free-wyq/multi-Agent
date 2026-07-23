@@ -47,7 +47,9 @@ from engine.worker import (
     _resolve_handoff_target,
     build_agent_node,
 )
+from engine.mention import find_mentions, resolve_mention
 from langgraph_swarm import create_handoff_tool
+from store import crud
 
 logger = logging.getLogger("multi-agent.group_graph")
 
@@ -204,6 +206,52 @@ def _is_report_back(state: GroupState) -> bool:
     return bool(data.get("task_id"))
 
 
+async def _message_mentions_coordinator(
+    message: str, group_id: str, coordinator_id: str
+) -> bool:
+    """Detect whether ``message`` @mentions the group's coordinator (task #60).
+
+    Used by route_entry (standalone + closure-bound, two-version sync) to fix
+    the centralized 「@群主 死胡同」defect: a user message that @mentions the
+    coordinator routes to ``classify`` so the Leader picks it up (rather than
+    END-ing at the no-@mention fall-through). Only consulted in centralized
+    mode + only for user messages (``incoming_kind != agent_reply``) — worker
+    @群主 stays a dead-end (话筒落地等用户下一条).
+
+    Reuses ``mention.find_mentions`` + ``mention.resolve_mention`` (single
+    source for @-token scanning + three-tier agent match). The coordinator is
+    NOT in ``member_rows`` (it is the Leader, not a member), so
+    ``resolve_mention`` (which only scans members) would miss it — this helper
+    also matches coordinator_id / coordinator name / coordinator role
+    directly (mirrors ``mention.route_mentions``'s coordinator fallback).
+
+    Returns ``True`` when any @mention in ``message`` resolves to the
+    coordinator; ``False`` otherwise (no mention / mentions resolve to other
+    members / coordinator_id empty).
+    """
+    if not coordinator_id:
+        return False
+    mentions = find_mentions(message)
+    if not mentions:
+        return False
+    members = await crud.list_group_members_with_agent(group_id)
+    agents = await crud.list_agents()
+    coord_agent = next((a for a in agents if getattr(a, "id", None) == coordinator_id), None)
+    for mention in mentions:
+        # three-tier match against members (single source).
+        target_id = resolve_mention(members, mention, agents)
+        if target_id == coordinator_id:
+            return True
+        # coordinator is not in members — fallback match on id / name / role
+        # (mirrors mention.route_mentions's coordinator fallback).
+        if coord_agent is not None and (
+            mention == coordinator_id
+            or mention in (coord_agent.name, coord_agent.role)
+        ):
+            return True
+    return False
+
+
 async def route_entry(state: GroupState) -> Command:
     """Entry node: fork the turn by message kind — centralized vs decentralized.
 
@@ -353,6 +401,32 @@ async def route_entry(state: GroupState) -> Command:
             },
         )
 
+    # ── task #60: centralized 用户消息 @群主 → classify（修死胡同）──────────
+    # centralized 模式下 _resolve_handoff_target 跳过 coordinator（coord-skip）→ 返 None。
+    # 这意味着用户在群里发「@群主 帮我看下」时，next_speaker=None，原本会落到下面的
+    # 「centralized + 无中央 cue → END」分支死胡同。用户 @群主 是显式信号「要群主接话」，
+    # route_entry 层应接管 → goto=classify（跟裸消息走同一条路，群主自然接管回复）。
+    # **只在 centralized 模式**：decentralized 模式 coordinator 是普通 member 节点，
+    # @群主 在上面 _resolve_handoff_target 已解析到（decentralized 不跳过 coord），
+    # 不会落到这里。
+    # **只对用户消息**：incoming_kind 是 agent_reply（worker 回复带 @群主）时维持死胡同
+    # END——centralized 群主不会被 worker 唤起，worker @群主 只是个「我需要群主介入」的
+    # 信号，话筒落地等用户下一条消息触发。worker 层（_resolve_handoff_target）已返 None，
+    # route_entry 这里不再二次判定，落到下方 END 分支。
+    # 防御：coordinator_id 空或无 mention 直接跳过本守卫。
+    if (
+        collaboration_mode != "decentralized"
+        and coordinator_id
+        and incoming_kind != "agent_reply"
+        and await _message_mentions_coordinator(incoming_message, group_id, coordinator_id)
+    ):
+        logger.debug(
+            "[group_graph] route_entry centralized 用户消息 @群主 → classify（修死胡同，"
+            "kind=%s 不是 agent_reply）",
+            incoming_kind,
+        )
+        return Command(goto="classify", update={"turn_count": turn_count})
+
     # No member @mention → route by mode + kind.
     #
     # **Decentralized mode**: 裸消息（无 @）→ 群主当首发（对标 LangGraph
@@ -495,6 +569,26 @@ def build_route_entry(handoff_targets: set[str]):
                     "turn_count": turn_count,
                 },
             )
+
+        # ── task #60: centralized 用户消息 @群主 → classify（修死胡同·closure-bound twin）──
+        # 与 standalone route_entry 同款（vh40 锁两份同步）：centralized 模式下
+        # _resolve_handoff_target 跳过 coordinator → None，用户 @群主 会落到下方
+        # END 分支死胡同。route_entry 层接管 → goto=classify（群主自然接管回复）。
+        # **只在 centralized 模式** + **只对用户消息**（incoming_kind != agent_reply）：
+        # worker @群主 维持死胡同 END（worker 层 _resolve_handoff_target 已返 None，
+        # 落到下方 END 分支——话筒落地等用户下一条消息触发）。
+        if (
+            collaboration_mode != "decentralized"
+            and coordinator_id
+            and incoming_kind != "agent_reply"
+            and await _message_mentions_coordinator(incoming_message, group_id, coordinator_id)
+        ):
+            logger.debug(
+                "[group_graph] route_entry centralized 用户消息 @群主 → classify（修死胡同，"
+                "kind=%s 不是 agent_reply）",
+                incoming_kind,
+            )
+            return Command(goto="classify", update={"turn_count": turn_count})
 
         # No member @mention → route by mode + kind (两份 route_entry 同步·vh40 锁).
         #
