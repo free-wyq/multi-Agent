@@ -5,6 +5,7 @@ import {
   Form,
   Input,
   Select,
+  Segmented,
   message,
   Spin,
   Typography,
@@ -236,11 +237,14 @@ export default function GroupInfoDrawer({
     if (!group) return
     // MT-03: 预填 Leader 指挥策略（group.config.leader_strategy，未设为空串）。
     const strategy = (group.config?.leader_strategy as string | undefined) ?? ''
+    // 协作模式预填（config.collaboration_mode，未设兜底 centralized）。
+    const mode = (group.config?.collaboration_mode as string | undefined) ?? 'centralized'
     groupSettingsForm.setFieldsValue({
       name: group.name,
       description: group.description,
       coordinator_id: group.coordinator_id,
       leader_strategy: strategy,
+      collaboration_mode: mode,
     })
     setGroupSettingsOpen(true)
   }
@@ -257,10 +261,13 @@ export default function GroupInfoDrawer({
       // MT-03: Leader 指挥策略写入 group.config.leader_strategy。后端 update_group 对 config
       // 做 key 级 merge（不整体替换），故把当前群已有 config 与新 leader_strategy 合并后整体
       // 传 config——保留共存键（如 auto_confirm），仅覆盖 leader_strategy。trim 后空串也写入。
+      // 协作模式 collaboration_mode 同样走 key-merge——切换触发后端 recompile_group 重编译群图。
       const strategy = (values.leader_strategy as string | undefined)?.trim() ?? ''
+      const mode = (values.collaboration_mode as string | undefined) || 'centralized'
       const mergedConfig: Record<string, unknown> = {
         ...(group?.config ?? {}),
         leader_strategy: strategy,
+        collaboration_mode: mode,
       }
       await groupApi.update(groupId, {
         name: values.name as string | undefined,
@@ -702,6 +709,24 @@ export default function GroupInfoDrawer({
               showCount
             />
           </Form.Item>
+          {/* 协作模式 Segmented（单聊群隐藏——single_chat 不进群图，mode 对单聊无意义）。
+              中心化：群主主导，supervisor 子图拆计划派工。
+              去中心化：纯 swarm，裸消息群主当首发（swarm default_active_agent），@群主合法 handoff。
+              切换触发后端 recompile_group 重编译群图（做法 A 图级二选一）。 */}
+          {!group?.config?.single_chat && (
+            <Form.Item
+              name="collaboration_mode"
+              label="协作模式"
+              tooltip="中心化：群主主导，supervisor 子图拆计划派工。去中心化：纯 swarm，裸消息群主当首发，@群主合法 handoff。切换后图重编译。"
+            >
+              <Segmented
+                options={[
+                  { label: '中心化', value: 'centralized' },
+                  { label: '去中心化', value: 'decentralized' },
+                ]}
+              />
+            </Form.Item>
+          )}
         </Form>
       </Modal>
     </>

@@ -1070,6 +1070,61 @@ class AgentRegistry:
         """
         return self._runtimes.get(group_id)
 
+    async def recompile_group(self, group_id: str) -> GroupRuntime | None:
+        """Force-rebuild the per-group ``GroupRuntime`` (drop + recompile).
+
+        Used when a group-config change invalidates the compiled graph —
+        today the trigger is ``collaboration_mode`` toggled via
+        ``PUT /api/groups/{id}`` (做法 A 图级二选一: decentralized includes
+        the coordinator as an普通 member with an ``agent_<coordinator_id>``
+        node; centralized excludes it). Also called by add/remove member
+        endpoints (历史债修复: 成员增删后图过期此前靠下次 reload 生效，现
+        即时重编译). The resident ``AgentEngine`` set is untouched (the execute
+        path's home — add/remove member's resident engine wiring stays on the
+        ``add_engine`` / ``stop_group`` paths).
+
+        Concurrent-turn safety: cancels any in-flight turn on the existing
+        runtime (``cancel_turn``) so the recompile cannot race an active
+        ``graph.ainvoke`` — mirroring ``reset_session``'s cancel-then-clear
+        pattern. A turn in flight will see ``CancelledError`` (the user's stop-
+        button path), then the new runtime takes over for the next turn. The
+        fresh ``GroupRuntime`` starts with empty cross-turn mirrors
+        (``_memory`` / ``_dispatch_plan``) — a mode toggle is a logical
+        「换话题」boundary (the old plan was for the old mode), so we do NOT
+        carry over the resident mirrors (mirrors ``reset_session`` semantics).
+        """
+        old_rt = self._runtimes.get(group_id)
+        if old_rt is not None:
+            # Cancel any in-flight turn so the recompile doesn't race it.
+            # The cancelled turn's invoke_turn re-raises CancelledError; the
+            # caller (registry route handler) decides whether to absorb it.
+            old_rt.cancel_turn()
+        group = await crud.get_group(group_id)
+        if not group:
+            # group gone between the PUT and the recompile — drop any stale
+            # runtime and return None (caller degrades to resident-engine path).
+            self._runtimes.pop(group_id, None)
+            return None
+        rt = GroupRuntime(group)
+        try:
+            await rt.compile_graph()
+        except Exception:
+            logger.exception(
+                "[registry] recompile_group: compile failed for group=%s "
+                "(keeping old runtime if any, degrading to resident-engine path)",
+                group_id,
+            )
+            # keep the old runtime if the recompile failed (better a stale graph
+            # than no graph) — but only if the old one was non-None.
+            return old_rt
+        self._runtimes[group_id] = rt
+        logger.info(
+            "[registry] recompiled GroupRuntime for group=%s (coordinator=%s) "
+            "— collaboration_mode switch or member change",
+            group_id, rt.coordinator_id or "(none)",
+        )
+        return rt
+
     async def add_engine(
         self,
         group_id: str,

@@ -322,7 +322,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             rt._graph.ainvoke = AsyncMock(return_value={"dispatch_plan": []})
             rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
             # pre-saturate the counter (cap hit) WITHOUT touching _stop_event

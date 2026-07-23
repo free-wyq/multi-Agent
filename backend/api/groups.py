@@ -194,10 +194,25 @@ async def update_group(group_id: str, payload: GroupUpdateBody) -> Group | None:
     重启（``load_from_store`` 按新 ``coordinator_id`` 重建图）或解散群组重建。
     有意分层：图身份 ≠ 消息级配置，本端点不擅自重建引擎（重建须停 inbox、作废
     checkpointer 线程的 dispatch_plan/interrupt 状态、迁移驻留对话记忆，高风险未做）。
+
+    协作模式切换触发重编译（做法 A 图级二选一）：``config.collaboration_mode``
+    变更时调 ``registry.recompile_group`` 重编群图——decentralized 模式把 coordinator
+    纳入 members 建其 agent 节点，centralized 排除（维持 supervisor 子图）。重编译
+    cancel 在跑回合后重建（mirrors reset_session 的 cancel-then-clear），cross-turn
+    mirrors 不携带（模式切换=换话题边界）。其他 config key（leader_strategy /
+    auto_confirm）走每回合现读，不需重编译。
     """
+    # 协作模式切换检测：先取 old config，update 后 diff collaboration_mode 是否变更。
+    cur = await crud.get_group(group_id)
+    old_mode = None
+    if cur and cur.config:
+        old_mode = cur.config.get("collaboration_mode")
+    new_mode = None
+    if payload.config is not None:
+        new_mode = payload.config.get("collaboration_mode")
+
     new_coord = payload.coordinator_id
     if new_coord is not None:
-        cur = await crud.get_group(group_id)
         if cur is None:
             return None
         if new_coord != cur.coordinator_id:
@@ -208,7 +223,21 @@ async def update_group(group_id: str, payload: GroupUpdateBody) -> Group | None:
                     status_code=409,
                     detail="新群主必须是该群组的现有成员，请先将该智能体添加为成员再设为群主",
                 )
-    return await crud.update_group(group_id, payload)
+    updated = await crud.update_group(group_id, payload)
+
+    # 协作模式变更 → 重编译群图（做法 A 图级二选一：decentralized 纳入 coordinator
+    # 建 agent 节点 / centralized 排除维持 supervisor 子图）。只在 mode 真变更时触发
+    # （centralized→decentralized 或反向），避免每次 config 写都重编译。
+    if new_mode is not None and new_mode != old_mode:
+        try:
+            await registry.recompile_group(group_id)
+        except Exception:
+            logger.exception(
+                "[groups] recompile_group failed for group=%s after mode "
+                "change %s→%s (next reload will pick up the new mode)",
+                group_id, old_mode, new_mode,
+            )
+    return updated
 
 
 @router.delete("/{group_id}")
@@ -240,6 +269,10 @@ async def add_member(group_id: str, body: AddMemberBody) -> GroupMember | None:
     ``uq_group_agent`` unique constraint — instead of surfacing a raw 500, detect it and
     return 409 with a readable message. The route (not crud) owns this because the
     constraint violation is a data-level condition best explained at the API boundary.
+
+    成员增删触发重编译（历史债修复）：add/remove 后调 ``registry.recompile_group``
+    让新成员的 agent 节点 + handoff 边即时注册（此前靠下次 reload 生效，stale 窗口）。
+    best-effort——重编译失败不阻断成员增删的成功返回（next reload 兜底）。
     """
     # coordinator_id is a 1:1 leadership pointer, not a member row — but conceptually
     # the Leader is "in the group", so reject re-adding the coordinator too.
@@ -249,12 +282,30 @@ async def add_member(group_id: str, body: AddMemberBody) -> GroupMember | None:
     existing = await crud.list_group_members_with_agent(group_id)
     if any(m.agent_id == body.agentId for m in existing):
         raise HTTPException(status_code=409, detail="该智能体已在群组中")
-    return await crud.add_member(group_id, body.agentId, body.alias)
+    result = await crud.add_member(group_id, body.agentId, body.alias)
+    # 成员增删后重编群图（让新 agent 节点 + handoff 边即时注册，best-effort）。
+    try:
+        await registry.recompile_group(group_id)
+    except Exception:
+        logger.exception(
+            "[groups] recompile_group failed for group=%s after add_member (next reload picks up)",
+            group_id,
+        )
+    return result
 
 
 @router.delete("/{group_id}/members/{member_id}")
 async def remove_member(group_id: str, member_id: str) -> bool:
-    return await crud.remove_member(group_id, member_id)
+    result = await crud.remove_member(group_id, member_id)
+    # 成员增删后重编群图（让被移除 agent 的节点 + handoff 边即时注销，best-effort）。
+    try:
+        await registry.recompile_group(group_id)
+    except Exception:
+        logger.exception(
+            "[groups] recompile_group failed for group=%s after remove_member (next reload picks up)",
+            group_id,
+        )
+    return result
 
 
 @router.post("/{group_id}/reset-session")

@@ -230,6 +230,13 @@ class GroupState(TypedDict, total=False):
     # group config (injected per invoke_turn from GroupEntity.config)
     auto_confirm: bool
     leader_strategy: str
+    # 群组协作模式（centralized 默认 / decentralized），走 auto_confirm 同款 config 链路
+    # （model→state→每回合现读注入）。但比 auto_confirm 多两处消费：①route_entry 按 mode
+    # 分流（去中心化裸消息群主当首发对标 swarm default_active_agent、@群主 合法 handoff；
+    # 中心化维持 classify）；②compile_graph 按 mode 决定 coordinator 是否纳入 members
+    # （做法 A 图级二选一，切换 mode 触发 recompile_group 重编译）。单聊群不进群图，
+    # mode 对单聊无意义。
+    collaboration_mode: str
 
     # coordinator identity fields. ``agent_id`` / ``agent_name`` / ``system_prompt``
     # here are the *group's Leader* identity (the coordinator sub-node), NOT a

@@ -9,6 +9,7 @@ import {
 
 import { useSelection } from '../contexts/SelectionContext'
 import { agentApi, type AgentCreatePayload } from '../services/api'
+import CreateGroupModal from './CreateGroupModal'
 
 /** Sidebar 宽度（固定，flexShrink:0）。 */
 const SIDEBAR_WIDTH = 240
@@ -59,7 +60,7 @@ interface SidebarProps {
  * 高亮：多智能体选中 = activeGroupId===g.id；智能体选中 = activeAgentId===agent.id。
  */
 export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarProps) {
-  const { groups, agents, agentStatusMap, loading, activeAgentId, activeGroup, selectAgent, selectGroup } =
+  const { groups, agents, agentStatusMap, loading, activeAgentId, activeGroup, selectAgent, selectGroup, refreshAll } =
     useSelection()
 
   // Collapse 展开态：默认两个分组都展开（首屏即见列表）。
@@ -121,6 +122,8 @@ export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarP
                   groups={multiAgentGroups}
                   activeGroupId={activeGroup && !activeGroup.config?.single_chat ? activeGroup.id : null}
                   onSelect={wrapSelect(selectGroup)}
+                  agents={agents}
+                  onCreated={refreshAll}
                 />,
               },
             ]}
@@ -284,11 +287,17 @@ function GroupsPanel({
   groups,
   activeGroupId,
   onSelect,
+  agents,
+  onCreated,
 }: {
   groups: ReturnType<typeof useSelection>['groups']
   activeGroupId: string | null
   onSelect: (groupId: string) => void
+  agents: ReturnType<typeof useSelection>['agents']
+  onCreated?: () => void
 }) {
+  const [createOpen, setCreateOpen] = useState(false)
+
   return (
     <div style={{ paddingBottom: 4 }}>
       {groups.length === 0 ? (
@@ -311,12 +320,18 @@ function GroupsPanel({
           size="small"
           type="text"
           icon={<PlusOutlined />}
-          onClick={() => message.info('新建群组请在群组页操作（待接入）')}
+          onClick={() => setCreateOpen(true)}
           style={{ textAlign: 'left' }}
         >
           新建群组
         </Button>
       </div>
+      <CreateGroupModal
+        open={createOpen}
+        onClose={() => setCreateOpen(false)}
+        agents={agents}
+        onCreated={onCreated}
+      />
     </div>
   )
 }

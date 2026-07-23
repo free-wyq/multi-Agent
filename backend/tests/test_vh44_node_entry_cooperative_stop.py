@@ -249,7 +249,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             # 让 ainvoke 阻塞（模拟「活跃回合跑到一半」）——用 Event gate，cancel 后断流。
             entered = asyncio.Event()
             async def _blocking_ainvoke(turn_input, config=None):
@@ -330,7 +330,7 @@ async def assert_contract() -> list[str]:
         rt = GroupRuntime(_FakeGroup())
         await rt.compile_graph(members)
         rt._resolve_leader_identity = AsyncMock(return_value={"agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp"})
-        rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+        rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
         rt._graph.ainvoke = AsyncMock(return_value={"dispatch_plan": []})
         rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
         with patch("engine.group_runtime.emit_agent_status", AsyncMock()):

@@ -236,6 +236,18 @@ async def route_entry(state: GroupState) -> Command:
     (``AGENT_NODE_MAX_HANDOFFS``) + the「same agent not driven twice」guard
     apply from the very first speaker.
 
+    **Collaboration-mode fork** (task: 群组协作模式): the mode is read from
+    ``state["collaboration_mode"]`` (injected per invoke_turn by
+    ``GroupRuntime._build_turn_input``). In **decentralized** mode the裸消息
+    (no @mention) forks to **群主当首发** (对标 LangGraph ``create_swarm`` 的
+    ``default_active_agent`` 兜底) — the coordinator is an普通 member node in
+    decentralized mode, so a bare message hands the turn to
+    ``agent_<coordinator_id>`` (群主先应一声，回完 END 或 @ 别人 handoff 出去，
+    不指挥、不拆任务，去中心化语义不破). @mention (including @群主, which is now a
+    合法 member node) still routes to the agent node. In **centralized** mode the
+    existing kind-based fork is preserved verbatim (裸 coordinator_reply → classify,
+    etc.).
+
     NOTE: the standalone ``route_entry`` here mirrors ``build_route_entry``'s
     closure-bound node (used by ``build_group_graph``). It resolves the member
     @mention itself (via ``_resolve_handoff_target``) and trusts the kind. The
@@ -247,6 +259,11 @@ async def route_entry(state: GroupState) -> Command:
     incoming_message = state.get("incoming_message", "") or ""
     incoming_sender = state.get("incoming_sender", "") or ""
     incoming_kind = state.get("incoming_kind", "") or ""
+    # collaboration_mode: centralized (default) vs decentralized. Read per turn
+    # from state (injected by GroupRuntime._build_turn_input). Default
+    # "centralized" preserves the historical kind-based fork when the key is
+    # absent (resident engine path / cold invoke / old group).
+    collaboration_mode = state.get("collaboration_mode", "") or "centralized"
     # The handoff destinations are baked into the compiled graph at build time
     # via _build_handoff_tools. The standalone route_entry reads them off a
     # caller-provided ``_handoff_targets`` state key if present; the
@@ -264,6 +281,8 @@ async def route_entry(state: GroupState) -> Command:
     # 区分键：有 task_id = 中心化回报；无 task_id = 去中心化 peer handoff（走下方
     # _resolve_handoff_target）。``_looks_central`` 的 agent_reply→False 契约不动
     # （test_vh39 A3/C10 锁 peer-handoff 路径），report-back 由本早返回接管。
+    # **report-back 在 decentralized 模式仍走 classify**：去中心化无派工，但防御性
+    # 保留（agent_reply+task_id 理论上不出现，若出现仍走中心化兜底避免 split-brain）。
     if _is_report_back(state):
         logger.debug(
             "[group_graph] route_entry execute-path report-back 命中（standalone）："
@@ -301,8 +320,9 @@ async def route_entry(state: GroupState) -> Command:
 
     # Member @mention FIRST — an explicit ``@人`` opts into the decentralized
     # path even when the message reads like engineering work. ``_resolve_handoff
-    # _target`` already skips self-mentions + the coordinator (workers do not
-    # hand off back to the Leader via @mention on the decentralized path).
+    # _target`` already skips self-mentions; the coordinator skip is now
+    # mode-conditional (decentralized mode does NOT skip @群主 — see
+    # ``worker._resolve_handoff_target``).
     next_speaker = await _resolve_handoff_target(
         group_id, coordinator_id, incoming_sender, incoming_message,
     )
@@ -333,9 +353,48 @@ async def route_entry(state: GroupState) -> Command:
             },
         )
 
-    # No member @mention → route by kind. Centralized kinds + plan-confirm cues
-    # go to the Leader's classify node; everything else (bare chat / agent
-    # handoff with no further @mention) ends the turn (话筒落地).
+    # No member @mention → route by mode + kind.
+    #
+    # **Decentralized mode**: 裸消息（无 @）→ 群主当首发（对标 LangGraph
+    # ``create_swarm`` 的 ``default_active_agent`` 兜底语义）。去中心化模式 coordinator
+    # 已是普通 member 节点（``_resolve_members`` 纳入），legal_targets 含
+    # ``agent_<coordinator_id>``。群主先应一声（不指挥、不拆任务，去中心化语义不破），
+    # 回完可直接 END 或 @ 别人 handoff 出去。防御：coordinator_id 空 或其节点不在合法
+    # 目标集（理论不出现——_resolve_members 纳入了 coordinator，build_group_graph 注册
+    # 了其 agent 节点 + handoff tool）→ fallback END。
+    # incoming_kind 仍是 coordinator_reply（route_user_message 打的），但去中心化模式
+    # route_entry 忽略它直接走群主首发。@群主 走 agent 节点（已在上面 _resolve_handoff_target
+    # decentralized 模式不跳过 coordinator 解析到）。report-back 早返回已在上面处理。
+    #
+    # **Centralized mode**: 维持现状——centralized kinds + plan-confirm cues
+    # → classify（Leader 主导）；裸闲聊 → END（无 @mention + 无 central cue →
+    # 话筒落地）。vh39 锁的 kind-based fork 语义保真。
+    if collaboration_mode == "decentralized":
+        coord_node = agent_node_name(coordinator_id) if coordinator_id else ""
+        # standalone 版读 state 的 _handoff_targets（closure-bound 版用闭包变量）。
+        # 生产走 closure-bound 版；standalone 版主要供契约测试直调。两者判定一致：
+        # coordinator 节点必须在合法 handoff 目标集里才走群主首发，否则 END 兜底。
+        if coord_node and (not handoff_targets or coord_node in handoff_targets):
+            logger.debug(
+                "[group_graph] route_entry decentralized 裸消息（无 @）→ 群主当首发 %s"
+                "（swarm default_active_agent 语义，kind=%s 被忽略）",
+                coord_node, incoming_kind,
+            )
+            return Command(
+                goto=coord_node,
+                update={
+                    "current_speaker": coordinator_id,
+                    "turn_count": turn_count,
+                },
+            )
+        logger.debug(
+            "[group_graph] route_entry decentralized 裸消息→群主首发失败（coordinator 节点 "
+            "%s 不在合法目标）→ END 兜底",
+            coord_node or "(empty)",
+        )
+        return Command(goto=END, update={"turn_count": turn_count})
+
+    # Centralized mode: route by kind (preserves vh39 contract verbatim).
     if _looks_central(incoming_kind, incoming_message):
         return Command(goto="classify", update={"turn_count": turn_count})
 
@@ -361,6 +420,12 @@ def build_route_entry(handoff_targets: set[str]):
         incoming_message = state.get("incoming_message", "") or ""
         incoming_sender = state.get("incoming_sender", "") or ""
         incoming_kind = state.get("incoming_kind", "") or ""
+        # collaboration_mode: centralized (default) vs decentralized. Read per
+        # turn from state (injected by GroupRuntime._build_turn_input). Default
+        # "centralized" preserves the historical kind-based fork when the key
+        # is absent (resident engine path / cold invoke / old group). 与
+        # standalone route_entry 同款（vh40 锁两份同步）。
+        collaboration_mode = state.get("collaboration_mode", "") or "centralized"
 
         # ── execute-path report-back 中心化分叉（item④前置·修 split-brain）──
         # 与 standalone route_entry 同款：agent_reply + incoming_data.task_id =
@@ -369,6 +434,8 @@ def build_route_entry(handoff_targets: set[str]):
         # 走下方 _resolve_handoff_target。两份 route_entry 须同步（vh40 锁）。
         # **report-back 早返回必须在会话封顶守卫之前**：派工回报是中心化 DAG 收尾，
         # 撞顶也不能挡它（否则派工步骤永远停在 dispatched，split-brain 死锁）。
+        # **report-back 在 decentralized 模式仍走 classify**：去中心化无派工，但防御性
+        # 保留（agent_reply+task_id 理论上不出现，若出现仍走中心化兜底避免 split-brain）。
         if _is_report_back(state):
             logger.debug(
                 "[group_graph] route_entry execute-path report-back 命中："
@@ -401,7 +468,9 @@ def build_route_entry(handoff_targets: set[str]):
             return Command(goto=END, update={"turn_count": turn_count})
 
         # Member @mention FIRST — explicit ``@人`` opts into the decentralized
-        # path even when the message reads like engineering work.
+        # path even when the message reads like engineering work. The
+        # coordinator skip is now mode-conditional (decentralized mode does NOT
+        # skip @群主 — see worker._resolve_handoff_target).
         next_speaker = await _resolve_handoff_target(
             group_id, coordinator_id, incoming_sender, incoming_message,
         )
@@ -427,7 +496,46 @@ def build_route_entry(handoff_targets: set[str]):
                 },
             )
 
-        # No member @mention → route by kind (centralized vs decentralized end).
+        # No member @mention → route by mode + kind (两份 route_entry 同步·vh40 锁).
+        #
+        # **Decentralized mode**: 裸消息（无 @）→ 群主当首发（对标 LangGraph
+        # ``create_swarm`` 的 ``default_active_agent`` 兜底语义）。去中心化模式
+        # coordinator 已是普通 member 节点（``_resolve_members`` 纳入），legal_targets
+        # 含 ``agent_<coordinator_id>``。群主先应一声（不指挥、不拆任务），回完 END
+        # 或 @ 别人 handoff。防御：coordinator 节点不在合法目标集 → END 兜底。
+        # incoming_kind 仍是 coordinator_reply（route_user_message 打的），但去中心化
+        # 模式 route_entry 忽略它直接走群主首发。@群主 走 agent 节点（已在上面
+        # _resolve_handoff_target decentralized 模式不跳过 coordinator 解析到）。
+        #
+        # **Centralized mode**: 维持现状——_looks_central 判定（centralized kinds +
+        # plan-confirm cues → classify；裸闲聊 → END）。vh39 锁的 kind-based fork
+        # 语义保真。
+        if collaboration_mode == "decentralized":
+            coord_node = agent_node_name(coordinator_id) if coordinator_id else ""
+            # closure-bound 版用闭包变量 handoff_targets 判定（standalone 版读 state
+            # 的 _handoff_targets）。两者判定一致：coordinator 节点必须在合法 handoff
+            # 目标集里才走群主首发，否则 END 兜底。
+            if coord_node and coord_node in handoff_targets:
+                logger.debug(
+                    "[group_graph] route_entry decentralized 裸消息（无 @）→ 群主当首发 %s"
+                    "（swarm default_active_agent 语义，kind=%s 被忽略）",
+                    coord_node, incoming_kind,
+                )
+                return Command(
+                    goto=coord_node,
+                    update={
+                        "current_speaker": coordinator_id,
+                        "turn_count": turn_count,
+                    },
+                )
+            logger.debug(
+                "[group_graph] route_entry decentralized 裸消息→群主首发失败（coordinator "
+                "节点 %s 不在合法目标）→ END 兜底",
+                coord_node or "(empty)",
+            )
+            return Command(goto=END, update={"turn_count": turn_count})
+
+        # Centralized mode: route by kind (preserves vh39 contract verbatim).
         if _looks_central(incoming_kind, incoming_message):
             return Command(goto="classify", update={"turn_count": turn_count})
         return Command(goto=END, update={"turn_count": turn_count})

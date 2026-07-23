@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Button, Empty, Switch, Tooltip, Typography } from 'antd'
+import { Button, Empty, Switch, Tag, Tooltip, Typography } from 'antd'
 import { TeamOutlined } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
@@ -111,6 +111,22 @@ export default function ChatView() {
           <Text strong style={{ fontSize: 15, flexShrink: 0 }}>
             {isSingleChat ? (singleAgent?.name ?? '单聊') : activeGroup.name}
           </Text>
+          {/* 协作模式 Tag（仅群聊显示，单聊不显）。中心化蓝 / 去中心化橙。
+              config.collaboration_mode 缺省时兜底 centralized（老群组兼容）。 */}
+          {!isSingleChat && (
+            <Tag
+              color={
+                (activeGroup.config?.collaboration_mode as string) === 'decentralized'
+                  ? 'orange'
+                  : 'blue'
+              }
+              style={{ fontSize: 10, lineHeight: '14px', padding: '0 4px', flexShrink: 0, margin: 0 }}
+            >
+              {(activeGroup.config?.collaboration_mode as string) === 'decentralized'
+                ? '去中心化'
+                : '中心化'}
+            </Tag>
+          )}
           {isSingleChat ? (
             singleAgent?.role && (
               <Text type="secondary" style={{ fontSize: 12 }}>

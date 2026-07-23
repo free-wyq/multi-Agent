@@ -151,7 +151,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             rt._graph.ainvoke = _long_ainvoke  # real async fn (not AsyncMock+lambda)
             rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
             with patch("engine.group_runtime.emit_agent_status", AsyncMock()):
@@ -186,7 +186,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             rt._graph.ainvoke = AsyncMock(return_value={"dispatch_plan": [{"step": 1}], "ok": True})
             rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
             async def fake_emit(*args, **kwargs):
@@ -215,7 +215,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             rt._graph.ainvoke = _long_ainvoke_c7
             rt._reply_cb_factory = lambda: (lambda: None)  # type: ignore
             async def fake_emit(*args, **kwargs):
@@ -258,7 +258,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             # turn 1: agent w1 speaks (recent_speakers=[w1], turn_count=1)
             rt._graph.ainvoke = AsyncMock(return_value={
                 "turn_count": 1, "recent_speakers": ["w1"], "dispatch_plan": [],

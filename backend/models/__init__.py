@@ -8,6 +8,7 @@ from .group import (
     GroupCreatePayload,
     GroupFile,
     GroupMember,
+    get_collaboration_mode,
     get_leader_strategy,
 )
 from .llm_provider import LlmModel, LlmProvider, LlmProviderCreatePayload
@@ -34,6 +35,7 @@ __all__ = [
     "GroupMember",
     "GroupFile",
     "get_leader_strategy",
+    "get_collaboration_mode",
     "Task",
     "TaskCreatePayload",
     "TaskStatus",

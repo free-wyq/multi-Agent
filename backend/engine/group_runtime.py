@@ -76,7 +76,7 @@ from engine import coordinator as coord_mod
 from engine import worker as worker_mod
 from engine.group_graph import build_group_graph
 from events import emit_agent_status
-from models import get_leader_strategy
+from models import get_collaboration_mode, get_leader_strategy
 
 if TYPE_CHECKING:
     from models.group import Group
@@ -329,21 +329,46 @@ class GroupRuntime:
 
         Joins ``crud.list_group_members_with_agent`` (agent_id / agent_name /
         agent_role) with ``crud.list_agents`` (system_prompt) so each member dict
-        carries the full identity ``worker.build_agent_node`` closure-binds. The
-        coordinator is EXCLUDED (it is a sub-node, not an ``agent_<id>`` node) —
-        members are the group's普通成员 only, matching ``build_group_graph``'s
-        ``members`` contract.
+        carries the full identity ``worker.build_agent_node`` closure-binds.
+
+        Coordinator handling is **collaboration-mode conditional** (做法 A 图级
+        二选一):
+
+          · ``centralized`` (default): coordinator EXCLUDED — it is a sub-node
+            (``classify``/``llm_decide``/…), NOT an ``agent_<id>`` node. Members
+            are the group's普通成员 only, matching ``build_group_graph``'s
+            ``members`` contract. This is the historical behaviour (supervisor
+            subgraph owns engineering-demand + plan-confirm turns).
+          · ``decentralized``: coordinator INCLUDED as an普通 member with an
+            ``agent_<coordinator_id>`` node (no编排权 — route_entry forks裸消息
+            to END, not to classify). 纯 swarm 范式：群里无群主概念，裸消息话筒
+            落地 END，@群主 合法 handoff。The coordinator still carries its
+            system_prompt (resolved via ``_resolve_leader_identity`` for the
+            name/prompt, then merged in here as a member dict).
+
+        The mode is read fresh from the DB (group config) so a mode toggle
+        takes effect on the next ``compile_graph`` (which is what
+        ``recompile_group`` triggers — the caller owns the recompile cadence).
         """
         from store import crud  # local import avoids a module-load DB touch
+
+        # 读取 collaboration_mode（每回合现读，与 _resolve_group_config 同源）。
+        # decentralized 模式下 coordinator 纳入 members 建其 agent 节点（无编排权）；
+        # centralized 维持排除（coordinator 走 supervisor 子图）。
+        grp = await crud.get_group(self.group_id)
+        mode = get_collaboration_mode(grp.config if grp else None)
 
         member_rows = await crud.list_group_members_with_agent(self.group_id)
         agents = {a.id: a for a in await crud.list_agents()}
         members: list[dict[str, Any]] = []
         for m in member_rows:
             agent_id = getattr(m, "agent_id", "") or ""
-            if not agent_id or agent_id == self.coordinator_id:
-                # skip empty + the coordinator (coordinator is a sub-node, not
-                # an agent_<id> node — route_entry owns the Leader entry).
+            if not agent_id:
+                continue
+            # centralized 模式排除 coordinator（coordinator 是子图节点不是 agent 节点，
+            # route_entry owns the Leader entry）。decentralized 模式不排除——coordinator
+            # 纳入 members 建其 agent 节点（@群主 合法 handoff，无编排权）。
+            if mode == "centralized" and agent_id == self.coordinator_id:
                 continue
             agent = agents.get(agent_id)
             members.append({
@@ -358,6 +383,22 @@ class GroupRuntime:
                 # agent node now mirrors it.
                 "mounted_skills": list(getattr(agent, "mounted_skills", None) or []) if agent else [],
             })
+
+        # decentralized 模式：coordinator 不在 member_rows 里（它是群主不是成员），
+        # 但要把它纳入 members 建其 agent 节点。从 agents 表取其 identity（name/role/
+        # system_prompt/mounted_skills），以「普通 member」身份加入（无编排权）。
+        if mode == "decentralized" and self.coordinator_id:
+            coord_agent = agents.get(self.coordinator_id)
+            if coord_agent is not None and not any(
+                m["agent_id"] == self.coordinator_id for m in members
+            ):
+                members.append({
+                    "agent_id": self.coordinator_id,
+                    "agent_name": getattr(coord_agent, "name", "") or "",
+                    "agent_role": getattr(coord_agent, "role", "") or "",
+                    "system_prompt": getattr(coord_agent, "system_prompt", "") or "",
+                    "mounted_skills": list(getattr(coord_agent, "mounted_skills", None) or []),
+                })
         return members
 
     # ── hard stop (cancel_turn) ──────────────────────────────
@@ -497,24 +538,26 @@ class GroupRuntime:
             "system_prompt": getattr(agent, "system_prompt", "") or "" if agent else "",
         }
 
-    async def _resolve_group_config(self) -> tuple[bool, str]:
-        """Read the group's per-turn config flags: ``auto_confirm`` + ``leader_strategy``.
+    async def _resolve_group_config(self) -> tuple[bool, str, str]:
+        """Read the group's per-turn config flags: ``auto_confirm`` + ``leader_strategy`` + ``collaboration_mode``.
 
         Fresh per invoke_turn (mirrors the resident ``_handle_notify`` per-notify
         read) so the coordinator sub-nodes reflect the *current* group config
-        (a user toggling 直接干 / editing Leader strategy between turns takes
-        effect without an engine rebuild). ``auto_confirm`` defaults False,
-        ``leader_strategy`` defaults ``""`` (via :func:`models.get_leader_strategy`,
-        single source for the default + key name). Best-effort: a group-row miss
+        (a user toggling 直接干 / editing Leader strategy / switching collaboration
+        mode between turns takes effect without an engine rebuild).
+        ``auto_confirm`` defaults False, ``leader_strategy`` defaults ``""`` (via
+        :func:`models.get_leader_strategy`, single source for the default + key
+        name), ``collaboration_mode`` defaults ``"centralized"`` (via
+        :func:`models.get_collaboration_mode`). Best-effort: a group-row miss
         degrades to the defaults (the graph still runs).
         """
         from store import crud
 
         grp = await crud.get_group(self.group_id)
         if not grp:
-            return False, ""
+            return False, "", "centralized"
         auto_confirm = bool((grp.config or {}).get("auto_confirm", False))
-        return auto_confirm, get_leader_strategy(grp.config)
+        return auto_confirm, get_leader_strategy(grp.config), get_collaboration_mode(grp.config)
 
     def _reply_cb_factory(self):
         """Build the engine-side reply callback for the duration of one turn.
@@ -555,7 +598,7 @@ class GroupRuntime:
         incoming_sender: str,
         incoming_data: dict[str, Any] | None,
         leader: dict[str, str],
-        group_config: tuple[bool, str],
+        group_config: tuple[bool, str, str],
     ) -> dict[str, Any]:
         """Build the initial GroupState for one fresh-thread turn.
 
@@ -571,12 +614,13 @@ class GroupRuntime:
         Args mirror the resident ``_handle_notify``'s injection: identity
         (``group_id`` / Leader ``agent_id``+``agent_name``+``system_prompt`` +
         ``coordinator_id``), the incoming message (``incoming_*``), the group
-        config flags (``auto_confirm`` / ``leader_strategy``), and the resident
-        mirrors (``memory`` / ``dispatch_plan``). ``turn_count`` /
-        ``recent_speakers`` reset to a fresh-turn baseline so the防连发 guard +
-        the handoff cap apply from the first speaker.
+        config flags (``auto_confirm`` / ``leader_strategy`` /
+        ``collaboration_mode``), and the resident mirrors (``memory`` /
+        ``dispatch_plan``). ``turn_count`` / ``recent_speakers`` reset to a
+        fresh-turn baseline so the防连发 guard + the handoff cap apply from the
+        first speaker.
         """
-        auto_confirm, leader_strategy = group_config
+        auto_confirm, leader_strategy, collaboration_mode = group_config
         return {
             # identity (coordinator sub-nodes read these verbatim)
             "group_id": self.group_id,
@@ -592,6 +636,7 @@ class GroupRuntime:
             # group config (injected per turn, fresh — mirrors resident engine)
             "auto_confirm": auto_confirm,
             "leader_strategy": leader_strategy,
+            "collaboration_mode": collaboration_mode,
             # resident cross-turn state mirrors (seeded as initial state, not
             # appended — continuity without the resident engine's accumulation)
             "memory": list(self._memory),

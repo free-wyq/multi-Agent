@@ -487,6 +487,7 @@ async def _resolve_handoff_target(
     coordinator_id: str,
     sender_id: str,
     content: str,
+    collaboration_mode: str = "centralized",
 ) -> str | None:
     """Resolve the @mention in ``content`` to the next speaker's agent_id.
 
@@ -496,13 +497,19 @@ async def _resolve_handoff_target(
     ``route_mentions``'s 30s anti-loop + A2A cap:
 
       - skip self-mention (``@自己`` is a no-op handoff);
-      - skip the coordinator as a handoff target — in the decentralized swarm
-        path the coordinator is reached via ``route_entry`` for
-        engineering/plan-confirm turns, NOT via a worker's @mention (returning
-        the coordinator here would re-introduce the「协调者每轮插话」defect
-        the group graph is built to eliminate; a worker that wants the Leader
-        ends its turn with no @mention and the next user turn routes to the
-        Leader).
+      - skip the coordinator as a handoff target **in centralized mode** —
+        in the decentralized swarm path the coordinator is reached via
+        ``route_entry`` for engineering/plan-confirm turns, NOT via a worker's
+        @mention (returning the coordinator here would re-introduce the
+        「协调者每轮插话」defect the group graph is built to eliminate; a worker
+        that wants the Leader ends its turn with no @mention and the next user
+        turn routes to the Leader). In **decentralized mode** the coordinator
+        IS a合法 handoff target (it is an普通 member node with no编排权 — @群主
+        hands the turn to the群主 agent node, fixing the「@群主死胡同」defect).
+        Mode is read from the caller (``make_agent_node`` reads it off
+        ``state["collaboration_mode"]``) — defaults to ``"centralized"`` so the
+        historical behaviour is preserved when the caller doesn't pass it
+        (resident worker graph / cold invoke / old group).
       - first resolved mention wins (single next speaker — handoff is serial,
         one node runs at a time; ``route_user_message``'s first-mention-wins
         semantics preserved).
@@ -517,15 +524,40 @@ async def _resolve_handoff_target(
         return None
     members = await crud.list_group_members_with_agent(group_id)
     agents = await crud.list_agents()
+    # coordinator_id 的 agent row（用于 decentralized 模式 @群主 name/role 兜底匹配）。
+    # centralized 模式不取（coordinator 不该被 @mention 命中，下方 coord-skip 守卫拦截）。
+    coord_agent = None
+    if coordinator_id and collaboration_mode == "decentralized":
+        coord_agent = next((a for a in agents if getattr(a, "id", None) == coordinator_id), None)
     for mention in mentions:
         if mention == sender_id:
             continue  # self-mention: no-op
         target_id = resolve_mention(members, mention, agents)
+        # decentralized 模式兜底：token 命中 coordinator_id / coordinator 名字 / role
+        # （coordinator 不在 members 表里，resolve_mention 只看 members 会漏掉群主 →
+        # @群主 死胡同）。centralized 模式不走此兜底（coord-skip 守卫下方拦截）。
+        if (
+            not target_id
+            and coordinator_id
+            and collaboration_mode == "decentralized"
+            and coord_agent is not None
+            and (
+                mention == coordinator_id
+                or mention in (coord_agent.name, coord_agent.role)
+            )
+        ):
+            target_id = coordinator_id
         if not target_id or target_id == sender_id:
             continue
-        if coordinator_id and target_id == coordinator_id:
-            # decentralized path: workers do not hand off back to the Leader
+        if (
+            coordinator_id
+            and target_id == coordinator_id
+            and collaboration_mode != "decentralized"
+        ):
+            # centralized path: workers do not hand off back to the Leader
             # via @mention (route_entry owns Leader entry). Treat as no handoff.
+            # decentralized mode: @群主 is合法 (coordinator is an普通 member
+            # node) — do NOT skip, fall through to return target_id.
             continue
         return target_id
     return None
@@ -621,6 +653,14 @@ async def make_agent_node(
     path and is owned by the engine, not this node.
     """
     group_id = state.get("group_id", "")
+
+    # collaboration_mode: read per turn from state (injected by
+    # GroupRuntime._build_turn_input). Default "centralized" preserves the
+    # historical behaviour (coordinator_id skip in _resolve_handoff_target)
+    # when the key is absent (resident worker graph / cold invoke / old group).
+    # Passed into _resolve_handoff_target so @群主 in decentralized mode is a
+    #合法 handoff (coordinator is an普通 member node), fixing the「@群主死胡同」.
+    collaboration_mode = state.get("collaboration_mode", "") or "centralized"
 
     # ``is_dispatch_fanout`` (a ``Send`` from ``node_dispatch_next_group`` →
     # ``incoming_kind == "coordinator_task"``) runs N agent nodes in ONE
@@ -807,7 +847,7 @@ async def make_agent_node(
             await rt_speak.record_speech()
         # 4. resolve next speaker from the reply's @mention.
         next_speaker = await _resolve_handoff_target(
-            group_id, coordinator_id, agent_id, content,
+            group_id, coordinator_id, agent_id, content, collaboration_mode,
         )
 
     # 5. decide turn end vs handoff. ``turn_count`` (the in-graph handoff-chain

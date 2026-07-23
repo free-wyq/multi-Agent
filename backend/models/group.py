@@ -29,10 +29,19 @@ class GroupConfig(TypedDict, total=False):
         ``node_llm_decide`` so the Leader's 拆解/派工 decisions honour it.
         Empty string when unset (coordinator runs with no extra strategy).
         Written by the group settings Modal (GroupPage) via ``update_group``.
+      collaboration_mode: 群组协作模式 — "centralized" (default, 群主主导
+        supervisor 子图 + 拆计划派工) or "decentralized" (纯 swarm，群里无群主
+        概念，裸消息群主当首发对标 LangGraph ``create_swarm`` 的
+        ``default_active_agent`` 兜底，@群主合法 handoff). 走 auto_confirm 同款
+        config 链路（model→state→每回合现读注入），但额外让 route_entry 按 mode
+        分流 + compile_graph 按 mode 决定 coordinator 是否纳入 members（做法 A 的
+        图级二选一，切换 mode 触发 recompile_group 重编译). 单聊群 (single_chat)
+        不进群图，mode 对单聊无意义。老群组兜底 "centralized"。
     """
 
     auto_confirm: bool
     leader_strategy: str
+    collaboration_mode: str
 
 
 def get_leader_strategy(config: dict[str, Any] | None) -> str:
@@ -47,6 +56,28 @@ def get_leader_strategy(config: dict[str, Any] | None) -> str:
     if not config:
         return ""
     return str(config.get("leader_strategy", "") or "")
+
+
+def get_collaboration_mode(config: dict[str, Any] | None) -> str:
+    """Safe accessor for ``Group.config["collaboration_mode"]``.
+
+    Returns ``"centralized"`` (default) or ``"decentralized"`` — never ``""``.
+    Centralized here so the read path (``GroupRuntime._resolve_group_config`` +
+    ``_resolve_members`` + ``route_entry`` + ``_resolve_handoff_target``) has
+    one source of truth for the default + key name. ``"centralized"`` is the
+    default (also for老群组兜底 — a group with no config / missing key reads
+    centralized, preserving the current supervisor-subgraph behaviour).
+
+    The mode drives both the图装配 (decentralized includes the coordinator as
+    an普通 member with an ``agent_<coordinator_id>`` node; centralized excludes
+    it as today — 做法 A 图级二选一) and the route_entry 分流 (decentralized
+    裸消息群主当首发对标 swarm ``default_active_agent`` / @群主 合法 handoff;
+    centralized 裸消息 → classify).
+    """
+    if not config:
+        return "centralized"
+    mode = str(config.get("collaboration_mode", "") or "")
+    return mode if mode in ("centralized", "decentralized") else "centralized"
 
 
 class Group(BaseModel):

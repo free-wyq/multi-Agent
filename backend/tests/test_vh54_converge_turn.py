@@ -176,7 +176,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             captured = {}
             async def _fake_ainvoke(turn_input, config=None):
                 captured["turn_input"] = dict(turn_input)
@@ -207,7 +207,7 @@ async def assert_contract() -> list[str]:
             rt._resolve_leader_identity = AsyncMock(return_value={
                 "agent_id": "c1", "agent_name": "协调者", "system_prompt": "sp",
             })
-            rt._resolve_group_config = AsyncMock(return_value=(False, ""))
+            rt._resolve_group_config = AsyncMock(return_value=(False, "", "centralized"))
             captured = {}
             async def _fake_ainvoke(turn_input, config=None):
                 captured["turn_input"] = dict(turn_input)
