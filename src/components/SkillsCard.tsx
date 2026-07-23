@@ -9,7 +9,7 @@ interface SkillsCardProps {
 /** source → Tag 颜色（与 SkillPage SOURCE_COLOR 对齐，保持全应用一致）。 */
 const SOURCE_COLOR: Record<string, string> = {
   builtin: 'green',
-  custom: 'blue',
+  custom: 'gold',
   market: 'orange',
 }
 

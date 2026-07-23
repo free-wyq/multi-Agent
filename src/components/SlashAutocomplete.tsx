@@ -21,7 +21,7 @@ interface SlashAutocompleteProps {
  * 鼠标点击/悬停选中。
  *
  * 与 ChatPanel 既有 @mention 下拉（ChatPanel.tsx 行 401-441）视觉对齐：同样绝对定位贴
- * 输入框上方（bottom:100%）、白底圆角阴影、hover/active 项 #e6f4ff 高亮——保持聊天区
+ * 输入框上方（bottom:100%）、白底圆角阴影、hover/active 项 #FFF3ED 高亮——保持聊天区
  * 补全交互一致，零学习成本。
  *
  * 职责边界（纯展示 + 事件上抛）：
@@ -94,7 +94,7 @@ export default function SlashAutocomplete({
             style={{
               padding: '8px 12px',
               cursor: 'pointer',
-              background: active ? '#e6f4ff' : '#fff',
+              background: active ? '#FFF3ED' : '#fff',
               display: 'flex',
               flexDirection: 'column',
               gap: 2,
@@ -105,8 +105,8 @@ export default function SlashAutocomplete({
                 style={{
                   fontSize: 13,
                   fontWeight: 600,
-                  color: '#1677ff',
-                  background: '#f0f5ff',
+                  color: '#F26522',
+                  background: '#FFF3ED',
                   padding: '1px 6px',
                   borderRadius: 4,
                 }}

@@ -28,7 +28,7 @@ import LogPanel from '../components/LogPanel'
 
 const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
   submitted: <ClockCircleOutlined />,
-  working: <DashboardOutlined style={{ color: '#1677ff' }} />,
+  working: <DashboardOutlined style={{ color: '#F26522' }} />,
   completed: <CheckCircleOutlined style={{ color: '#52c41a' }} />,
   failed: <CloseCircleOutlined style={{ color: '#ff4d4f' }} />,
   canceled: <CloseCircleOutlined />,
@@ -37,7 +37,7 @@ const STATUS_ICON: Record<TaskStatus, React.ReactNode> = {
 
 const STATUS_COLOR: Record<TaskStatus, string> = {
   submitted: '#999',
-  working: '#1677ff',
+  working: '#F26522',
   completed: '#52c41a',
   failed: '#ff4d4f',
   canceled: '#d9d9d9',
@@ -280,7 +280,7 @@ export default function TaskPage() {
           <span>
             <PaperClipOutlined /> 交付物
             {artifactEntries.length > 0 && (
-              <Tag color="blue" style={{ marginInlineStart: 8 }}>
+              <Tag color="orange" style={{ marginInlineStart: 8 }}>
                 {artifactEntries.length} 个文件
               </Tag>
             )}

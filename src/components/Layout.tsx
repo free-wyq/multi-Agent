@@ -12,8 +12,8 @@ import SettingsModal, { type NavKey } from './SettingsModal'
 import AgentPage from '../pages/AgentPage'
 import SkillPage from '../pages/SkillPage'
 
-/** 品牌蓝（与 Sidebar 一致）。 */
-const BRAND = '#0A5ACF'
+/** 品牌橙（与 Sidebar 一致）。 */
+const BRAND = '#F26522'
 
 type View = 'chat' | 'agent' | 'skill'
 

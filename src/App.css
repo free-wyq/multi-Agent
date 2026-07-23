@@ -8,7 +8,7 @@ html, body, #root {
    * 锁死后所有滚动只能发生在指定的 overflow:auto 容器里：左侧菜单列表、右侧消息列表。 */
   overflow: hidden;
   font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  background: #eef1f6;
+  background: #F0F2F5;
 }
 
 /* ── 层次感色彩系统（2026-07-12）──────────────────────────
@@ -18,7 +18,7 @@ html, body, #root {
  *   后退 ──────────────────────────────────────── 前凸
  *   ┌─────────────┬───────────────┬──────────────┐
  *   │ app 外层     │ 主区底         │ 卡片/面板    │
- *   │ #eef1f6 冷灰 │ #f4f6fa 次冷灰 │ #ffffff 纯白  │
+ *   │ #F0F2F5 中性灰│ #F8F9FA 次中性灰│ #ffffff 纯白  │
  *   └─────────────┴───────────────┴──────────────┘
  *
  *   顶栏/侧栏 = #ffffff 浮起，靠 box-shadow 与主区底拉开（不靠同色叠），
@@ -26,8 +26,8 @@ html, body, #root {
  *   每级灰度差约 5–8 个色阶，肉眼可辨又不刺眼。
  * ──────────────────────────────────────────────────────── */
 :root {
-  --app-bg: #eef1f6;        /* app 最外层冷灰（body background，下沉后退） */
-  --surface-main: #f4f6fa;  /* 主内容区次冷灰（介于 app 与白卡之间） */
+  --app-bg: #F0F2F5;        /* app 最外层中性灰（2026-07-23 冷灰→中性灰去蓝调，与暖橙搭） */
+  --surface-main: #F8F9FA;  /* 主内容区次中性灰（介于 app 与白卡之间） */
   --surface-raised: #ffffff;/* 浮起面：顶栏/侧栏/卡片 */
   --border-soft: #e6e9ef;   /* 主区与浮起面之间的柔和分隔线 */
   --border-card: #eceef3;   /* 卡片边线 */

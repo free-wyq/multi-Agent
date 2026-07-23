@@ -10,7 +10,7 @@ interface ScheduleListCardProps {
 /** schedule_type → Tag 颜色 + 标签（与 SchedulePage SCHEDULE_META 对齐，全应用一致）。 */
 const SCHEDULE_META: Record<string, { color: string; label: string }> = {
   cron: { color: 'geekblue', label: 'cron' },
-  interval: { color: 'blue', label: '定间隔' },
+  interval: { color: 'orange', label: '定间隔' },
   once: { color: 'purple', label: '一次性' },
 }
 

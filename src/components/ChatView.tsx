@@ -112,14 +112,14 @@ export default function ChatView() {
           <Text strong style={{ fontSize: 15, flexShrink: 0 }}>
             {isSingleChat ? (singleAgent?.name ?? activeConversation?.name ?? '单聊') : (activeGroup?.name ?? '群聊')}
           </Text>
-          {/* 协作模式 Tag（仅群聊显示，单聊不显）。中心化蓝 / 去中心化橙。
+          {/* 协作模式 Tag（仅群聊显示，单聊不显）。中心化橙 / 去中心化紫。
               config.collaboration_mode 缺省时兜底 centralized（老群组兼容）。 */}
           {!isSingleChat && activeGroup && (
             <Tag
               color={
                 (activeGroup.config?.collaboration_mode as string) === 'decentralized'
-                  ? 'orange'
-                  : 'blue'
+                  ? 'purple'
+                  : 'orange'
               }
               style={{ fontSize: 10, lineHeight: '14px', padding: '0 4px', flexShrink: 0, margin: 0 }}
             >

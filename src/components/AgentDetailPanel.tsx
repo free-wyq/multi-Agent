@@ -314,7 +314,7 @@ function AgentDetailView({
           <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', fontSize: 12 }}>
             {agent.model && (
               <span style={{ color: '#666' }}>
-                模型: <Tag color="blue" style={{ margin: 0 }}>{agent.model}</Tag>
+                模型: <Tag color="orange" style={{ margin: 0 }}>{agent.model}</Tag>
               </span>
             )}
             {agent.max_turns != null && (

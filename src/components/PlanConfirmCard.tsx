@@ -16,7 +16,7 @@ interface PlanConfirmCardProps {
 function stepBadge(status: string): { color: string; label: string } {
   switch (status) {
     case 'completed': return { color: 'green', label: '已完成' }
-    case 'dispatched': return { color: 'blue', label: '已派发' }
+    case 'dispatched': return { color: 'orange', label: '已派发' }
     case 'failed': return { color: 'red', label: '失败' }
     case 'pending':
     default: return { color: 'default', label: '待执行' }

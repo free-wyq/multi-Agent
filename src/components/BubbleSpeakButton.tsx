@@ -39,7 +39,7 @@ export default function BubbleSpeakButton({ content }: BubbleSpeakButtonProps) {
         className={`bubble-action-btn${isThisSpeaking ? ' is-speaking' : ''}`}
         onClick={handleClick}
         // 朗读中高亮，提示当前正在读的是这条
-        style={{ color: isThisSpeaking ? '#0A5ACF' : undefined }}
+        style={{ color: isThisSpeaking ? '#F26522' : undefined }}
         icon={isThisSpeaking ? <PauseOutlined /> : <SoundOutlined />}
       />
     </Tooltip>

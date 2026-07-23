@@ -247,7 +247,7 @@ function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
   if (id === 'user') {
     return (
       <div className="chat-avatar chat-avatar--user">
-        <UserOutlined style={{ fontSize: 16, color: '#1677ff' }} />
+        <UserOutlined style={{ fontSize: 16, color: '#F26522' }} />
       </div>
     )
   }
@@ -330,7 +330,7 @@ const HighlightMessage = memo(function HighlightMessage({
         if (part.startsWith('@')) {
           const name = part.slice(1)
           if (memberNames.has(name)) {
-            return <Tag key={i} color="blue" style={{ margin: 0, padding: '0 4px', lineHeight: '18px' }}>{part}</Tag>
+            return <Tag key={i} color="orange" style={{ margin: 0, padding: '0 4px', lineHeight: '18px' }}>{part}</Tag>
           }
         }
         return <span key={i}>{part}</span>
@@ -1463,13 +1463,13 @@ export default function ChatPanel({
                   style={{
                     padding: '8px 12px',
                     cursor: 'pointer',
-                    background: idx === mentionIndex ? '#e6f4ff' : '#fff',
+                    background: idx === mentionIndex ? '#FFF3ED' : '#fff',
                     display: 'flex',
                     alignItems: 'center',
                     gap: 8,
                   }}
                 >
-                  <RobotOutlined style={{ color: '#1677ff' }} />
+                  <RobotOutlined style={{ color: '#F26522' }} />
                   <div>
                     <div style={{ fontSize: 13 }}>{getMemberDisplayName(m)}</div>
                     <div style={{ fontSize: 11, color: '#999' }}>{m.agent_role}</div>

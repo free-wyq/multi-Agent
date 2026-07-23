@@ -102,7 +102,7 @@ export default function MemberCapabilityOverview({
     prefix?: string
   }> = [
     { key: 'role', icon: <BulbOutlined />, title: '角色技能', items: roleSkills, color: '#722ed1', tagColor: 'purple' as const },
-    { key: 'mounted', icon: <ToolOutlined />, title: '已挂载技能', items: mountedSkillNames, color: '#1677ff', tagColor: 'geekblue' as const },
+    { key: 'mounted', icon: <ToolOutlined />, title: '已挂载技能', items: mountedSkillNames, color: '#F26522', tagColor: 'geekblue' as const },
     { key: 'allowed', icon: <ApiOutlined />, title: '可用工具', items: allowedTools, color: '#52c41a', tagColor: 'green' as const },
     { key: 'denied', icon: <ToolOutlined />, title: '禁用工具', items: deniedTools, color: '#ff4d4f', tagColor: 'red' as const, prefix: '禁:' },
     { key: 'mcp', icon: <ApiOutlined />, title: 'MCP 工具源', items: mountedMcpNames, color: '#fa8c16', tagColor: 'orange' as const },
@@ -111,7 +111,7 @@ export default function MemberCapabilityOverview({
   return (
     <div style={{ padding: '12px 0' }}>
       <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10, display: 'flex', alignItems: 'center', gap: 6 }}>
-        <ApiOutlined style={{ color: '#1677ff' }} />
+        <ApiOutlined style={{ color: '#F26522' }} />
         成员能力概况
       </div>
       {sections.length === 0 ? (

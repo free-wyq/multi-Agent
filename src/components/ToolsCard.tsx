@@ -61,8 +61,8 @@ function ToolGroup({
                 style={{
                   fontSize: 12,
                   fontWeight: 600,
-                  color: '#1677ff',
-                  background: '#f0f5ff',
+                  color: '#F26522',
+                  background: '#FFF3ED',
                   padding: '1px 6px',
                   borderRadius: 4,
                   marginRight: 8,
@@ -88,11 +88,11 @@ export default function ToolsCard({ result }: ToolsCardProps) {
   return (
     <Card
       size="small"
-      style={{ marginBottom: 12, borderColor: '#91d5ff' }}
+      style={{ marginBottom: 12, borderColor: '#FFD3B0' }}
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <ToolOutlined style={{ color: '#1677ff' }} />
-          <Tag color="blue" style={{ margin: 0 }}>工具清单</Tag>
+          <ToolOutlined style={{ color: '#F26522' }} />
+          <Tag color="orange" style={{ margin: 0 }}>工具清单</Tag>
           <span style={{ fontSize: 13, color: '#666' }}>
             共 {result.total ?? internal.length + mcp.length} 个
             （内置 {internal.length} · MCP {mcp.length}）
@@ -119,7 +119,7 @@ export default function ToolsCard({ result }: ToolsCardProps) {
         <ToolGroup
           title="内置工具"
           icon={<ToolOutlined />}
-          color="#1677ff"
+          color="#F26522"
           tools={internal}
         />
         <ToolGroup

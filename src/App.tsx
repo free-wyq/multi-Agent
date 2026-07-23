@@ -22,7 +22,7 @@ import Layout from './components/Layout'
  * 放在 BusEventProvider 外——偏好是比群组 WS 更外层的全局态，且 ChatView 标题栏
  * 开关需在未选群时也能切（虽然实际朗读要等有群才触发）。
  *
- * 品牌蓝统一为 #0A5ACF（极简开发者工具风格）。
+ * 品牌橙统一为 #F26522（2026-07-23 由蓝迁橙；浅橙高亮 #FF8A50 / 深端 #C44A15）。
  */
 function App() {
   const [activeGroupId, setActiveGroupId] = useState<string | null>(null)
@@ -31,7 +31,7 @@ function App() {
     <ConfigProvider
       theme={{
         token: {
-          colorPrimary: '#0A5ACF',
+          colorPrimary: '#F26522',
           borderRadius: 6,
         },
       }}

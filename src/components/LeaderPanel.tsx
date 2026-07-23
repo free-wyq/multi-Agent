@@ -6,7 +6,7 @@ import type { PlanStep } from '../services/api'
 function stepBadge(status: string): { color: string; label: string } {
   switch (status) {
     case 'completed': return { color: 'green', label: '已完成' }
-    case 'dispatched': return { color: 'blue', label: '已派发' }
+    case 'dispatched': return { color: 'orange', label: '已派发' }
     case 'failed': return { color: 'red', label: '失败' }
     case 'pending':
     default: return { color: 'default', label: '待执行' }
@@ -109,7 +109,7 @@ export default function LeaderPanel() {
                       }}
                     >
                       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-                        <span style={{ fontWeight: 600, color: '#1677ff' }}>步骤 {step.step}</span>
+                        <span style={{ fontWeight: 600, color: '#F26522' }}>步骤 {step.step}</span>
                         <Tag color={badge.color}>{badge.label}</Tag>
                         <span style={{ fontSize: 12, color: '#666' }}>
                           {step.agent_name || step.agent_id}
@@ -151,7 +151,7 @@ export default function LeaderPanel() {
                   const data = (e.data || {}) as Record<string, unknown>
                   const isDispatch = e.kind === 'dispatch'
                   const isComplete = e.kind === 'complete'
-                  const color = isDispatch ? 'blue' : isComplete ? 'green' : 'red'
+                  const color = isDispatch ? 'orange' : isComplete ? 'green' : 'red'
                   const agentName = String(data['agent_name'] || e.agentId)
                   const step = data['step'] != null ? `步骤 ${data['step']}` : ''
                   const label = isDispatch

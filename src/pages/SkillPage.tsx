@@ -45,14 +45,14 @@ import {
 /* source → Tag 颜色 */
 const SOURCE_COLOR: Record<string, string> = {
   builtin: 'green',
-  custom: 'blue',
+  custom: 'gold',
   market: 'orange',
 }
 
 /* 市场 hub → Tag 颜色（catalog 内置 / remote 远程 Hub） */
 const HUB_COLOR: Record<string, string> = {
   catalog: 'green',
-  remote: 'blue',
+  remote: 'gold',
 }
 
 export default function SkillPage() {
@@ -531,7 +531,7 @@ export default function SkillPage() {
                                 </div>
                                 <Space wrap>
                                   {skill.mounted_to.map((id) => (
-                                    <Tag key={id} color="blue">
+                                    <Tag key={id} color="orange">
                                       {agentNameMap.get(id) ?? id}
                                     </Tag>
                                   ))}

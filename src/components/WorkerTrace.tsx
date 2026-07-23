@@ -10,7 +10,7 @@ interface WorkerTraceProps {
 /** 状态 → 徽标颜色 */
 const STATUS_BADGE: Record<string, { status: 'success' | 'processing' | 'default' | 'error'; color: string; label: string }> = {
   idle: { status: 'success', color: '#52c41a', label: '空闲' },
-  executing: { status: 'processing', color: '#1677ff', label: '执行中' },
+  executing: { status: 'processing', color: '#F26522', label: '执行中' },
   offline: { status: 'default', color: '#d9d9d9', label: '离线' },
   failed: { status: 'error', color: '#ff4d4f', label: '失败' },
 }
@@ -84,7 +84,7 @@ export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
       <div style={{ marginBottom: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
         <Badge status={statusInfo.status as any} />
         <span style={{ color: statusInfo.color, fontWeight: 600 }}>{statusInfo.label}</span>
-        <Tag color="blue">{agentName}</Tag>
+        <Tag color="orange">{agentName}</Tag>
         {agentStatuses[agentId]?.current_task_id && (
           <span style={{ fontSize: 12, color: '#999' }}>
             task: {agentStatuses[agentId].current_task_id.slice(0, 8)}...
@@ -169,8 +169,8 @@ export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
               <div
                 key={e.id}
                 style={{
-                  background: phase === 'final' ? '#f0f5ff' : '#fafafa',
-                  borderLeft: `3px solid ${phase === 'final' ? '#1677ff' : '#d9d9d9'}`,
+                  background: phase === 'final' ? '#FFF3ED' : '#fafafa',
+                  borderLeft: `3px solid ${phase === 'final' ? '#F26522' : '#d9d9d9'}`,
                   padding: '8px 12px',
                   borderRadius: 4,
                   marginBottom: 6,
@@ -194,13 +194,13 @@ export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
       {/* 流式生成中（PL-08 逐字流式） */}
       {streamingText && (
         <>
-          <div style={{ margin: '16px 0 8px', fontSize: 12, color: '#1677ff', fontWeight: 600 }}>
+          <div style={{ margin: '16px 0 8px', fontSize: 12, color: '#F26522', fontWeight: 600 }}>
             正在生成…
           </div>
           <div
             style={{
-              background: '#e6f4ff',
-              borderLeft: '3px solid #1677ff',
+              background: '#FFF3ED',
+              borderLeft: '3px solid #F26522',
               padding: '8px 12px',
               borderRadius: 4,
               marginBottom: 6,
@@ -210,7 +210,7 @@ export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
               whiteSpace: 'pre-wrap',
             }}
           >
-            <span style={{ fontSize: 11, color: '#1677ff', marginRight: 6 }}>
+            <span style={{ fontSize: 11, color: '#F26522', marginRight: 6 }}>
               [流式]
             </span>
             {streamingText}
@@ -219,7 +219,7 @@ export default function WorkerTrace({ agentId, agentName }: WorkerTraceProps) {
                 display: 'inline-block',
                 width: 7,
                 height: 14,
-                background: '#1677ff',
+                background: '#F26522',
                 marginLeft: 2,
                 verticalAlign: 'text-bottom',
                 animation: 'wt-blink 1s steps(2) infinite',

@@ -412,9 +412,9 @@ export default function GroupInfoDrawer({
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
                   <span style={{
                     position: 'absolute', left: 0, top: 2, bottom: 2, width: 3,
-                    borderRadius: 2, background: '#1677ff',
+                    borderRadius: 2, background: '#F26522',
                   }} />
-                  <FolderOpenOutlined style={{ color: '#1677ff', fontSize: 16 }} />
+                  <FolderOpenOutlined style={{ color: '#F26522', fontSize: 16 }} />
                   <span>群文件</span>
                   <span style={{ fontSize: 11, color: '#999', fontWeight: 400, marginLeft: 2 }}>
                     ({groupFiles.length})
@@ -463,7 +463,7 @@ export default function GroupInfoDrawer({
                               flexShrink: 0,
                             }}
                             onMouseEnter={(e) => {
-                              (e.currentTarget as HTMLDivElement).style.background = '#e6f4ff'
+                              (e.currentTarget as HTMLDivElement).style.background = '#FFF3ED'
                             }}
                             onMouseLeave={(e) => {
                               (e.currentTarget as HTMLDivElement).style.background = 'transparent'
@@ -568,7 +568,7 @@ export default function GroupInfoDrawer({
                           <Avatar
                             size="small"
                             icon={item.isCoordinator ? <PushpinOutlined /> : <RobotOutlined />}
-                            style={{ background: item.isCoordinator ? '#722ed1' : '#1677ff', fontSize: 12 }}
+                            style={{ background: item.isCoordinator ? '#722ed1' : '#F26522', fontSize: 12 }}
                           />
                         }
                         title={

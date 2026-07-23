@@ -111,7 +111,7 @@ export default function SessionList({ groups, loading, onNewSession }: SessionLi
                   padding: '10px 12px',
                   borderRadius: 6,
                   cursor: 'pointer',
-                  background: active ? '#e6f4ff' : 'transparent',
+                  background: active ? '#FFF3ED' : 'transparent',
                   transition: 'background 0.2s',
                   marginBottom: 2,
                   display: 'flex',
@@ -143,7 +143,7 @@ export default function SessionList({ groups, loading, onNewSession }: SessionLi
                       style={{
                         fontWeight: active ? 600 : 400,
                         fontSize: 14,
-                        color: active ? '#1677ff' : '#333',
+                        color: active ? '#F26522' : '#333',
                         overflow: 'hidden',
                         textOverflow: 'ellipsis',
                         whiteSpace: 'nowrap',

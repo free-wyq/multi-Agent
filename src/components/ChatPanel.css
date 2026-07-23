@@ -26,11 +26,11 @@
 }
 
 .chat-avatar--user {
-  background: linear-gradient(135deg, #e6f4ff 0%, #bae0ff 100%);
+  background: linear-gradient(135deg, #FFF3ED 0%, #FFD3B0 100%);
   display: flex;
   align-items: center;
   justify-content: center;
-  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.2);
+  box-shadow: 0 2px 8px rgba(242, 101, 34, 0.2);
 }
 
 .chat-avatar-img {
@@ -108,10 +108,10 @@
 }
 
 .chat-bubble--self {
-  background: linear-gradient(135deg, #1677ff 0%, #4096ff 100%);
+  background: linear-gradient(135deg, #F26522 0%, #FF8A50 100%);
   color: #fff;
   border-radius: 14px 14px 4px 14px;
-  box-shadow: 0 2px 8px rgba(22, 119, 255, 0.25);
+  box-shadow: 0 2px 8px rgba(242, 101, 34, 0.25);
 }
 
 .chat-bubble--other {

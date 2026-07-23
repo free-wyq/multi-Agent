@@ -119,7 +119,7 @@ type AgentStatus = 'idle' | 'executing' | 'offline'
 
 const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: string }> = {
   idle: { label: '空闲', color: '#52c41a', dot: 'success' },
-  executing: { label: '工作中', color: '#1677ff', dot: 'processing' },
+  executing: { label: '工作中', color: '#F26522', dot: 'processing' },
   offline: { label: '离线', color: '#d9d9d9', dot: 'default' },
 }
 

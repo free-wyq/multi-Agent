@@ -423,7 +423,7 @@ export default function McpPage() {
                             ) : tools && tools.length > 0 ? (
                               <Space wrap size={[4, 4]}>
                                 {tools.map((t, i) => (
-                                  <Tag key={t.name ?? i} color="blue" style={{ fontSize: 11, margin: 0 }}>
+                                  <Tag key={t.name ?? i} color="orange" style={{ fontSize: 11, margin: 0 }}>
                                     {t.name}
                                   </Tag>
                                 ))}

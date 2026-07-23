@@ -66,7 +66,7 @@ export default function LogPanel({ taskId, agentId }: LogPanelProps) {
           <span style={{ color: '#8b949e' }}>
             [{new Date(l.timestamp).toLocaleTimeString()}]
           </span>{' '}
-          <Tag color="blue" style={{ fontSize: 10, lineHeight: '14px' }}>
+          <Tag color="orange" style={{ fontSize: 10, lineHeight: '14px' }}>
             {l.agentName}
           </Tag>{' '}
           {l.message}

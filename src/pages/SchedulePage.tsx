@@ -52,7 +52,7 @@ const SCHEDULE_META: Record<
   { color: string; label: string }
 > = {
   cron: { color: 'geekblue', label: 'cron 表达式' },
-  interval: { color: 'blue', label: '定间隔' },
+  interval: { color: 'orange', label: '定间隔' },
   once: { color: 'purple', label: '一次性' },
 }
 
@@ -506,7 +506,7 @@ export default function SchedulePage() {
                       {agentNameMap.get(task.agent_id) ?? (task.agent_id || '未指定')}
                     </Tag>
                     {task.group_id && (
-                      <Tag color="blue" style={{ marginInlineEnd: 0 }}>
+                      <Tag color="orange" style={{ marginInlineEnd: 0 }}>
                         {groupNameMap.get(task.group_id) ?? task.group_id}
                       </Tag>
                     )}

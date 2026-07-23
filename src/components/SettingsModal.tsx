@@ -64,8 +64,8 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'user', label: '用户信息', icon: <UserOutlined /> },
 ]
 
-/** 品牌蓝：仅用于选中项左条 + 选中文字强调，主体保持浅灰白。 */
-const BRAND_BLUE = '#0A5ACF'
+/** 品牌橙：仅用于选中项左条 + 选中文字强调，主体保持浅灰白。 */
+const BRAND_BLUE = '#F26522'
 
 export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: SettingsModalProps) {
   // 选中项：默认 MCP（头像入口可传 'user'）。destroyOnClose 卸载后再次打开按 initialKey 重置。
@@ -426,7 +426,7 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
                           />
                           <span style={{ fontWeight: 600, fontSize: 14 }}>{p.name}</span>
                           <Tag>{p.provider}</Tag>
-                          <Tag color="blue">{p.model || '—'}</Tag>
+                          <Tag color="orange">{p.model || '—'}</Tag>
                           {p.is_active && <Tag color="green">生效中</Tag>}
                           {p.has_key ? (
                             <Tag color="green">已配置</Tag>
@@ -520,7 +520,7 @@ function ExternalExportCard({
       <div style={{ flex: 1, minWidth: 0 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
           <span style={{ fontSize: 14, fontWeight: 600 }}>{title}</span>
-          <Tag color="blue" style={{ margin: 0 }}>{badge}</Tag>
+          <Tag color="orange" style={{ margin: 0 }}>{badge}</Tag>
         </div>
         <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
       </div>

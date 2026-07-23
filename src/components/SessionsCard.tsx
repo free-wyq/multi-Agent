@@ -90,11 +90,11 @@ export default function SessionsCard({ groups, messages, currentGroupId }: Sessi
   return (
     <Card
       size="small"
-      style={{ marginBottom: 12, borderColor: '#69b1ff' }}
+      style={{ marginBottom: 12, borderColor: '#FF8A50' }}
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <HistoryOutlined style={{ color: '#1677ff' }} />
-          <Tag color="blue" style={{ margin: 0 }}>历史会话</Tag>
+          <HistoryOutlined style={{ color: '#F26522' }} />
+          <Tag color="orange" style={{ margin: 0 }}>历史会话</Tag>
           <span style={{ fontSize: 13, color: '#666' }}>
             共 {sessions.length} 个会话
             {sessions.length > 0 && (
@@ -122,7 +122,7 @@ export default function SessionsCard({ groups, messages, currentGroupId }: Sessi
                 key={g.id}
                 style={{
                   padding: '8px 10px',
-                  background: isActive ? '#e6f4ff' : '#fafafa',
+                  background: isActive ? '#FFF3ED' : '#fafafa',
                   borderRadius: 4,
                   border: `1px solid ${isActive ? '#91d5ff' : '#f0f0f0'}`,
                 }}
@@ -139,7 +139,7 @@ export default function SessionsCard({ groups, messages, currentGroupId }: Sessi
                     style={{
                       fontWeight: isActive ? 600 : 500,
                       fontSize: 13,
-                      color: isActive ? '#1677ff' : '#333',
+                      color: isActive ? '#F26522' : '#333',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
                       whiteSpace: 'nowrap',
@@ -150,7 +150,7 @@ export default function SessionsCard({ groups, messages, currentGroupId }: Sessi
                     {g.name}
                   </span>
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexShrink: 0 }}>
-                    {s.count > 0 && <Tag color="blue" style={{ margin: 0 }}>{s.count} 条</Tag>}
+                    {s.count > 0 && <Tag color="orange" style={{ margin: 0 }}>{s.count} 条</Tag>}
                     <span style={{ fontSize: 11, color: '#bbb' }}>
                       {formatRelativeTime(s.last?.created_at || g.updated_at)}
                     </span>

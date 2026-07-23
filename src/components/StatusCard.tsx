@@ -67,11 +67,11 @@ export default function StatusCard({
   return (
     <Card
       size="small"
-      style={{ marginBottom: 12, borderColor: '#69b1ff' }}
+      style={{ marginBottom: 12, borderColor: '#FF8A50' }}
       title={
         <span style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <DashboardOutlined style={{ color: '#1677ff' }} />
-          <Tag color="blue" style={{ margin: 0 }}>运行状态</Tag>
+          <DashboardOutlined style={{ color: '#F26522' }} />
+          <Tag color="orange" style={{ margin: 0 }}>运行状态</Tag>
           <span style={{ fontSize: 13, color: '#666' }}>
             {groupId ? `${agents.length} 个智能体` : '未选会话'}
           </span>
@@ -96,13 +96,13 @@ export default function StatusCard({
               padding: '8px 10px',
               background: '#f5faff',
               borderRadius: 4,
-              border: '1px solid #e6f4ff',
+              border: '1px solid #FFD3B0',
               fontSize: 12,
             }}
           >
             <span>
-              <ThunderboltOutlined style={{ color: '#1677ff', marginRight: 4 }} />
-              执行中 <b style={{ color: '#1677ff' }}>{executing.length}</b>
+              <ThunderboltOutlined style={{ color: '#F26522', marginRight: 4 }} />
+              执行中 <b style={{ color: '#F26522' }}>{executing.length}</b>
             </span>
             <span>空闲 <b>{idle.length}</b></span>
             <span style={{ color: '#999' }}>离线 <b>{offline.length}</b></span>
@@ -125,7 +125,7 @@ export default function StatusCard({
                     alignItems: 'center',
                     gap: 8,
                     padding: '4px 8px',
-                    background: a.status === 'executing' ? '#e6f4ff' : '#fafafa',
+                    background: a.status === 'executing' ? '#FFF3ED' : '#fafafa',
                     borderRadius: 4,
                     border: '1px solid #f0f0f0',
                   }}

@@ -13,8 +13,8 @@ import CreateGroupModal from './CreateGroupModal'
 
 /** Sidebar 宽度（固定，flexShrink:0）。 */
 const SIDEBAR_WIDTH = 240
-/** 品牌蓝（强调色，选中项左条 + 品牌字）。 */
-const BRAND = '#0A5ACF'
+/** 品牌橙（强调色，选中项左条 + 品牌字）。 */
+const BRAND = '#F26522'
 /** 侧栏浮起面：白底（与顶栏一致，浮于主区冷灰之上）。 */
 const SIDEBAR_BG = 'var(--surface-raised)'
 /** 侧栏与主区的分隔线。 */
@@ -23,7 +23,7 @@ const SIDEBAR_BORDER = 'var(--border-soft)'
 /** agent 状态 → 圆点色（与 AgentPage/Statusbar 对齐）。 */
 const STATUS_DOT: Record<string, string> = {
   idle: '#52c41a',
-  executing: '#1677ff',
+  executing: '#F26522',
   offline: '#d9d9d9',
 }
 
@@ -365,7 +365,7 @@ function SidebarItem({
           margin: '2px 6px',
           borderRadius: 6,
           cursor: 'pointer',
-          background: active ? '#eaf2ff' : 'transparent',
+          background: active ? '#FFF3ED' : 'transparent',
           borderLeft: active ? `3px solid ${BRAND}` : '3px solid transparent',
           transition: 'background 0.15s',
         }}
