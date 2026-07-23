@@ -1080,6 +1080,56 @@ class AgentRegistry:
         """
         return self._runtimes.get(group_id)
 
+    async def ensure_engine(
+        self, conversation_id: str, agent_id: str
+    ) -> AgentEngine | None:
+        """Resolve (or lazily build) the resident ``AgentEngine`` for a single chat.
+
+        Path C single-chat split: a single-chat conversation is its own
+        ``ConversationEntity`` (keyed by ``conversation_id``), not a degenerate
+        ``GroupEntity``. ``load_from_store`` pre-builds one worker-graph engine
+        per conversation *at startup*, but a conversation created after startup
+        (the common case — ``POST /api/conversations`` on the
+        ``selectAgent`` path) has no engine until this builds one. Without an
+        engine there is no ``_run_loop`` consuming the ``(conversation_id,
+        agent_id)`` inbox, so ``route_direct_message``'s ``push_notify`` would
+        drop the notify into a queue nobody reads → the agent never replies
+        (live-e2e 链路 1 FAIL 根因, 2026-07-23).
+
+        This is the single-chat analogue of ``ensure_runtime`` (group-chat): it
+        reads the conversation row to resolve ``agent_id``, reads the agent def,
+        then ``add_engine(conversation_id, agent_def, coordinator_id="")`` →
+        worker graph (``is_coordinator=False``). ``add_engine`` is idempotent
+        (a pre-built engine from ``load_from_store`` is returned as-is), so a
+        startup-built conversation and a lazily-built one cannot race into a
+        double ``_run_loop``. Returns ``None`` when the conversation or agent
+        row is gone (caller treats it as "no one to route to" — the user message
+        stays persisted and visible even with no reply).
+
+        ``conversation_id`` plays the ``group_id`` role for single-chat engines
+        (the engine key + the inbox ``(group_id, agent_id)`` tuple + the WS
+        channel ``bus-event:{conversation_id}``), per the Path C strict rename.
+        """
+        # 命中缓存（含 load_from_store 启动期已建的）直接返回——幂等，与启动期不冲突。
+        existing = self._engines.get(conversation_id, {}).get(agent_id)
+        if existing is not None:
+            return existing
+        conversation = await crud.get_conversation(conversation_id)
+        if not conversation or not conversation.agent_id:
+            return None
+        agent = await crud.get_agent(conversation.agent_id)
+        if not agent:
+            return None
+        engine = await self.add_engine(
+            conversation_id, agent.model_dump(), ""
+        )
+        logger.info(
+            "[registry] lazily built single-chat engine for conversation=%s "
+            "(agent=%s)",
+            conversation_id, agent_id,
+        )
+        return engine
+
     async def recompile_group(self, group_id: str) -> GroupRuntime | None:
         """Force-rebuild the per-group ``GroupRuntime`` (drop + recompile).
 
