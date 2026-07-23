@@ -62,7 +62,7 @@ class AgentEngine:
 
     身份层（startup-baked，``__init__`` 落定，引擎生命周期内不再变）：
     ``agent_id`` / ``group_id`` / ``coordinator_id`` / ``is_coordinator`` /
-    ``graph_kind`` / ``single_chat`` / ``system_prompt``。``is_coordinator`` 派生
+    ``graph_kind`` / ``system_prompt``。``is_coordinator`` 派生
     ``graph_kind`` → 决定编译哪张 LangGraph 图（coordinator 图 vs worker 图），这是
     引擎*身份*非消息级配置。每 notify 刷新 ``coordinator_id`` 会要求重建图 + 作废
     MemorySaver checkpointer 线程（coordinator 线程的 dispatch_plan/interrupt 状态
@@ -86,7 +86,6 @@ class AgentEngine:
         agent_def: dict[str, Any],
         group_id: str,
         coordinator_id: str = "",
-        single_chat: bool = False,
     ) -> None:
         self.agent_id: str = agent_def["id"]
         self.name: str = agent_def["name"]
@@ -104,10 +103,10 @@ class AgentEngine:
         # 与 worker 图（brain 注入 system 消息）在 _handle_notify 时读 state.system_prompt 用，
         # 避免 notify 每次回查 agent。
         self.system_prompt: str = agent_def.get("system_prompt", "") or ""
-        # single_chat 标记：单聊群里唯一的 agent 虽被设为 coordinator_id（承接无 @mention 的
-        # 消息），但行为应是「个体」而非「调度者」——按业内共识单 agent = 退化多 agent，
-        # supervisor 只在多 agent 里存在，故单聊编译成 worker 图，不拼 COORDINATOR_SYSTEM。
-        self.single_chat: bool = bool(single_chat)
+        # Path C single-chat split: the ``single_chat`` flag is retired. A
+        # single-chat engine is now constructed with ``coordinator_id=""`` (so
+        # ``is_coordinator=False`` → worker graph naturally) — no flag needed.
+        # Group-chat coordinators still pass ``coordinator_id=<the leader id>``.
         self.status: str = "idle"  # idle | executing | offline
         self.current_task_id: str | None = None
         self._shutdown: bool = False
@@ -120,16 +119,16 @@ class AgentEngine:
         self._cancel_requested: bool = False  # PL-11: set by a stop request
         self._timeout_fired: bool = False  # MT-17: set by the watchdog when a task times out
 
-        # 选图：群聊 Leader（is_coordinator 且非单聊）→ coordinator 图；其余（单聊的
-        # 唯一 agent、普通成员）→ worker 图。graph_kind 作为后续 is_coordinator 分支的
-        # 判定基准（_handle_task 看门狗、_execute_body 分流），单聊 worker 也能挂看门狗、
-        # 走 _run_worker_task（不再合成 coordinator_task notify 死循环）。
+        # 选图：群聊 Leader（is_coordinator）→ coordinator 图；其余（普通成员、
+        # 单聊的唯一 agent）→ worker 图。graph_kind 作为后续 is_coordinator 分支的
+        # 判定基准（_handle_task 看门狗、_execute_body 分流）。
         #
-        # 命名口径（见 docs/naming-conventions.md §1）：single_chat 是「输入」（群级配置
-        # 标志），graph_kind 是「派生」（编译哪张图）——非两套平行分类，是同一条身份派生
-        # 链的输入→输出。single_chat=True 把 is_coordinator=True 的 agent 降级成 worker 图
-        # （单聊=退化的多智能体，supervisor 只在多 agent 里存在）。两轴各有读处，勿混。
-        if self.is_coordinator and not self.single_chat:
+        # 命名口径（见 docs/naming-conventions.md §1）：``is_coordinator`` 是「输入」
+        # （agent_id == coordinator_id），``graph_kind`` 是「派生」（编译哪张图）——
+        # 非两套平行分类，是同一条身份派生链的输入→输出。单聊 engine 构造时
+        # ``coordinator_id=""`` → ``is_coordinator=False`` → worker 图（单聊=退化的
+        # 多智能体，supervisor 只在多 agent 里存在）。两轴各有读处，勿混。
+        if self.is_coordinator:
             self.graph = build_coordinator_graph()
             self.graph_kind: str = "coordinator"
         else:
@@ -138,6 +137,9 @@ class AgentEngine:
         # 命名口径（见 docs/naming-conventions.md §2.3）：thread_id 是 LangGraph MemorySaver
         # 检查点键。驻留引擎图用稳定键 {group}:{agent}（跨 invoke 持久化图状态）；
         # create_react_agent（agent_loop.py:257）另用 task_id-or-uuid 的 per-exec 键。
+        # Path C: for single-chat engines, ``group_id`` is actually a conversation_id
+        # (the engine key), so the thread_id takes the same shape — stable across
+        # invokes for that conversation.
         self.thread_id = f"{group_id}:{self.agent_id}"
 
     async def start(self) -> None:
@@ -792,7 +794,13 @@ class AgentEngine:
                 # build_brain_prompt 内嵌的决策级提醒同一段文字（system 层 persona 追加 +
                 # 决策层 prompt 内嵌两层强化）。改文案只改常量一处，避免两处分叉。
                 sys_for_invoke = self.system_prompt
-                if not self.single_chat:
+                # Path C single-chat split: the ``single_chat`` flag is retired.
+                # A single-chat engine has ``coordinator_id=""`` (the conversation
+                # has no coordinator concept), so ``is_coordinator=False`` → the
+                # TEAM_INTERACTION_SUFFIX (group chat peer-interaction nudge) is
+                # NOT added (single-chat has no colleague interaction surface).
+                # Group-chat non-coordinator members get the suffix as before.
+                if not self.is_coordinator and self.coordinator_id:
                     sys_for_invoke = (
                         (self.system_prompt or "") + "\n\n" + TEAM_INTERACTION_SUFFIX
                     )
@@ -880,7 +888,9 @@ class AgentEngine:
         """Persist a task_log message + emit (Rust engine.publish_log)."""
         msg = await crud.create_message(
             {
-                "group_id": self.group_id,
+                # conversation_id 是 Path C 改名后的 group_id（engine.group_id 在
+                # 群聊=group_id，单聊=conversation_id，同一字段统一）。
+                "conversation_id": self.group_id,
                 "task_id": task_id,
                 "sender_id": self.agent_id,
                 "receiver_id": "broadcast",
@@ -1130,13 +1140,12 @@ class AgentRegistry:
         group_id: str,
         agent_def: dict[str, Any],
         coordinator_id: str = "",
-        single_chat: bool = False,
     ) -> AgentEngine:
         if group_id not in self._engines:
             self._engines[group_id] = {}
         if agent_def["id"] in self._engines[group_id]:
             return self._engines[group_id][agent_def["id"]]
-        engine = AgentEngine(agent_def, group_id, coordinator_id, single_chat)
+        engine = AgentEngine(agent_def, group_id, coordinator_id)
         await engine.start()
         self._engines[group_id][agent_def["id"]] = engine
         return engine
@@ -1251,26 +1260,33 @@ class AgentRegistry:
         test stays green, while wiring the runtime as the production inbound
         path for chat/@mention/plan-confirm/stop (the inbound entries swap to
         ``GroupRuntime.invoke_turn`` / ``resume_plan`` in task-19/20/22). A
-        runtime whose group has no coordinator (single_chat / cold) still
-        compiles — the decentralized path (agent nodes) runs without a
-        coordinator subgraph branch, mirroring the resident engine's
-        single-chat = worker-graph degradation.
+        runtime whose group has no coordinator (cold start) still compiles —
+        the decentralized path (agent nodes) runs without a coordinator
+        subgraph branch.
+
+        Path C single-chat split: single-chat conversations are no longer a
+        degenerate ``GroupEntity`` row with ``config.single_chat=True``. They
+        are their own ``ConversationEntity`` (loaded in a second pass below),
+        each spawning a worker-graph engine keyed by ``{conversation_id}:{agent_id}``
+        (``coordinator_id=""`` → ``is_coordinator=False`` → worker graph). The
+        ``single_chat`` flag is retired — group engines are built with
+        ``single_chat`` removed entirely from the construction path.
         """
         groups = await crud.list_groups()
         for g in groups:
             coord_id = g.coordinator_id or ""
-            # single_chat 群（唯一 agent 当 coordinator_id 但行为是个体）→ 选图传 True；
-            # 群聊群 → False（Leader 走 coordinator 图）。统一传参保持签名一致。
-            single = bool((g.config or {}).get("single_chat"))
+            # 群聊引擎：Leader（coord_id 命中）走 coordinator 图；普通成员走 worker 图。
+            # Path C 后 single_chat flag 退役——群聊统一不再传 single（单聊 engine 在
+            # 下方 conversations 遍历里建，coordinator_id="" 自然走 worker 图）。
             if coord_id:
                 coord = await crud.get_agent(coord_id)
                 if coord:
-                    await self.add_engine(g.id, coord.model_dump(), coord_id, single)
+                    await self.add_engine(g.id, coord.model_dump(), coord_id)
             members = await crud.list_group_members_with_agent(g.id)
             for m in members:
                 agent = await crud.get_agent(m.agent_id)
                 if agent:
-                    await self.add_engine(g.id, agent.model_dump(), coord_id, single)
+                    await self.add_engine(g.id, agent.model_dump(), coord_id)
             # Build the per-group GroupRuntime (orchestration track) + compile
             # its group graph. Lazy-member resolution happens inside
             # compile_graph (reads the roster + system_prompts from the DB) so
@@ -1289,9 +1305,18 @@ class AgentRegistry:
                     "(degrading to resident-engine-only path)",
                     g.id,
                 )
+        # Path C 第二遍：单聊会话。单聊是独立 ConversationEntity（不再是 single_chat 群），
+        # 每个 conversation 建一个 worker 图 engine，key=conversation_id（沿用 group_id 角色），
+        # coordinator_id="" → is_coordinator=False → 自然 worker 图。无群图（单聊无协作面）。
+        conversations = await crud.list_conversations()
+        for c in conversations:
+            agent = await crud.get_agent(c.agent_id) if c.agent_id else None
+            if agent:
+                await self.add_engine(c.id, agent.model_dump(), "")
         logger.info(
-            "[registry] loaded %d group(s) with engines, %d with group runtime",
-            len(self._engines), len(self._runtimes),
+            "[registry] loaded %d group(s) with engines, %d with group runtime, "
+            "%d single-chat conversation engine(s)",
+            len(self._engines), len(self._runtimes), len(conversations),
         )
 
     async def shutdown_all(self) -> None:

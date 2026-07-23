@@ -280,33 +280,16 @@ async def route_user_message(group_id: str, content: str, *, converge: bool = Fa
     no converge semantics; the message still routes, just no convergence — the
     UI switch is best-effort against a cold runtime).
 
-    **single_chat bypass**: a degenerate single-agent group (``config.
-    single_chat=True``) has no collaboration surface — one agent, no handoff,
-    none of the three defects this migration fixes (顺序乱 / 协调者插话 /
-    停不下来) can arise. Its resident engine is a *worker* graph (the
-    coordinator_id agent is degraded to ``build_worker_graph`` at
-    ``registry.py:132``), whose ``node_brain_decide`` streams ``task_token``
-    with a ``reply_id`` (the CodeBuddy bubble streaming contract, verified by
-    test_vb3). Routing a single_chat turn through the group graph's coordinator
-    subgraph instead would stream ``coordinator_token`` (a different channel)
-    and break that streaming contract for zero collaboration benefit. So a
-    single_chat group always takes the legacy ``push_notify`` path to its
-    resident worker engine — the group graph is for multi-agent groups only.
-    A 收束 toggle on a single_chat group is accepted but a no-op (single agent
-    → no handoff to suppress).
+    **Path C single-chat split**: single-chat conversations no longer reach
+    this function — the API layer (``api/messages.py``) routes single-chat
+    messages to ``engine.direct.route_direct_message`` instead (the bypass
+    that used to live here at mention.py:298-305 moved to ``engine/direct.py``).
+    ``route_user_message`` is now group-chat-only.
     """
-    group = await crud.get_group(group_id)
-    # single_chat → resident worker engine (worker-brain streaming contract,
-    # no collaboration surface to route through the group graph). See docstring.
-    if group and (group.config or {}).get("single_chat") and group.coordinator_id:
-        await push_notify(
-            group_id, "coordinator_reply", "user", group.coordinator_id, content, None,
-        )
-        return
-
     from engine.registry import registry  # noqa: PLC0415 — defer to break the
     # registry→mention import cycle (registry imports mention at load time).
 
+    group = await crud.get_group(group_id)
     mentions = find_mentions(content)
     if mentions:
         members = await crud.list_group_members_with_agent(group_id)

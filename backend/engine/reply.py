@@ -106,7 +106,10 @@ async def persist_agent_reply(
     """
     msg = await crud.create_message(
         {
-            "group_id": group_id,
+            # conversation_id 是 Path C 严格改名后的 group_id（群聊消息持 group_id，
+            # 单聊消息持 conversation_id，同一字段）。persist_agent_reply 的 group_id
+            # 入参在群聊场景就是 group_id，单聊走 route_direct_message 不经此函数。
+            "conversation_id": group_id,
             "task_id": task_id,
             "sender_id": agent_id,
             "receiver_id": "broadcast",

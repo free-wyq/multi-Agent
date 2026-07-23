@@ -104,11 +104,19 @@ bus_manager = BusManager()
 # ── event projection helpers (DomainEvent → BusEventData) ─────────────
 
 async def emit_message_added(msg: dict[str, Any]) -> None:
+    # Path C: Message.conversation_id is the renamed group_id (holds either a
+    # group_id for group-chat messages or a conversation_id for single-chat).
+    # The WS channel key is that same id — ``bus-event:{conversationId}``.
+    conv_id = msg.get("conversation_id") or msg.get("group_id") or ""
     await bus_manager.emit(
-        msg["group_id"],
+        conv_id,
         {
             "id": msg["id"],
-            "group_id": msg["group_id"],
+            "conversation_id": conv_id,
+            # keep legacy group_id key on the wire for the frontend (which still
+            # reads group_id from BusEventData) until the frontend rename in
+            # commit 4 — a single alias avoids a hard frontend break here.
+            "group_id": conv_id,
             "task_id": msg.get("task_id"),
             "sender_id": msg["sender_id"],
             "receiver_id": msg["receiver_id"],
