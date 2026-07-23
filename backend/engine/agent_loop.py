@@ -30,22 +30,37 @@ Contracts preserved (agent_executor / registry depend on these):
 """
 from __future__ import annotations
 
+import contextvars
 import logging
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
 
 from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.tools import tool
 from langchain_openai import ChatOpenAI
 from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
 from config import get_config
-from engine.tools import tools_for_group
+from engine.tools import (
+    SKILL_TOOL_NAMES,
+    resolve_skill_tools,
+    tools_for_group,
+)
+from store import crud, skill_assets
 
 logger = logging.getLogger("multi-agent.agent_loop")
 
 DEFAULT_MAX_TURNS = 15
+
+# delegate 递归深度（per-task copy，并发安全，镜像 _REPLY_CB/_GROUP_RUNTIME 模式）。
+# worker 的 @tool delegate 工具体入口 check cap；嵌套 run_agent_loop 装配 tools 时
+# 仅 depth==0 注入 delegate（子 agent 不带 delegate → 物理断递归）。
+_DELEGATE_DEPTH: contextvars.ContextVar = contextvars.ContextVar(
+    "delegate_depth", default=0
+)
+_DELEGATE_MAX_DEPTH = 2  # 允许 delegate→delegate 一层嵌套，三层封顶
 
 # extra tools beyond the framework-internal set (MCP, injected per-run)
 _EXTRA_TOOLS: list = []
@@ -172,6 +187,10 @@ async def run_agent_loop(
     tools = tools_for_group(group_id)
     mcp_tools = list(_EXTRA_TOOLS)
     tools = tools + mcp_tools
+    # delegate 工具：仅顶层 worker turn 注入（depth==0），子 agent 不带 → 物理断递归。
+    # 子 agent 走 run_skill_loop 自装配 tools，不经此注入点。
+    if _DELEGATE_DEPTH.get() == 0:
+        tools = tools + [_build_delegate_tool(group_id, agent_name, task_id, on_log)]
     # ── build the agent graph (factory owns the ReAct loop) ──
     # ChatOpenAI connection-level kwargs: only pass non-default values so the
     # framework's own defaults apply when the provider hasn't configured them
@@ -225,6 +244,16 @@ async def run_agent_loop(
     if sys_content:
         sys_content += "\n"
     sys_content += _TOOL_SYSTEM_SUFFIX
+    if _DELEGATE_DEPTH.get() == 0:
+        sys_content += (
+            "\nYou can delegate a subtask to a specialized skill agent via the "
+            "delegate(skill_id, subtask) tool when it needs a capability "
+            "outside your role (e.g. a regex expert, a doc generator). The "
+            "subagent runs in its own sandbox with that skill's controlled "
+            "tools and returns a summary + product paths. Use it only for "
+            "genuinely specialized subtasks — do simple steps yourself with "
+            "read_file/run_command.\n"
+        )
     if mcp_tools:
         sys_content += (
             "\nYou also have access to these external (MCP) tools: "
@@ -643,3 +672,99 @@ async def run_skill_loop(
         await _emit("log", f"[完成] {output[:200]}", None)
 
     return {"success": True, "exit_code": 0, "output": output[:2000]}
+
+
+# ── delegate @tool: worker 拉起绑 skill 的临时子智能体（deer-flow subagent 借鉴） ──
+# Worker ReAct 循环中按需调用 ``delegate(skill_id, subtask)``：按 skill_id 拉起一个
+# 临时子 agent（复用 ``run_skill_loop``），绑该 skill 的受控工具池 + 独立沙箱，
+# 阻塞 await 子结果，返回摘要 + 产物路径字符串。LangGraph 框架自动把返回值包成
+# ToolMessage 回喂 worker 模型。递归防死循环靠 ``_DELEGATE_DEPTH`` contextvar + 仅
+# depth==0 注入（子 agent 的 run_skill_loop 自装配 tools，不会带 delegate → 物理断递归）。
+def _build_delegate_tool(
+    group_id: str,
+    agent_name: str,
+    task_id: str,
+    on_log: Callable[[str, str, dict | None], Awaitable[None]] | None,
+):
+    """Build the worker-callable ``delegate`` @tool (deer-flow subagent 借鉴·绑 skill).
+
+    闭包捕获 ``group_id``/``agent_name``/``task_id``/``on_log``：前三者用于日志归属
+    （目前仅日志上下文，未直接投射——bus 投射走外层 worker 的 ``on_log`` tool_start/
+    tool_end），``on_log`` 让 delegate 作为外层 worker 的一个 tool_start/tool_end
+    出现在前端 CodeBuddy 气泡（复用 ``registry._run_worker_task`` 的 ``on_log``→
+    ``emit_task_tool`` 投射）。子 agent 内部细粒度流式不外泄（``on_event=None``，
+    避免嵌套气泡渲染复杂度，UX 留待后续）。
+    """
+    @tool
+    async def delegate(skill_id: str, subtask: str) -> str:
+        """本角色能力范围之外的子任务，按 skill_id 拉起一个临时子智能体执行。
+        子智能体有独立 context、该技能的受控工具池(file_read/file_write/bash_run)、
+        独立沙箱 workspace，跑完返回结果摘要 + 产物路径。仅用于需要专门技能的复杂子任务，
+        简单步骤自己直接用 read_file/run_command 做。"""
+        depth = _DELEGATE_DEPTH.get()
+        if depth >= _DELEGATE_MAX_DEPTH:
+            return (
+                f"[delegate] 已达最大嵌套深度 {_DELEGATE_MAX_DEPTH}，"
+                f"拒绝再 delegate，请自行处理。"
+            )
+        skill = await crud.get_skill(skill_id)
+        if skill is None:
+            return f"[delegate] 技能 {skill_id} 不存在"
+        if not skill.requires_tools or any(
+            t not in SKILL_TOOL_NAMES for t in skill.requires_tools
+        ):
+            return (
+                f"[delegate] 技能 {skill.name} 未声明合法 requires_tools，"
+                f"不可 delegate（纯文档技能请自行 load 全文执行）"
+            )
+        # 幂等建沙箱 workspace（含 output/ 子目录）
+        skill_assets.skill_workspace_path(skill_id)
+        manifest = [{
+            "id": skill_id,
+            "name": skill.name,
+            "description": skill.description or "",
+            "requires_tools": list(skill.requires_tools),
+            "triggers": list(skill.triggers or []),
+            "outputs": list(skill.outputs or []),
+        }]
+        tools, _tool_warnings = resolve_skill_tools(manifest)
+        # depth +1 进入子执行体；try/finally 用 token 还原（contextvars 并发安全语义）
+        token = _DELEGATE_DEPTH.set(depth + 1)
+        try:
+            if on_log:
+                await on_log(
+                    "tool_start",
+                    f"[delegate] 委派技能 {skill.name}（depth={depth + 1}）",
+                    {"name": "delegate"},
+                )
+            result = await run_skill_loop(
+                skill_id=skill_id,
+                skill_name=skill.name,
+                skill_content=skill.content or "",
+                prompt=(subtask or "").strip()
+                or "请按本技能文档指引执行，产物输出到 output/。",
+                tools=tools,
+                on_event=None,  # 阻塞只取结果，子 agent 流式 token 丢弃
+                max_turns=DEFAULT_MAX_TURNS,
+            )
+            # 扫产物目录（首个产物文件相对路径列表）
+            out_dir = skill_assets.skill_output_path(skill_id)
+            products: list[str] = []
+            if out_dir.exists():
+                for f in sorted(out_dir.rglob("*")):
+                    if f.is_file():
+                        products.append(str(f.relative_to(out_dir)))
+            summary = result.get("output", "") or ""
+            if products:
+                summary += f"\n[产物] {', '.join(products)}"
+            if on_log:
+                await on_log(
+                    "tool_end",
+                    f"[delegate] {skill.name} → {summary[:200]}",
+                    {"name": "delegate", "output": summary[:2000]},
+                )
+            return summary
+        finally:
+            _DELEGATE_DEPTH.reset(token)
+
+    return delegate
