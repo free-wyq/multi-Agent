@@ -1,8 +1,8 @@
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
-import { BulbOutlined, CompressOutlined, ReloadOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { CompressOutlined, ReloadOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
   groupApi,
@@ -25,6 +25,7 @@ import {
   parseSlashCommand,
   type SlashCommandContext,
 } from '../lib/slashCommands'
+import { renderMarkdownWithMentions } from '../lib/renderMarkdown'
 import PlanConfirmCard from './PlanConfirmCard'
 import StopTaskButton from './StopTaskButton'
 import SlashAutocomplete from './SlashAutocomplete'
@@ -224,6 +225,67 @@ function extractReplyId(data: Record<string, unknown> | null): string | undefine
   return typeof rid === 'string' && rid ? rid : undefined
 }
 
+/** 回放 trace：从持久化 agent_reply.data.trace 提取 tool/think 事件，映射成前端 TraceEvent[]
+ *  形状（对齐 services/api.ts TraceEvent，复用 ChatMessageBubble 现有折叠区渲染——不另造数据形状）。
+ *
+ *  后端 registry.on_log 把 tool_start/tool_end/think/answer 累加到 _turn_trace[turn_reply_id]，
+ *  reply 时塞进 reply_data["trace"] 落到 message.data.trace。本函数把后端落的精简数组
+ *  （每元素 {kind, content, timestamp, phase?, name?, args?, output?}）映射成前端 TraceEvent
+ *  （{id, kind, agentId, agentName, taskId, content, data, timestamp}）：
+ *   - kind: 后端 'tool_start'/'tool_end' → 前端 'tool'（ChatMessageBubble.toolEvents 按 kind==='tool' 过滤）；
+ *     后端 'think'/'answer' → 前端 'think'（ChatMessageBubble.thinkEvents 按 kind==='think' 过滤）。
+ *   - data: {phase, name, args, output} 透传——ChatMessageBubble.toolRows 按 data.phase==='end'
+ *     算耗时 + data.name 取工具名 + data.args/data.output 取 payload（与流式期同款逻辑）。
+ *   - timestamp: 后端 ISO 字符串 → 前端 number（Date.parse）——与流式期 TraceEvent.timestamp 同单位。
+ *   - id/agentId/agentName/taskId: 不在后端 trace 里（无意义）——填占位让类型兼容（ChatMessageBubble
+ *     不依赖这些字段渲染折叠区，只用 data + content + timestamp）。
+ *
+ *  返回 {toolEvents, thinkEvents}：tool 类→toolEvents，think/answer 类→thinkEvents。
+ *  两者皆空数组 → 持久化气泡走 ChatMessageBubble hasTools=false/hasThinks=false 不渲染折叠区
+ *  （chat 路径 trace 天然为空，行为零变）。 */
+function extractTraceEvents(
+  data: Record<string, unknown> | null,
+  senderId: string,
+): { toolEvents: TraceEvent[]; thinkEvents: TraceEvent[] } {
+  const dd = safeRecord(data)
+  if (!dd) return { toolEvents: [], thinkEvents: [] }
+  const rawTrace = dd['trace']
+  if (!Array.isArray(rawTrace)) return { toolEvents: [], thinkEvents: [] }
+  const toolEvents: TraceEvent[] = []
+  const thinkEvents: TraceEvent[] = []
+  for (let i = 0; i < rawTrace.length; i++) {
+    const step = safeRecord(rawTrace[i])
+    if (!step) continue
+    const kind = typeof step['kind'] === 'string' ? step['kind'] : ''
+    const content = typeof step['content'] === 'string' ? step['content'] : ''
+    const tsStr = typeof step['timestamp'] === 'string' ? step['timestamp'] : ''
+    const ts = tsStr ? Date.parse(tsStr) : 0
+    const dataPayload: Record<string, unknown> = {}
+    const phase = step['phase']
+    if (typeof phase === 'string') dataPayload['phase'] = phase
+    const name = step['name']
+    if (typeof name === 'string') dataPayload['name'] = name
+    if ('args' in step) dataPayload['args'] = step['args']
+    if ('output' in step) dataPayload['output'] = step['output']
+    const ev: TraceEvent = {
+      id: `trace-${i}-${ts}`,
+      kind: kind === 'think' || kind === 'answer' ? 'think' : 'tool',
+      agentId: senderId,
+      agentName: '',
+      taskId: null,
+      content,
+      data: dataPayload,
+      timestamp: Number.isFinite(ts) ? ts : 0,
+    }
+    if (kind === 'tool_start' || kind === 'tool_end') {
+      toolEvents.push(ev)
+    } else if (kind === 'think' || kind === 'answer') {
+      thinkEvents.push(ev)
+    }
+  }
+  return { toolEvents, thinkEvents }
+}
+
 /** ST-06（task 21）：从 task_complete 事件 data 提取产物文件列表（data.artifact.files[]）。
  *
  * 后端 bus.py emit_task_completed 仅成功路径把 scan_workspace_artifacts manifest 写入
@@ -297,6 +359,12 @@ function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
 
 /** 获取发送者显示名 */
 function SenderName({ id, agents }: { id: string; agents: AgentDefinition[] }) {
+  return resolveSenderName(id, agents)
+}
+
+/** 把 sender_id 解析成显示名（纯 string，供 ChatMessageBubble.senderName 用——该 prop
+ *  要求 string，不能直接传 React 元素）。与 SenderName 组件共用同一逻辑，单一真源。 */
+function resolveSenderName(id: string, agents: AgentDefinition[]): string {
   if (id === 'user') return '用户'
   if (id === 'coordinator') return '群主(协调者)'
   if (id === 'broadcast') return '系统广播'
@@ -304,67 +372,6 @@ function SenderName({ id, agents }: { id: string; agents: AgentDefinition[] }) {
   const agent = agents.find((a) => a.id === id)
   return agent?.name ?? id.slice(0, 8) + '...'
 }
-
-/** 高亮 @mention 的消息内容
- *
- *  B29 重渲染优化：`memo` + `memberNames` 稳定集两道防线。
- *
- *  问题：`HighlightMessage` 在 `chatMessages.flatMap` 里每条非用户消息渲染一次。ChatPanel
- *  是个大组件——`chatMessages`/`events`/`streaming`/`coordStreaming`/`agentStatuses` 任一
- *  变化（高频：task_token 流式逐字推送、stats ~200ms 节流、reasoning delta 攒批 flush）都
- *  触发整个 ChatPanel 重渲染，`flatMap` 重跑，**每条历史消息的 HighlightMessage 都重跑
- *  `content.split(regex)` + `members.some()`**——N 条消息 × 每次 setState 全量重算。长会话
- *  （几百条历史）+ 流式期高频重渲染，split+some 重复算 O(N×M) 是肉眼可见的卡顿源。
- *
- *  优化（两道防线，互补）：
- *  1. **`memo` 包裹**：props `content`(string|null) + `members`(GroupMember[]) 浅比较。`content`
- *     是消息正文（持久化后不变，除非编辑——本项目无编辑），`members` 是 ChatView state（切群时
- *     整体替换，平时稳定）。故 memo 让「props 没变的历史气泡」直接跳过重渲染——流式期只有当前
- *     正在流式的那条气泡（content 在变）+ stats 行重渲染，其余历史气泡 memo 命中零开销。
- *  2. **`memberNames` 稳定集**：原 `members.some(m => m.agent_name===name || m.alias===name)`
- *     每个候选 mention 都 O(M) 扫全部成员。改 `useMemo` 把 members 投影成 `Set<string>`（agent_name
- *     + alias 去空），查 mention 成员身份从 O(M).some → O(1).has。`memberNames` deps=[members]——
- *     members 引用变（切群）才重算 Set，平时稳定引用复用。
- *
- *  为何 memo 的 props 浅比较够用：`content` 是 string（值类型，=== 可靠）；`members` 是数组引用
- *  （ChatView 切群才 setMembers 新数组，平时同引用）。memo 默认 `Object.is` 浅比较这两类 props
- *  正确——不需自定义 areEqual。`members` 投影成 Set 后，HighlightMessage 内部不再依赖 members 数组
- *  结构（只读 Set），故 members 引用即使每帧变（不会，但假设）也不破 memo——memo 比 props 早短路。
- */
-const HighlightMessage = memo(function HighlightMessage({
-  content,
-  members,
-}: {
-  content: string | null
-  members: GroupMember[]
-}) {
-  // 成员名稳定集：agent_name + alias（去空）→ Set，mention 成员身份查 O(1)。
-  // deps=[members]：members 引用变（切群/加成员）才重算 Set，平时稳定复用。
-  const memberNames = useMemo(() => {
-    const s = new Set<string>()
-    for (const m of members) {
-      if (m.agent_name) s.add(m.agent_name)
-      if (m.alias) s.add(m.alias)
-    }
-    return s
-  }, [members])
-
-  if (!content) return <Text type="secondary" italic>（空消息）</Text>
-  const parts = content.split(/(@[^\s,，.。!！?？:：;；\n]+)/g)
-  return (
-    <span>
-      {parts.map((part, i) => {
-        if (part.startsWith('@')) {
-          const name = part.slice(1)
-          if (memberNames.has(name)) {
-            return <Tag key={i} color="orange" style={{ margin: 0, padding: '0 4px', lineHeight: '18px' }}>{part}</Tag>
-          }
-        }
-        return <span key={i}>{part}</span>
-      })}
-    </span>
-  )
-})
 
 /** 获取成员显示名 */
 function getMemberDisplayName(member: GroupMember) {
@@ -1313,105 +1320,70 @@ export default function ChatPanel({
                       匹配本条气泡的按钮（点重跑时转 loading 防连点）。
                       用户气泡右对齐——操作组改定位到左侧（.chat-bubble-wrap--self），
                       否则贴在右边缘会被容器 overflow 裁切、看不到。 */}
-                  <div className="bubble-action-group">
-                    <BubbleCopyButton content={msg.content ?? ''} />
-                    {!isUser && tts.enabled && (
-                      <BubbleSpeakButton content={msg.content ?? ''} />
-                    )}
-                    {!isUser && (() => {
-                      const replyId = extractReplyId(msg.data)
-                      if (!replyId) return null
-                      const loading = regeneratingReplyIds.has(replyId)
-                      return (
-                        <Tooltip title={loading ? '正在重新生成…' : '重新生成'}>
-                          <Button
-                            type="text"
-                            size="small"
-                            className="bubble-action-btn"
-                            icon={<ReloadOutlined />}
-                            loading={loading}
-                            disabled={loading}
-                            onClick={() => handleRegenerate(replyId)}
-                          />
-                        </Tooltip>
-                      )
-                    })()}
-                  </div>
-                  <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
-                    <SenderName id={msg.sender_id} agents={agents} />
-                  </div>
-                  <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
-                    {/* 定稿协调者回复的推理折叠区：读持久化 agent_reply.data.reasoning。
-                        复用 ChatMessageBubble（与流式期同一组件，受控展开逻辑统一）——
-                        不再内联一份非受控 Collapse（原导致定稿气泡思考区默认收起且不接 reasoningExpanded，
-                        与流式期行为不一致）。reasoningTokens 传落盘的真值；用户可手动展开看历史思考。 */}
-                    {(() => {
-                      const reasoning = extractCoordReasoning(msg.data)
-                      if (!reasoning) return null
-                      const rt = extractCoordStats(msg.data)?.reasoning_tokens
-                      return (
-                        <div style={{ marginBottom: 6 }}>
-                          <Collapse
-                            size="small"
-                            ghost
-                            items={[{
-                              key: 'reasoning',
-                              label: (
-                                <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                                  <BulbOutlined style={{ fontSize: 12 }} />
-                                  思考过程（{(rt && rt > 0 ? rt : Math.max(1, Math.ceil(reasoning.length / 3)))} tokens）
-                                </span>
-                              ),
-                              children: (
-                                <pre style={{
-                                  margin: '6px 0 2px',
-                                  padding: '8px 10px',
-                                  background: 'rgba(250, 173, 20, 0.06)',
-                                  borderLeft: '2px solid #faad14',
-                                  borderRadius: 4,
-                                  fontSize: 12,
-                                  lineHeight: 1.6,
-                                  color: '#595959',
-                                  whiteSpace: 'pre-wrap',
-                                  wordBreak: 'break-word',
-                                  maxHeight: 320,
-                                  overflowY: 'auto',
-                                  fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                                }}>
-                                  {reasoning}
-                                </pre>
-                              ),
-                            }]}
-                          />
-                        </div>
-                      )
-                    })()}
-                    {isUser ? (
-                      msg.content
-                    ) : (
-                      <HighlightMessage content={msg.content} members={members} />
-                    )}
-                  </div>
-                  <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
-                    {new Date(msg.created_at).toLocaleTimeString()}
-                  </div>
-                  {/* 定稿协调者回复的状态行：从持久化 agent_reply.data 取流式统计
-                      （node_chat 落盘的 {reply_id, elapsed_ms, tokens, model, reasoning_tokens}），
-                      渲染「model · Ns · ↓ N tokens（含 N 推理）· 完成」状态行。model 在最前——
-                      用户能直观看到这条回复是哪个模型生成的（热切换模型后历史气泡保留当时的模型名）。
-                      reasoning_tokens > 0 时追加「（含 N 推理）」——推理模型的 token 多为内部思维链，
-                      点明后「5 字回复却 148 tokens」才可解释（其中 133 是看不见的推理）。
-                      流式期间的统计在完成后保留可见——不随流式气泡退场消失。
-                      非协调者 chat 回复（dispatch/summarize announce、user_input、task_log、slash_card）
-                      data 无 elapsed_ms → extractCoordStats 返回 null → 不渲染状态行。 */}
                   {(() => {
+                    // 持久化气泡回放：复用 ChatMessageBubble（与流式期同一组件，受控展开逻辑统一）。
+                    //   - reasoning：extractCoordReasoning(msg.data) 落盘的推理全文
+                    //   - reasoningTokens：extractCoordStats().reasoning_tokens 落盘真值
+                    //   - toolEvents/thinkEvents：extractTraceEvents(msg.data) 把 data.trace 解析成
+                    //     TraceEvent[]（后端 registry.on_log 落的 tool_start/tool_end/think/answer）
+                    //   - statusLine：复用 extractCoordStats 状态行渲染（model · Ns · ↓ N tokens）
+                    //   - footerExtra：追问引导 chip（气泡外、wrap 内，与 mockup 一致）
+                    // hideFooterAction=true：抑制 footer 内置「复制+重新生成」操作栏，统一走顶部
+                    //   hover actionGroup（含复制/朗读/重新生成），避免双份操作栏。ChatMessageBubble
+                    //   footer 仍渲产物卡（持久化气泡当前无 artifact，footer 不显）。
+                    // 用户气泡（isUser）直出 content 纯文本——不走 ChatMessageBubble（用户消息保持
+                    //   纯文本语义，不渲染 markdown / 不渲折叠区）。
+                    if (isUser) {
+                      return (
+                        <>
+                          <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
+                            <SenderName id={msg.sender_id} agents={agents} />
+                          </div>
+                          <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
+                            {msg.content}
+                          </div>
+                          <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
+                            {new Date(msg.created_at).toLocaleTimeString()}
+                          </div>
+                        </>
+                      )
+                    }
+                    const reasoning = extractCoordReasoning(msg.data) ?? undefined
                     const stats = extractCoordStats(msg.data)
-                    if (!stats) return null
-                    return (
-                      <div className="chat-status-line">
-                        {stats.model && (
-                          <span className="chat-status-model">{stats.model}</span>
+                    const reasoningTokens = stats?.reasoning_tokens
+                    const replyId = extractReplyId(msg.data)
+                    const { toolEvents, thinkEvents } = extractTraceEvents(msg.data, msg.sender_id)
+                    // mention 高亮：持久化气泡走 markdown 渲染，mention 用 renderMarkdownWithMentions
+                    // 注入（renderContent 闭包把 members 投影成 memberNames Set 传进去）。
+                    const memberNames = new Set<string>()
+                    for (const m of members) {
+                      if (m.agent_name) memberNames.add(m.agent_name)
+                      if (m.alias) memberNames.add(m.alias)
+                    }
+                    const renderContent = (c: string) => renderMarkdownWithMentions(c, memberNames)
+                    const followUps = msg.content ? generateFollowUps(msg.content) : []
+                    const actionGroup = (
+                      <div className="bubble-action-group">
+                        <BubbleCopyButton content={msg.content ?? ''} />
+                        {tts.enabled && <BubbleSpeakButton content={msg.content ?? ''} />}
+                        {replyId && (
+                          <Tooltip title={regeneratingReplyIds.has(replyId) ? '正在重新生成…' : '重新生成'}>
+                            <Button
+                              type="text"
+                              size="small"
+                              className="bubble-action-btn"
+                              icon={<ReloadOutlined />}
+                              loading={regeneratingReplyIds.has(replyId)}
+                              disabled={regeneratingReplyIds.has(replyId)}
+                              onClick={() => handleRegenerate(replyId)}
+                            />
+                          </Tooltip>
                         )}
+                      </div>
+                    )
+                    const statusLine = stats ? (
+                      <div className="chat-status-line">
+                        {stats.model && <span className="chat-status-model">{stats.model}</span>}
                         {stats.model && ' · '}
                         {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens`}
                         {stats.reasoning_tokens && (
@@ -1421,32 +1393,34 @@ export default function ChatPanel({
                         )}
                         {' · 完成'}
                       </div>
-                    )
-                  })()}
-                  {/* 需求2-前端：气泡外追问引导 chip——按本条回复内容生成 2-3 个 follow-up
-                      问题渲染成可点 Tag（点即填入输入框，不自动发送，用户可改后发）。
-                      设计单真源 docs/structured-result-card-schema.md mockup 第 4 层
-                      「💡 您可能还想问: [chip1] [chip2] [chip3]」。仅非用户消息且 content 非空
-                      时渲染——用户自己的消息无需追问引导；task_log/announce 等无 content 跳过。
-                      策略=纯前端规则（lib/followUpSuggestions.ts generateFollowUps），
-                      零后端调用 / 零 LLM 往返 / 即时确定可解释。气泡外（chat-bubble-wrap 内、
-                      chat-bubble 之外）——与 mockup「气泡外 chip」一致，视觉上挂在气泡下方。 */}
-                  {!isUser && msg.content && (() => {
-                    const ups = generateFollowUps(msg.content)
-                    if (ups.length === 0) return null
-                    return (
+                    ) : undefined
+                    const footerExtra = followUps.length > 0 ? (
                       <div className="chat-followup-chips">
                         <span className="chat-followup-label">💡 您可能还想问：</span>
-                        {ups.map((q) => (
-                          <Tag
-                            key={q}
-                            className="chat-followup-chip"
-                            onClick={() => handleFollowUpClick(q)}
-                          >
+                        {followUps.map((q) => (
+                          <Tag key={q} className="chat-followup-chip" onClick={() => handleFollowUpClick(q)}>
                             {q}
                           </Tag>
                         ))}
                       </div>
+                    ) : undefined
+                    return (
+                      <ChatMessageBubble
+                        senderId={msg.sender_id}
+                        senderName={resolveSenderName(msg.sender_id, agents)}
+                        avatar={<ChatAvatar id={msg.sender_id} agents={agents} />}
+                        content={msg.content ?? ''}
+                        renderContent={renderContent}
+                        reasoning={reasoning}
+                        reasoningTokens={reasoningTokens}
+                        toolEvents={toolEvents}
+                        thinkEvents={thinkEvents}
+                        timestamp={msg.created_at}
+                        actionGroup={actionGroup}
+                        statusLine={statusLine}
+                        hideFooterAction
+                        footerExtra={footerExtra}
+                      />
                     )
                   })()}
                 </div>

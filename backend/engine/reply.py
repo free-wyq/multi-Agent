@@ -70,6 +70,16 @@ async def persist_agent_reply(
     returns null on a missing ``elapsed_ms`` and renders no status line, which
     is correct for template announce text (not brain LLM output).
 
+    回放 trace（持久化气泡回放，落 ``data.trace`` 子键，不改 DB schema）：
+    execute 路径（registry._run_worker_task 的 on_log）把 tool_start/tool_end/
+    think/answer 这类结构化步累加到 ``self._turn_trace[turn_reply_id]``，reply 时
+    塞进 ``reply_data["trace"]`` 落到 ``message.data.trace``。前端持久化气泡复用
+    ChatMessageBubble 把 ``msg.data.trace`` 解析成 toolEvents/thinkEvents 渲染
+    思考折叠区 + 工具调用折叠区（与流式期同一渲染管线）。token 流式增量不落 trace
+    （reload 后回放逐字无意义、量大），log bookkeeping 行不落（无结构化语义且与最终
+    回复不重复）。失败/取消/超时路径也落 trace（用户要看失败走到哪步了）。chat 路径
+    （coordinator/worker node_chat，无 tool/think emit）data 不带 trace key。
+
     ``task_id`` (B22): the task this reply closes, for the registry's
     execute-path announce (``任务完成 🎉`` / ``执行出错了`` / ``⏹ 任务已停止``
     / ``⏱ 超时``). Threaded onto the persisted row + the emitted

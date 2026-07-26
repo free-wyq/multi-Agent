@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from datetime import datetime, timezone
 from typing import Any
 
 from engine import coordinator as coord_mod
@@ -118,6 +119,14 @@ class AgentEngine:
         self._worker_task: asyncio.Task | None = None  # PL-11: cancellable execution body
         self._cancel_requested: bool = False  # PL-11: set by a stop request
         self._timeout_fired: bool = False  # MT-17: set by the watchdog when a task times out
+        # 回放 trace 累加器（per turn_reply_id → list[trace step]）。execute 路径 on_log
+        # 在 emit WS 事件同时 append 一份精简 trace 记录到此；reply 时塞进 reply_data["trace"]
+        # 落盘到 message.data.trace，让前端持久化气泡复用 ChatMessageBubble 渲染思考折叠区 +
+        # 工具调用折叠区（与流式期同一渲染管线）。key=turn_reply_id（与 on_log emit 的归并
+        # key 一致），落盘后 pop 清防泄漏。token 流式增量不落 trace（reload 后回放逐字无意义、
+        # 量大），只落 tool_start/tool_end/think/answer 这类结构化步。chat 路径无 tool/think
+        # emit，不进累加器（data.trace 缺省/空数组）。
+        self._turn_trace: dict[str, list[dict[str, Any]]] = {}
 
         # 选图：群聊 Leader（is_coordinator）→ coordinator 图；其余（普通成员、
         # 单聊的唯一 agent）→ worker 图。graph_kind 作为后续 is_coordinator 分支的
@@ -376,6 +385,32 @@ class AgentEngine:
                 )
             else:
                 await emit_task_log(group_id, turn_reply_id, agent_id, content)
+            # 回放 trace 累加：tool_start/tool_end/think/answer 落进 _turn_trace[turn_reply_id]
+            # （token 流式增量不落——reload 后回放逐字无意义、量大；log 是 bookkeeping 行不
+            # 落——它无结构化语义且与最终回复不重复）。落字段精简到回放必需：kind/phase/name/
+            # content/timestamp。reply 时塞进 reply_data["trace"] 落盘到 message.data.trace，
+            # 前端据 msg.data.trace 解析成 toolEvents/thinkEvents 喂给 ChatMessageBubble 与
+            # 流式期同一渲染管线。失败/取消/超时路径也落（用户要看失败走到哪步了）——
+            # 落盘点在 _reply 前 pop 累加器（_run_worker_task / _on_task_cancelled /
+            # _on_task_timed_out 三处调用方分别处理）。
+            if kind in ("tool_start", "tool_end", "think", "answer"):
+                ts = datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+                step: dict[str, Any] = {
+                    "kind": kind,
+                    "content": content,
+                    "timestamp": ts,
+                }
+                if kind in ("tool_start", "tool_end"):
+                    step["phase"] = "start" if kind == "tool_start" else "end"
+                    step["name"] = (data or {}).get("name", "")
+                    # args/output 透传原始 data（前端按 phase 取 args/end 取 output 显示）
+                    if data and "args" in data:
+                        step["args"] = data["args"]
+                    if data and "output" in data:
+                        step["output"] = data["output"]
+                elif kind in ("think", "answer"):
+                    step["phase"] = "thinking" if kind == "think" else "final"
+                self._turn_trace.setdefault(turn_reply_id, []).append(step)
 
         result = await execute_agent_task(
             group_id, agent_dict, task_content, task_id, on_log
@@ -456,7 +491,19 @@ class AgentEngine:
         # vh63：成功路径透传 reply_id 到 agent_reply.data，让前端据持久化回复落地
         # 清掉 coordStreaming[reply_id] 流式气泡（brain+execute 合并的单一气泡退场）。
         # 失败路径不透传（reply_id 仍可能为 task_id 兜底，失败气泡不强退流式）。
-        reply_data = {"reply_id": turn_reply_id} if success and turn_reply_id != task_id else None
+        # 回放 trace：把 _turn_trace 累加器 pop 出来塞进 reply_data["trace"]，落盘到
+        # message.data.trace，前端持久化气泡复用 ChatMessageBubble 渲染思考折叠区 + 工具调用
+        # 折叠区（与流式期同一渲染管线）。失败路径也落 trace（用户要看失败走到哪步了）。
+        # turn_reply_id != task_id 时 reply_data 已有 reply_id key，trace 同样塞进 data.trace
+        # （data 是 JSON 列，加子键即可，符合硬约束「不改 DB schema」）。pop 后清防泄漏。
+        trace_steps = self._turn_trace.pop(turn_reply_id, [])
+        if success and turn_reply_id != task_id:
+            reply_data: dict[str, Any] | None = {"reply_id": turn_reply_id}
+        else:
+            reply_data = None
+        if trace_steps:
+            reply_data = dict(reply_data) if reply_data else {}
+            reply_data["trace"] = trace_steps
         await self._reply(reply, task_id, data=reply_data)
 
         # execute report-back → the per-group GroupRuntime (task-19④).
@@ -530,7 +577,12 @@ class AgentEngine:
         )
         await self._publish_log(task_id, "⏹ 任务已被用户停止")
         # B22：透传 task_id（取消收尾的 announce 归属本任务，前端按 task_id 退场定稿气泡）。
-        await self._reply("⏹ 任务已停止", task_id)
+        # 回放 trace：取消路径也落 trace（用户要看失败走到哪步了——执行到哪步被停的）。
+        # turn_reply_id 取值同 _run_worker_task（brain reply_id 或兜底 task_id）。
+        turn_reply_id = (task.get("data") or {}).get("reply_id") or task_id
+        trace_steps = self._turn_trace.pop(turn_reply_id, [])
+        reply_data: dict[str, Any] | None = {"trace": trace_steps} if trace_steps else None
+        await self._reply("⏹ 任务已停止", task_id, data=reply_data)
 
     # ── MT-17: worker-task timeout watchdog ─────────────────────────
 
@@ -630,7 +682,12 @@ class AgentEngine:
         )
         await self._publish_log(task_id, "⏱ 任务已超时降级")
         # B22：透传 task_id（超时收尾的 announce 归属本任务，前端按 task_id 退场定稿气泡）。
-        await self._reply(f"⏱ {timeout_result}", task_id)
+        # 回放 trace：超时路径也落 trace（用户要看失败走到哪步了——超时前最后一步）。
+        # turn_reply_id 取值同 _run_worker_task（brain reply_id 或兜底 task_id）。
+        turn_reply_id = (task.get("data") or {}).get("reply_id") or task_id
+        trace_steps = self._turn_trace.pop(turn_reply_id, [])
+        reply_data: dict[str, Any] | None = {"trace": trace_steps} if trace_steps else None
+        await self._reply(f"⏱ {timeout_result}", task_id, data=reply_data)
         # report-back to coordinator via the per-group GroupRuntime (task-19④).
         # Same split-brain fix as ``_run_worker_task``: the timed-out step's
         # ``task_id`` is on ``rt._dispatch_plan`` (set by the Send fan-out), so

@@ -5,6 +5,7 @@ import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedL
 import type { TraceEvent } from '../services/api'
 import { groupApi } from '../services/api'
 import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
+import { renderMarkdown } from '../lib/renderMarkdown'
 import BubbleCopyButton from './BubbleCopyButton'
 import './ChatMessageBubble.css'
 
@@ -345,6 +346,16 @@ interface ChatMessageBubbleProps {
    *  父组件注入：点按钮时把 reply_id 加入集合，请求返回后清。loading 期间按钮转菊花禁用点击，
    *  防连点重复触发。未传 → 不显示 loading（按需注入，finalized/无 reply_id 气泡不需 loading）。 */
   regenerating?: boolean
+  /** 持久化气泡回放复用 ChatMessageBubble 时，调用方若自带 actionGroup（hover 顶部操作按钮组），
+   *  可传 true 抑制 footer 内置的「复制 + 重新生成」操作栏，避免与 actionGroup 重复。
+   *  - 流式气泡 / finalized 气泡不传（默认 false）→ footer 按 (onRegenerate || content) 条件渲染，
+   *    原行为零变。
+   *  - 持久化气泡传 true + actionGroup → 操作按钮全归 actionGroup（hover 顶部），footer 只渲染产物卡。 */
+  hideFooterAction?: boolean
+  /** 持久化气泡复用 ChatMessageBubble 时，把「追问引导 chip」等底部附加内容渲染在 statusLine 之后、
+   *  chat-bubble-wrap 内部（与原手写持久化气泡的视觉位置一致——气泡外、wrap 内）。
+   *  流式 / finalized 气泡不传（undefined → 不渲染），原行为零变。 */
+  footerExtra?: React.ReactNode
 }
 
 /** 单条 task_tool 事件 → 摘要行数据。 */
@@ -424,6 +435,8 @@ export default function ChatMessageBubble({
   actionGroup,
   onRegenerate,
   regenerating,
+  hideFooterAction = false,
+  footerExtra,
 }: ChatMessageBubbleProps) {
   // 工具调用整组折叠（外层 Collapse「工具调用 (N)」）——展开策略：
   //  · 流式中（isStreaming=true）默认收起（过程信息按需查看，不撑高气泡）；
@@ -672,13 +685,20 @@ export default function ChatMessageBubble({
           streaming={isStreaming}
           content={content}
           contentRender={(c) => {
-            // 需求2-前端：content 含 ```card``` 围栏块时，按段切——散文段走原渲染（renderContent
-            // / 纯文本），卡片段走 StructuredCard。无卡片时走原路径（零行为变）。
-            // 流式光标：仅当存在散文尾部段时追加到末尾散文后；纯卡片或空散文时追加到整段末尾。
+            // 需求2-前端：content 含 ```card``` 围栏块时，按段切——散文段走 markdown 渲染（renderMarkdown），
+            //  卡片段走 StructuredCard（围栏逻辑零改动）。无卡片时走原路径（renderContent 兜底 / markdown）。
+            //  流式光标：仅当存在散文尾部段时追加到末尾散文后；纯卡片或空散文时追加到整段末尾。
+            //  Markdown 接入：原 fallback `String(c)` 改为 `renderMarkdown(String(c))`——LLM 输出的
+            //  `##` / `**` / `-` / ``` ``` ``` / `>` 等 markdown 符号不再裸奔直出。
+            //  renderContent prop 保留兼容（未来 @mention 高亮等可注入），默认 fallback 走 markdown。
+            //  用户气泡（isUser）：ChatPanel 的持久化用户气泡仍直出 content（见 ChatPanel.tsx isUser 分支）；
+            //  本组件 ChatMessageBubble 主要服务于 AI 气泡（streaming/finalized/coordinator），
+            //  统一走 markdown——若父组件传 isUser=true 也走 markdown（用户若输入 `**bold**` 也会被渲染，
+            //  合理行为，不强分 AI/用户）。
             if (!hasCards) {
               return (
                 <div className={hasTools ? 'chat-bubble-content' : undefined}>
-                  {renderContent ? renderContent(String(c)) : String(c)}
+                  {renderContent ? renderContent(String(c)) : renderMarkdown(String(c))}
                   {isStreaming && <span className="chat-streaming-cursor" />}
                 </div>
               )
@@ -691,7 +711,7 @@ export default function ChatMessageBubble({
                     const isLast = i === contentSegments.length - 1
                     return (
                       <span key={`seg-${i}`} className="chat-card-prose">
-                        {renderContent ? renderContent(seg.text) : seg.text}
+                        {renderContent ? renderContent(seg.text) : renderMarkdown(seg.text)}
                         {isStreaming && isLast && <span className="chat-streaming-cursor" />}
                       </span>
                     )
@@ -912,7 +932,7 @@ export default function ChatMessageBubble({
                流式生成中（isStreaming=true）不显示操作栏——内容还在变，复制/重生成都无意义；
                仅完成态（isStreaming=false）且非用户气泡（isUser=false，用户自己的消息不需重生成）
                才显示。产物下载卡与操作栏可共存（先产物后操作栏，竖排）。 */
-            hasArtifacts || (!isStreaming && !isUser && (onRegenerate || content)) ? (
+            hasArtifacts || (!isStreaming && !isUser && (onRegenerate || content) && !hideFooterAction) ? (
               <>
                 {hasArtifacts && (
                   <div className="chat-artifact-block">
@@ -943,7 +963,7 @@ export default function ChatMessageBubble({
                     })}
                   </div>
                 )}
-                {!isStreaming && !isUser && (onRegenerate || content) && (
+                {!isStreaming && !isUser && (onRegenerate || content) && !hideFooterAction && (
                   <div className="chat-action-bar">
                     <BubbleCopyButton content={content} />
                     {/* 「重新生成」：onRegenerate 传入（后端 regenerate 端点就绪后 ChatPanel 注入）→
@@ -974,6 +994,7 @@ export default function ChatMessageBubble({
           {new Date(timestamp).toLocaleTimeString()}
         </div>
         {statusLine && <div className="chat-status-line">{statusLine}</div>}
+        {footerExtra}
       </div>
     </div>
   )

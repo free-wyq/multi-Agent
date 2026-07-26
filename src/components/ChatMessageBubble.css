@@ -328,11 +328,50 @@
   padding: 4px 8px !important;
 }
 
-/* 散文段（卡片段之间/前后的文本）——inline span，保留原换行 */
+/* 散文段（卡片段之间/前后的文本）——inline span，走 markdown 渲染后内部含 p/h/ul/table 等块级元素，
+   不再保留 white-space:pre-wrap（markdown 段落自管换行，pre-wrap 会让 markdown 内的多余空白被保留→
+   视觉紊乱）。改为 block + 正常 white-space，让 markdown 渲染的 p/li 等自然换行。
+   word-break:break-word 保留——长串无空格内容仍需断行防溢出气泡。 */
 .chat-card-prose {
   display: block;
-  white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ── 气泡内 markdown 元素样式（方案 A 接入：react-markdown + remark-gfm）──
+ * 与橙主题（#fa8c16）协调，角色色/协调者紫不动（KEEP 语义色）。
+ * 大部分视觉通过 renderMarkdown.tsx 的 inline style 自带（暗色代码块 / 主题色链接 / 紧凑 spacing），
+ * 此处补少量需要 CSS 选择器才能搞定的样式（如 :first-child/:last-child 收紧 margin、代码块字体）。
+ * 不加 animation（项目硬约束「不要灵动」）。 */
+.chat-bubble-content > :first-child,
+.chat-card-prose > :first-child {
+  margin-top: 0;
+}
+
+.chat-bubble-content > :last-child,
+.chat-card-prose > :last-child {
+  margin-bottom: 0;
+}
+
+/* 用户气泡（白底橙字）内的 markdown 颜色继承——a 标签主题色已由 inline style 给出，
+   blockquote / table 边框等在用户气泡内仍可见，无需特殊覆盖（用户气泡一般无 markdown，
+   但若用户输入了也会正常渲染）。 */
+.chat-bubble--self .chat-bubble-content,
+.chat-bubble--self .chat-card-prose {
+  color: inherit;
+}
+
+/* 持久化气泡 @mention 高亮（renderMarkdownWithMentions 在 hast 阶段把命中成员名的
+   @name 包成 span.chat-mention）。橙主题色 + 浅橙底，与流式期 AntD Tag color="orange"
+   视觉一致（[[orange-theme-migration-2026-07-23]] KEEP 边界：橙主题色本就是品牌色，
+   非迁橙引入）。圆角 + 内边距微调，行内不破坏段落流。 */
+.chat-mention {
+  display: inline;
+  padding: 0 4px;
+  margin: 0;
+  line-height: 18px;
+  color: #fa8c16;
+  background: rgba(250, 140, 22, 0.08);
+  border-radius: 3px;
 }
 
 /* 卡片 JSON 解析失败 / 未知 kind 的降级 code 块——保留围栏原文供调提示词 */
