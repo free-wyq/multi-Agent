@@ -327,12 +327,6 @@ function extractFinalizedArtifacts(data: unknown): ArtifactFile[] {
 
 /** 聊天气泡头像（从 GroupPage 抽出，逻辑/视觉不变） */
 function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
-  const hash = id.split('').reduce((a, c) => a + c.charCodeAt(0), 0)
-  const ringDelay = (hash % 3000)
-  const ringDuration = 2500 + (hash % 7) * 200
-  const bobDelay = (hash >> 4) % 4000
-  const bobDuration = 3000 + (hash >> 3) % 5 * 300
-
   if (id === 'user') {
     return (
       <div className="chat-avatar chat-avatar--user">
@@ -347,11 +341,10 @@ function ChatAvatar({ id, agents }: { id: string; agents: AgentDefinition[] }) {
         src="/robot-avatar.png"
         alt=""
         className="chat-avatar-img"
-        style={{ animationDelay: `${bobDelay}ms`, animationDuration: `${bobDuration}ms` }}
       />
       <span
         className="chat-avatar-ring"
-        style={{ borderColor: color, animationDelay: `${ringDelay}ms`, animationDuration: `${ringDuration}ms` }}
+        style={{ borderColor: color }}
       />
     </div>
   )
@@ -1302,129 +1295,123 @@ export default function ChatPanel({
                 </div>,
               ]
             }
+            // 持久化气泡渲染分两路，避免双头像回归：
+            //  · 用户气泡（isUser）：手写 .chat-msg + ChatAvatar + .chat-bubble-wrap 结构
+            //    （用户消息纯文本，不走 ChatMessageBubble，保持纯文本语义 + 不渲折叠区）。
+            //  · AI 气泡（非用户）：直接渲染 ChatMessageBubble——它自带 .chat-msg + avatar
+            //    + .chat-bubble-wrap 结构。不能再外包一层 .chat-msg + ChatAvatar，否则双头像
+            //    + 双层 wrap 嵌套（persistent bubble 复用 ChatMessageBubble 后引入的回归：
+            //    外层 .chat-msg 的 ChatAvatar 与内层 ChatMessageBubble 的 avatar prop 各渲
+            //    一个头像，渲染出两个机器人头像）。streaming/finalized/coordinator 气泡路径
+            //    均直接渲染 ChatMessageBubble 无外层包裹，此处对齐。
+            if (isUser) {
+              return [
+                dateDivider,
+                <div
+                  key={msg.id}
+                  className="chat-msg"
+                  style={{ flexDirection: 'row-reverse' }}
+                >
+                  <ChatAvatar id={msg.sender_id} agents={agents} />
+                  <div className="chat-bubble-wrap chat-bubble-wrap--self">
+                    <div className="chat-sender-name chat-sender-name--right">
+                      <SenderName id={msg.sender_id} agents={agents} />
+                    </div>
+                    <div className="chat-bubble chat-bubble--self">
+                      {msg.content}
+                    </div>
+                    <div className="chat-timestamp chat-timestamp--right">
+                      {new Date(msg.created_at).toLocaleTimeString()}
+                    </div>
+                  </div>
+                </div>,
+              ]
+            }
+            // 非用户气泡：复用 ChatMessageBubble（与流式期同一组件，受控展开逻辑统一）。
+            //   - reasoning：extractCoordReasoning(msg.data) 落盘的推理全文
+            //   - reasoningTokens：extractCoordStats().reasoning_tokens 落盘真值
+            //   - toolEvents/thinkEvents：extractTraceEvents(msg.data) 把 data.trace 解析成
+            //     TraceEvent[]（后端 registry.on_log 落的 tool_start/tool_end/think/answer）
+            //   - statusLine：复用 extractCoordStats 状态行渲染（model · Ns · ↓ N tokens）
+            //   - footerExtra：追问引导 chip（气泡外、wrap 内，与 mockup 一致）
+            // hideFooterAction=true：抑制 footer 内置「复制+重新生成」操作栏，统一走顶部
+            //   hover actionGroup（含复制/朗读/重新生成），避免双份操作栏。ChatMessageBubble
+            //   footer 仍渲产物卡（持久化气泡当前无 artifact，footer 不显）。
+            // mention 高亮：持久化气泡走 markdown 渲染，mention 用 renderMarkdownWithMentions
+            //   注入（renderContent 闭包把 members 投影成 memberNames Set 传进去）。
+            const reasoning = extractCoordReasoning(msg.data) ?? undefined
+            const stats = extractCoordStats(msg.data)
+            const reasoningTokens = stats?.reasoning_tokens
+            const replyId = extractReplyId(msg.data)
+            const { toolEvents, thinkEvents } = extractTraceEvents(msg.data, msg.sender_id)
+            const memberNames = new Set<string>()
+            for (const m of members) {
+              if (m.agent_name) memberNames.add(m.agent_name)
+              if (m.alias) memberNames.add(m.alias)
+            }
+            const renderContent = (c: string) => renderMarkdownWithMentions(c, memberNames)
+            const followUps = msg.content ? generateFollowUps(msg.content) : []
+            const actionGroup = (
+              <div className="bubble-action-group">
+                <BubbleCopyButton content={msg.content ?? ''} />
+                {tts.enabled && <BubbleSpeakButton content={msg.content ?? ''} />}
+                {replyId && (
+                  <Tooltip title={regeneratingReplyIds.has(replyId) ? '正在重新生成…' : '重新生成'}>
+                    <Button
+                      type="text"
+                      size="small"
+                      className="bubble-action-btn"
+                      icon={<ReloadOutlined />}
+                      loading={regeneratingReplyIds.has(replyId)}
+                      disabled={regeneratingReplyIds.has(replyId)}
+                      onClick={() => handleRegenerate(replyId)}
+                    />
+                  </Tooltip>
+                )}
+              </div>
+            )
+            const statusLine = stats ? (
+              <div className="chat-status-line">
+                {stats.model && <span className="chat-status-model">{stats.model}</span>}
+                {stats.model && ' · '}
+                {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens`}
+                {stats.reasoning_tokens && (
+                  <span className="chat-status-reasoning">
+                    {' '}（含 {stats.reasoning_tokens} 推理）
+                  </span>
+                )}
+                {' · 完成'}
+              </div>
+            ) : undefined
+            const footerExtra = followUps.length > 0 ? (
+              <div className="chat-followup-chips">
+                <span className="chat-followup-label">💡 您可能还想问：</span>
+                {followUps.map((q) => (
+                  <Tag key={q} className="chat-followup-chip" onClick={() => handleFollowUpClick(q)}>
+                    {q}
+                  </Tag>
+                ))}
+              </div>
+            ) : undefined
             return [
               dateDivider,
-              <div
+              <ChatMessageBubble
                 key={msg.id}
-                className="chat-msg"
-                style={{ flexDirection: isUser ? 'row-reverse' : 'row' }}
-              >
-                <ChatAvatar id={msg.sender_id} agents={agents} />
-                <div className={`chat-bubble-wrap${isUser ? ' chat-bubble-wrap--self' : ''}`}>
-                  {/* 单条气泡操作按钮组：hover 显隐。朗读仅非用户消息且总开关开时渲染；
-                      复制对所有消息可见（用户/agent 都可复制）。
-                      [需求2-后端] 持久化回复的 agent_reply.data.reply_id 取回查键，注入「重新生成」
-                      按钮——与复制/朗读同列 hover 组（持久化气泡的操作面，区别于 ChatMessageBubble
-                      的 footer 槽位）。execute 路径模板 announce + user_input 无 reply_id → extractReplyId
-                      返 undefined → 不渲染重生成按钮（不留空响应占位）。regenerating 态按 reply_id 精确
-                      匹配本条气泡的按钮（点重跑时转 loading 防连点）。
-                      用户气泡右对齐——操作组改定位到左侧（.chat-bubble-wrap--self），
-                      否则贴在右边缘会被容器 overflow 裁切、看不到。 */}
-                  {(() => {
-                    // 持久化气泡回放：复用 ChatMessageBubble（与流式期同一组件，受控展开逻辑统一）。
-                    //   - reasoning：extractCoordReasoning(msg.data) 落盘的推理全文
-                    //   - reasoningTokens：extractCoordStats().reasoning_tokens 落盘真值
-                    //   - toolEvents/thinkEvents：extractTraceEvents(msg.data) 把 data.trace 解析成
-                    //     TraceEvent[]（后端 registry.on_log 落的 tool_start/tool_end/think/answer）
-                    //   - statusLine：复用 extractCoordStats 状态行渲染（model · Ns · ↓ N tokens）
-                    //   - footerExtra：追问引导 chip（气泡外、wrap 内，与 mockup 一致）
-                    // hideFooterAction=true：抑制 footer 内置「复制+重新生成」操作栏，统一走顶部
-                    //   hover actionGroup（含复制/朗读/重新生成），避免双份操作栏。ChatMessageBubble
-                    //   footer 仍渲产物卡（持久化气泡当前无 artifact，footer 不显）。
-                    // 用户气泡（isUser）直出 content 纯文本——不走 ChatMessageBubble（用户消息保持
-                    //   纯文本语义，不渲染 markdown / 不渲折叠区）。
-                    if (isUser) {
-                      return (
-                        <>
-                          <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
-                            <SenderName id={msg.sender_id} agents={agents} />
-                          </div>
-                          <div className={`chat-bubble ${isUser ? 'chat-bubble--self' : 'chat-bubble--other'}`}>
-                            {msg.content}
-                          </div>
-                          <div className={`chat-timestamp ${isUser ? 'chat-timestamp--right' : ''}`}>
-                            {new Date(msg.created_at).toLocaleTimeString()}
-                          </div>
-                        </>
-                      )
-                    }
-                    const reasoning = extractCoordReasoning(msg.data) ?? undefined
-                    const stats = extractCoordStats(msg.data)
-                    const reasoningTokens = stats?.reasoning_tokens
-                    const replyId = extractReplyId(msg.data)
-                    const { toolEvents, thinkEvents } = extractTraceEvents(msg.data, msg.sender_id)
-                    // mention 高亮：持久化气泡走 markdown 渲染，mention 用 renderMarkdownWithMentions
-                    // 注入（renderContent 闭包把 members 投影成 memberNames Set 传进去）。
-                    const memberNames = new Set<string>()
-                    for (const m of members) {
-                      if (m.agent_name) memberNames.add(m.agent_name)
-                      if (m.alias) memberNames.add(m.alias)
-                    }
-                    const renderContent = (c: string) => renderMarkdownWithMentions(c, memberNames)
-                    const followUps = msg.content ? generateFollowUps(msg.content) : []
-                    const actionGroup = (
-                      <div className="bubble-action-group">
-                        <BubbleCopyButton content={msg.content ?? ''} />
-                        {tts.enabled && <BubbleSpeakButton content={msg.content ?? ''} />}
-                        {replyId && (
-                          <Tooltip title={regeneratingReplyIds.has(replyId) ? '正在重新生成…' : '重新生成'}>
-                            <Button
-                              type="text"
-                              size="small"
-                              className="bubble-action-btn"
-                              icon={<ReloadOutlined />}
-                              loading={regeneratingReplyIds.has(replyId)}
-                              disabled={regeneratingReplyIds.has(replyId)}
-                              onClick={() => handleRegenerate(replyId)}
-                            />
-                          </Tooltip>
-                        )}
-                      </div>
-                    )
-                    const statusLine = stats ? (
-                      <div className="chat-status-line">
-                        {stats.model && <span className="chat-status-model">{stats.model}</span>}
-                        {stats.model && ' · '}
-                        {`${formatElapsed(stats.elapsed_ms)} · ↓ ${stats.tokens} tokens`}
-                        {stats.reasoning_tokens && (
-                          <span className="chat-status-reasoning">
-                            {' '}（含 {stats.reasoning_tokens} 推理）
-                          </span>
-                        )}
-                        {' · 完成'}
-                      </div>
-                    ) : undefined
-                    const footerExtra = followUps.length > 0 ? (
-                      <div className="chat-followup-chips">
-                        <span className="chat-followup-label">💡 您可能还想问：</span>
-                        {followUps.map((q) => (
-                          <Tag key={q} className="chat-followup-chip" onClick={() => handleFollowUpClick(q)}>
-                            {q}
-                          </Tag>
-                        ))}
-                      </div>
-                    ) : undefined
-                    return (
-                      <ChatMessageBubble
-                        senderId={msg.sender_id}
-                        senderName={resolveSenderName(msg.sender_id, agents)}
-                        avatar={<ChatAvatar id={msg.sender_id} agents={agents} />}
-                        content={msg.content ?? ''}
-                        renderContent={renderContent}
-                        reasoning={reasoning}
-                        reasoningTokens={reasoningTokens}
-                        toolEvents={toolEvents}
-                        thinkEvents={thinkEvents}
-                        timestamp={msg.created_at}
-                        actionGroup={actionGroup}
-                        statusLine={statusLine}
-                        hideFooterAction
-                        footerExtra={footerExtra}
-                      />
-                    )
-                  })()}
-                </div>
-              </div>,
+                senderId={msg.sender_id}
+                senderName={resolveSenderName(msg.sender_id, agents)}
+                avatar={<ChatAvatar id={msg.sender_id} agents={agents} />}
+                content={msg.content ?? ''}
+                renderContent={renderContent}
+                reasoning={reasoning}
+                reasoningTokens={reasoningTokens}
+                toolEvents={toolEvents}
+                thinkEvents={thinkEvents}
+                timestamp={msg.created_at}
+                actionGroup={actionGroup}
+                statusLine={statusLine}
+                hideFooterAction
+                footerExtra={footerExtra}
+              />,
             ]
           })
         )}
