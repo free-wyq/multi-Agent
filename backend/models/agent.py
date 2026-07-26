@@ -27,6 +27,10 @@ class AgentDefinition(BaseModel):
     model: str = ""
     max_turns: int = 0
     description: str | None = None
+    # PRD AG-08: english slug (URL-safe id) + emoji avatar icon. Both nullable
+    # for backward-compat with agent rows created before these columns existed.
+    slug: str | None = None
+    icon_emoji: str | None = None
     metadata_: dict[str, Any] | None = None
     created_at: str = ""
     updated_at: str = ""
@@ -43,3 +47,7 @@ class AgentCreatePayload(BaseModel):
     mounted_skills: list[str] = []
     mounted_mcp: list[str] = []
     description: str | None = None
+    # PRD AG-08: english slug + emoji avatar icon. Optional on create — falls
+    # back to None (NULL) when not supplied; crud.create_agent passes them through.
+    slug: str | None = None
+    icon_emoji: str | None = None
