@@ -209,7 +209,24 @@ async function handleModel(ctx: SlashCommandContext): Promise<void> {
  */
 async function handleTools(ctx: SlashCommandContext): Promise<void> {
   try {
-    const result = await slashApi.tools(ctx.args || undefined, ctx.groupId || undefined)
+    // args 解析 name→id：后端 _slash_tools 用 agent_id 做 PK 查 crud.get_agent（只认
+    // agent_xxx 这类主键），直接传中文名（如「后端工程师」）查不到 → mounted_mcp 永远空。
+    // 故前端先按 name/id 三级 fallback 解析到真实 id 再传（与 handleAgent 同款解析）。
+    // 无参或未匹配名 → 不传 agentId（后端只返内置 roster，不查 MCP，workspace 无关总能列）。
+    let agentId: string | undefined
+    if (ctx.args) {
+      const agents = await agentApi.list()
+      const query = ctx.args.trim().toLowerCase()
+      let matched = agents.filter((a) => a.name.toLowerCase() === query)
+      if (matched.length === 0) {
+        matched = agents.filter((a) => a.name.toLowerCase().includes(query))
+      }
+      if (matched.length === 0) {
+        matched = agents.filter((a) => a.id.toLowerCase() === query)
+      }
+      agentId = matched[0]?.id // 未匹配 → undefined（降级为仅内置工具，不报错）
+    }
+    const result = await slashApi.tools(agentId, ctx.groupId || undefined)
     ctx.renderCard(createElement(ToolsCard, { result }))
   } catch (e) {
     ctx.renderCard(
