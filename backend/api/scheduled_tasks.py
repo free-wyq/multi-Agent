@@ -13,9 +13,9 @@ Routes map to the frontend ``scheduledTaskApi``:
 """
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
-from engine.scheduler import add_job, remove_job
+from engine.scheduler import ScheduleConfigError, add_job, remove_job, validate_schedule
 from models import ScheduledTask, ScheduledTaskCreatePayload, ScheduledTaskRun
 from store import crud
 
@@ -34,6 +34,12 @@ async def get_scheduled_task(task_id: str) -> ScheduledTask | None:
 
 @router.post("")
 async def create_scheduled_task(payload: ScheduledTaskCreatePayload) -> ScheduledTask:
+    # 任务18c：persist 前校验调度配置，避免「行已落库 → add_job raise → 500 + 孤儿行」。
+    # validate_schedule 抛 ScheduleConfigError → 400，坏 task 根本不落库。
+    try:
+        validate_schedule(payload.model_dump())
+    except ScheduleConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     task = await crud.create_scheduled_task(payload)
     if task.enabled:
         add_job(task.model_dump())
@@ -42,6 +48,10 @@ async def create_scheduled_task(payload: ScheduledTaskCreatePayload) -> Schedule
 
 @router.put("/{task_id}")
 async def update_scheduled_task(task_id: str, payload: ScheduledTaskCreatePayload) -> ScheduledTask | None:
+    try:
+        validate_schedule(payload.model_dump())
+    except ScheduleConfigError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     task = await crud.update_scheduled_task(task_id, payload)
     if task:
         # rebuild the job (replace_existing handles the swap)

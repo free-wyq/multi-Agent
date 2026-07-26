@@ -233,4 +233,12 @@ async def update_agent(agent_id: str, payload: AgentCreatePayload) -> AgentDefin
 
 @router.delete("/{agent_id}")
 async def delete_agent(agent_id: str) -> bool:
+    # 任务18c：删 agent 前先摘掉指向它的定时任务 job，否则 fire 会 push_task 进
+    # 已删 agent 的死 inbox（孤儿 job）。task 行本身保留（用户可能只是想换 agent，
+    # 不一定要丢调度配置）——只 remove_job，不禁用/不删除 task，让用户后续决定。
+    # remove_job 是幂等 no-op（task 已 disabled 或从未 add_job 都安全）。
+    from engine.scheduler import remove_job
+    from store import crud
+    for t in await crud.list_scheduled_tasks_for_agent(agent_id):
+        remove_job(t.id)
     return await crud.delete_agent(agent_id)

@@ -251,7 +251,18 @@ async def delete_group(group_id: str) -> bool:
     and returns the count; the DB cascade (members/tasks/messages) happens in
     ``crud.delete_group`` regardless. Returns ``True`` once the group row + its
     engines are gone.
+
+    任务18c: also remove this group's scheduled-task jobs before stopping the
+    engines — a fire after disband would ``push_task`` into a queue whose
+    ``_run_loop`` is gone (orphan job → dead-letter pile). The task rows are
+    left in place (a future caller can reassign them); only the live jobs are
+    torn down, matching ``delete_agent``'s "remove the job, keep the config"
+    policy. ``remove_job`` is idempotent (disabled/never-registered tasks no-op).
     """
+    from engine.scheduler import remove_job
+    from store import crud
+    for t in await crud.list_scheduled_tasks_for_group(group_id):
+        remove_job(t.id)
     await registry.stop_group(group_id)
     return await crud.delete_group(group_id)
 

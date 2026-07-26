@@ -1457,6 +1457,54 @@ async def list_scheduled_tasks() -> list[ScheduledTask]:
         return [_sched_to_model(r) for r in rows]
 
 
+async def list_scheduled_tasks_for_agent(agent_id: str) -> list[ScheduledTask]:
+    """List all scheduled tasks targeting ``agent_id`` (任务18c cascade helper).
+
+    Used by ``DELETE /api/agents/{id}`` to find (and remove the APScheduler
+    jobs of) scheduled tasks that would otherwise become orphans — a fire
+    after the agent is gone would ``push_task`` into a dead inbox forever.
+    Returns enabled + disabled tasks alike so the caller can purge their jobs
+    unconditionally (a disabled task has no live job, but ``remove_job`` is a
+    no-op then, and including disabled rows keeps the set complete for any
+    future caller that wants to reassign rather than delete).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ScheduledTaskEntity)
+                .where(ScheduledTaskEntity.agent_id == agent_id)
+                .order_by(ScheduledTaskEntity.created_at)
+            )
+        ).scalars().all()
+        return [_sched_to_model(r) for r in rows]
+
+
+async def list_scheduled_tasks_for_group(group_id: str) -> list[ScheduledTask]:
+    """List all scheduled tasks scoped to ``group_id`` (任务18c cascade helper).
+
+    Used by ``DELETE /api/groups/{id}`` to remove the APScheduler jobs of
+    scheduled tasks before the group (and its engines) are torn down. Without
+    this, a fire after disband would ``push_task`` into a ``_task_queues`` key
+    whose engine's ``_run_loop`` has been stopped — the item piles up
+    unprocessed (and on the next group reusing the same id, a stale scheduled
+    prompt would surface). See ``list_scheduled_tasks_for_agent`` for the
+    enabled/disabled inclusion rationale.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        rows = (
+            await db.execute(
+                select(ScheduledTaskEntity)
+                .where(ScheduledTaskEntity.group_id == group_id)
+                .order_by(ScheduledTaskEntity.created_at)
+            )
+        ).scalars().all()
+        return [_sched_to_model(r) for r in rows]
+
+
 async def get_scheduled_task(task_id: str) -> ScheduledTask | None:
     from store.database import SessionLocal
 
