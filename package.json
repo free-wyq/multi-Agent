@@ -11,6 +11,8 @@
     "dev:web": "vite --port 5173",
     "dev:electron": "wait-on http://localhost:8000/health && wait-on tcp:5173 && tsc -p tsconfig.node.json && cross-env VITE_DEV_SERVER_URL=http://localhost:5173 electron dist-electron/main.js",
     "build": "vite build && tsc -p tsconfig.node.json",
+    "test": "vitest run",
+    "test:watch": "vitest",
     "build:python": "cd backend && pyinstaller --onefile --name multi-agent-server main.py",
     "pack": "npm run build && npm run build:python && electron-builder",
     "pack:linux": "npm run build && npm run build:python && electron-builder --linux",
@@ -28,6 +30,9 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
+    "@testing-library/jest-dom": "^6.9.1",
+    "@testing-library/react": "^16.3.2",
+    "@testing-library/user-event": "^14.6.1",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
@@ -35,8 +40,10 @@
     "cross-env": "^7.0.3",
     "electron": "^33.0.0",
     "electron-builder": "^25.0.0",
+    "jsdom": "^29.1.1",
     "typescript": "~6.0.2",
     "vite": "^8.0.12",
+    "vitest": "^4.1.10",
     "wait-on": "^8.0.0"
   }
 }

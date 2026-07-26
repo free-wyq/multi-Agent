@@ -1,3 +1,4 @@
+/// <reference types="vitest/config" />
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
@@ -12,5 +13,14 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     emptyOutDir: true,
+  },
+  // 单测配置：jsdom 环境，src/**/*.{test,spec}.{ts,tsx} + __tests__/ 目录
+  test: {
+    globals: true,
+    environment: 'jsdom',
+    setupFiles: ['./src/test/setup.ts'],
+    include: ['src/**/*.{test,spec}.{ts,tsx}'],
+    css: false,
+    passWithNoTests: true,
   },
 })
