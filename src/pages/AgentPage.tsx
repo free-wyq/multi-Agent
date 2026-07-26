@@ -219,10 +219,15 @@ export default function AgentPage() {
     try {
       /* 后端要求 system_prompt 必填，非自定义角色自动填充默认 prompt */
       const system_prompt = (values.system_prompt as string) || ROLE_PROMPTS[values.role as string] || ''
+      /* PRD AG-08: icon_emoji 留空回退角色派生主题 emoji，保证卡片头像永不空。
+       * description/slug 直通，slug 留空则后端 None（向后兼容旧 agent）。 */
+      const derivedEmoji = (values.icon_emoji as string | undefined)?.trim()
+      const icon_emoji = derivedEmoji || getRoleTheme(values.role as string).emoji
       const payload = {
         ...values,
         system_prompt,
         extra_skills: (values.extra_skills as string[]) ?? [],
+        icon_emoji,
       }
       if (editing) {
         await agentApi.update(editing.id, payload as Parameters<typeof agentApi.update>[1])
@@ -263,6 +268,9 @@ export default function AgentPage() {
       role: agent.role,
       extra_skills: agent.extra_skills ?? [],
       system_prompt: agent.system_prompt,
+      slug: agent.slug ?? undefined,
+      description: agent.description ?? undefined,
+      icon_emoji: agent.icon_emoji ?? undefined,
     })
     setModalOpen(true)
   }
@@ -650,6 +658,25 @@ export default function AgentPage() {
                 ),
               }))}
             />
+          </Form.Item>
+          {/* PRD AG-08: 与模板对齐的三个身份字段。slug=英文 URL 安全 id；description=一句话职责
+              定位（之前表单漏掉，此处补齐）；icon_emoji=头像 emoji，留空回退角色派生主题 emoji。 */}
+          <Form.Item
+            name="slug"
+            label="英文名（slug）"
+            tooltip="URL 安全的英文标识符，雇佣模板时自动继承。留空则不设置。"
+          >
+            <Input placeholder="如：frontend-dev" autoComplete="off" />
+          </Form.Item>
+          <Form.Item name="description" label="描述">
+            <Input.TextArea rows={2} placeholder="一句话介绍该智能体的职责定位" />
+          </Form.Item>
+          <Form.Item
+            name="icon_emoji"
+            label="头像 emoji"
+            tooltip="留空则按角色自动派生（如前端=💻、后端=🔧、测试=🐛）。"
+          >
+            <Input placeholder="如：🦊（留空回退角色派生）" autoComplete="off" maxLength={8} />
           </Form.Item>
           {roleValue === '自定义' && (
             <Form.Item name="system_prompt" label="角色描述" rules={[{ required: true, message: '请输入角色描述' }]}>
