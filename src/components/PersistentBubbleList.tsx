@@ -253,9 +253,9 @@ function extractTraceEvents(
  * !== 'object')`` + ``if (!raw || typeof raw !== 'object')`` 三处重复守卫去重。safeRecord
  * 额外排除数组（数组非 record），artifact manifest 是 dict 非数组，行为零变。
  *
- * export 给 ChatPanel：finalizedBubbles memo（定稿过渡气泡，[任务9b] 抽 StreamingBubbleList
- * 时再随迁）仍留在 ChatPanel，它按 task_complete 事件 data 提取产物——故本 helper 由
- * PersistentBubbleList 持有 + export，ChatPanel import 复用（单一真源，不复制）。 */
+ * 单一真源：[任务9b] finalizedBubbles memo 随 StreamingBubbleList 抽出，该 memo 也调本函数
+ * 提取 artifact manifest。本 helper 由 PersistentBubbleList 持有 + export，StreamingBubbleList
+ * import 复用（不复制第二份实现）。 */
 export function extractFinalizedArtifacts(data: unknown): ArtifactFile[] {
   const dd = safeRecord(data)
   if (!dd) return []
