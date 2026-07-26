@@ -22,6 +22,9 @@ export interface AgentDefinition {
   model?: string
   max_turns?: number
   description?: string | null
+  /** PRD AG-08: 英文 slug（URL 安全 id）+ emoji 头像。均可空，向后兼容旧 agent 行。 */
+  slug?: string | null
+  icon_emoji?: string | null
   /** AG-05: 工具权限白名单/黑名单（后端 AgentDefinition 字段，当前种子为空）。 */
   allowed_tools?: string[]
   denied_tools?: string[]
@@ -36,6 +39,9 @@ export interface AgentCreatePayload {
   skills?: string[]
   system_prompt?: string
   description?: string
+  /** PRD AG-08: 雇佣模板时继承的英文 slug + emoji 头像（可空，create 时可不传）。 */
+  slug?: string
+  icon_emoji?: string
   /** AD-02: agentApi.update 透传的工具权限白/黑名单（后端 AgentCreatePayload extra="allow"
    *  + AgentEntity 有 allowed_tools/denied_tools 列，update_agent model_dump(exclude_unset)
    *  + setattr 落库）。create 时通常不传（挂载是独立动作），仅 update 用。 */
