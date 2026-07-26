@@ -48,6 +48,7 @@ from engine.tools import (
     resolve_skill_tools,
     tools_for_group,
 )
+from llm.prompts import CARD_OUTPUT_CONTRACT
 from store import crud, skill_assets
 
 logger = logging.getLogger("multi-agent.agent_loop")
@@ -79,6 +80,15 @@ When you need to create or modify files, call the appropriate tool directly.
 Work step by step: read existing files if needed, then write/edit. When the
 task is done, reply with a concise text summary (no tool call).
 """
+
+# 结构化卡片输出契约（需求2-后端·[需求2-设计] commit 9df5116）。execute 路径走
+# create_react_agent ReAct loop，其最终文本答案（on_chat_model_end 的 AIMessage.
+# content，落 ``result.output`` → registry announce ``full_output``）也可能需要内嵌
+# `````card```` 围栏片段（如百度热搜 Top30 表格）。把同一份 ``CARD_OUTPUT_CONTRACT``
+# 拼进 ReAct system prompt，使 execute 路径最终答案也能出卡片——与 brain chat 路径
+# （build_brain_prompt 末尾内嵌同一常量）文字一致（单一真源在本常量）。卡片是 content
+# 子串透传，不改 DB/事件；详见 ``docs/structured-result-card-schema.md`` §7 后端契约。
+_CARD_OUTPUT_SYSTEM_SUFFIX = "\n" + CARD_OUTPUT_CONTRACT + "\n"
 
 
 def set_extra_tools(tools: list) -> None:
@@ -244,6 +254,9 @@ async def run_agent_loop(
     if sys_content:
         sys_content += "\n"
     sys_content += _TOOL_SYSTEM_SUFFIX
+    # 需求2-后端：execute 路径 ReAct 最终答案也能出结构化卡片（与 brain chat 路径
+    # build_brain_prompt 内嵌的 CARD_OUTPUT_CONTRACT 同源），拼在 tool suffix 之后。
+    sys_content += _CARD_OUTPUT_SYSTEM_SUFFIX
     if _DELEGATE_DEPTH.get() == 0:
         sys_content += (
             "\nYou can delegate a subtask to a specialized skill agent via the "

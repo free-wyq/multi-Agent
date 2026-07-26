@@ -36,10 +36,14 @@ re-introducing the coupling B9 just removed.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from events import emit_message_added
+from llm.card_fragment import count_card_fragments
 from store import crud
+
+logger = logging.getLogger("multi-agent.reply")
 
 
 async def persist_agent_reply(
@@ -99,6 +103,14 @@ async def persist_agent_reply(
     nodes route via an engine-installed callback (set per-invoke). That seam is
     real and preserved. This helper is only the persist+emit truth.
 
+    需求2-后端·卡片观测（[需求2-设计] commit 9df5116 单真源
+    ``docs/structured-result-card-schema.md``）：落盘后用
+    ``count_card_fragments(content)`` 统计 `````card```` 围栏块数，仅当 >0 时
+    ``logger.info`` 记一行（验证 LLM 是否遵守 ``CARD_OUTPUT_CONTRACT`` 提示词）。
+    纯观测，不阻断、不解析 payload、不改 message dict / ``data``（卡片是
+    ``content`` 子串，走现有透传，不改 DB/事件）。0 块不记（避免对纯散文回复刷
+    日志）。统计包在 try/except best-effort 内，正则/计数失败不影响落盘主流程。
+
     Returns the persisted message model dict (``msg.model_dump()``) so callers
     that need the row id / timestamp (e.g. ``emit_message_added`` already
     consumes it here; a future caller could log it) can use it without a second
@@ -118,6 +130,20 @@ async def persist_agent_reply(
             "data": data,
         }
     )
+    # 需求2-后端：可选的卡片片段观测——当 LLM 按 CARD_OUTPUT_CONTRACT 在 content
+    # 里产出了 `````card```` 围栏块时，记录片段数（验证提示词是否被遵守）。不阻断、
+    # 不解析、不改 message dict（卡片是 content 子串，走现有透传）。0 块时不记（避免
+    # 对绝大多数纯散文回复刷 info 日志）。count_card_fragments 是纯函数，零成本短路。
+    try:
+        n_cards = count_card_fragments(content)
+        if n_cards:
+            logger.info(
+                "[reply %s] agent_reply 含 %d 个结构化卡片片段（card 围栏）",
+                msg.id, n_cards,
+            )
+    except Exception:
+        # 观测是 best-effort：正则/计数不应影响落盘主流程。
+        logger.debug("[reply %s] count_card_fragments 失败（忽略）", msg.id, exc_info=True)
     await emit_message_added(msg.model_dump())
     return msg.model_dump()
 

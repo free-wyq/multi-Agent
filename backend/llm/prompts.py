@@ -51,6 +51,48 @@ DECENTRALIZED_COORDINATOR_PROMPT = (
 )
 
 
+# 结构化卡片输出契约（需求2 设计·[需求2-设计] commit 9df5116 单真源
+# ``docs/structured-result-card-schema.md``）。worker 在最终回复的 ``content``
+# 文本里内嵌 `````card```` 围栏 JSON 片段，前端解析渲染成 AntD Descriptions/List/
+# Table（[需求2-前端]）。卡片是 ``content`` 子串，走现有 _unified_reply →
+# persist_agent_reply → emit_message_added 透传，不改 DB/不加列/不引入新事件（
+# ``data`` 仍只载流式 run-stats）。详见 ``docs/structured-result-card-schema.md``
+# §2 约束与决策。
+#
+# 为什么是「可选输出」而非强制：纯散文回复（写作、翻译、闲聊、成语接龙）照常纯文本，
+# 强套卡片反而难读（过度结构化）。仅当产出 genuinely 结构化（榜单/表格/固定字段
+# 键值）才用。提示词须明示这条边界，避免 LLM 把所有回复都套进卡片。
+#
+# 此常量内嵌进 build_brain_prompt 末尾（chat/execute 路径都带，execute 路径的
+# ReAct loop 由 _TOOL_SYSTEM_SUFFIX 之后的 build_brain_prompt 携带——execute
+# 路径最终答案也走 `````card```` 围栏透传到 announce 的 full_output，无需 registry
+# 改动）。同时 execute 路径的 create_react_agent system prompt 也拼此契约（见
+# ``engine/agent_loop.py`` ``_CARD_OUTPUT_SYSTEM_SUFFIX``），保证 ReAct loop 最终
+# 答案也能出卡片。两处文字一致（单一真源在本常量）。
+CARD_OUTPUT_CONTRACT = """【结构化卡片输出契约（可选）】
+当本回复的产出 genuinely 结构化时——榜单/排行榜/对比表（多行多列）、固定字段的键值摘要
+（如天气概况：气温/风力/降水）、要点列表（如穿衣建议/待办）——请在回复文本里用 ```` ```card ``` ```` 围栏内嵌一段 JSON 卡片段，前端会渲染成结构化卡片而非纯文本。纯散文回复（写作、翻译、闲聊、接龙、讨论）照常纯文本，不要强套卡片。
+
+围栏格式（固定用 ```` card ```` 作 info string，围栏内是单个 JSON 对象）：
+```card
+{"icon":"🔥","title":"百度热搜 Top 5","kind":"table",
+ "columns":["排名","标题","热度"],
+ "rows":[["1","神舟二十号成功对接","9821"],["2","北方多地降温","8740"]]}
+```
+
+三种 kind：
+1. kv —— 键值表：``items:[{"label":"气温","value":"12~22°C"},{"label":"风力","value":"北风3级"}]``，适合天气概况/配置摘要/单实体属性。
+2. list —— 列表：``items:["长袖+薄外套","无需雨具"]``，适合穿衣建议/待办/要点。
+3. table —— 表格：``columns:["排名","标题","热度"]`` + ``rows:[["1","标题","9821"],...]``，适合榜单/对比表（每行长度须等于 columns 长度）。
+
+字段约束：
+- icon/title 可空串（""）表示无图标/无标题，但 kind 必填，items/columns/rows 按 kind 必填。
+- **所有值统一 string**——数字也 stringify（热度写 "9821" 而非 9821），避免渲染歧义。
+- 一条回复可含 0~N 个 card 块，与散文穿插；不要把同一信息既写散文又套卡片。
+- 围栏内 JSON 须合法（值里的双引号、换行按 JSON 转义）。不要在围栏外裸贴 JSON。
+- 排名/热度等编号列直接作为 table 的一列文本（v1 不内置 href 字段；如需链接并入标题文本）。"""
+
+
 def build_brain_prompt(role: str, name: str, context: str, message: str, system_prompt: str = "") -> str:
     """Worker brain prompt (Rust format_brain_prompt).
 
@@ -65,6 +107,14 @@ def build_brain_prompt(role: str, name: str, context: str, message: str, system_
     reminder (B12) is interpolated from ``TEAM_INTERACTION_SUFFIX`` so the
     system-layer persona append (registry) and decision-layer prompt (here)
     share one source of truth for that paragraph.
+
+    ``CARD_OUTPUT_CONTRACT`` (需求2-后端) is appended before the JSON-format
+    reminder so the worker knows it MAY emit `````card```` fenced fragments
+    inside its ``content`` for genuinely structured outputs (榜单/表格/键值).
+    The contract is OPTIONAL by design (§2 of the schema doc): prose replies
+    stay plain text — the LLM must not force every reply into a card. The
+    fenced fragments ride as a ``content`` substring through the existing
+    reply pipeline (no DB/event change; ``data`` still carries only run-stats).
     """
     return f"""你是一名专业的 {role}，名字叫 {name}。
 
@@ -89,6 +139,8 @@ def build_brain_prompt(role: str, name: str, context: str, message: str, system_
 当同事 @你 进行来回互动（如成语接龙、讨论、对话游戏）时，按规则继续，并在回复末尾 @对方 把话筒传回去；若接不上或无法继续，直接说明，不再 @对方（系统据此自然结束来回）。注意：@后只能写对方的**名字**（如 @后端工程师、@前端工程师），不要写 id。
 
 {TEAM_INTERACTION_SUFFIX}
+
+{CARD_OUTPUT_CONTRACT}
 
 请严格按照以下 JSON 格式回复（只输出纯 JSON）：
 {{

@@ -2,9 +2,15 @@
 from __future__ import annotations
 
 from .client import chat_completion, get_llm_config
+from .card_fragment import (
+    CARD_FRAGMENT_RE,
+    count_card_fragments,
+    extract_card_payloads,
+)
 from .extract_json import extract_json
 from .json_stream import ContentExtractor
 from .prompts import (
+    CARD_OUTPUT_CONTRACT,
     COORDINATOR_SYSTEM,
     DECENTRALIZED_COORDINATOR_PROMPT,
     TEAM_INTERACTION_SUFFIX,
@@ -21,6 +27,10 @@ __all__ = [
     "get_llm_config",
     "extract_json",
     "ContentExtractor",
+    "CARD_FRAGMENT_RE",
+    "count_card_fragments",
+    "extract_card_payloads",
+    "CARD_OUTPUT_CONTRACT",
     "COORDINATOR_SYSTEM",
     "DECENTRALIZED_COORDINATOR_PROMPT",
     "TEAM_INTERACTION_SUFFIX",
