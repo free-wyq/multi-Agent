@@ -449,24 +449,28 @@ export default function ChatPanel({
   // 切群时重置为 null，让新群首条消息渲染分隔条（否则可能误判与旧群末条同天）。
   const lastDateRef = useRef<string | null>(null)
 
-  // B23：已退场定稿气泡的 task_id 集合——「reply 已落地、定稿气泡已退场」的增量真源。
+  // 已退场定稿气泡的 task_id 集合——「reply 已落地、定稿气泡已退场」的真源（B22/B23 + 缺陷5 修复）。
   // finalizedBubbles 原 deps=[events, streaming, chatMessages, agentStatuses]——chatMessages
-  // 每条新消息（含 task_token 流式期桥接的 task_log）都换新引用 → finalizedBubbles 全量重算
-  // （遍历 events + 对每个收尾事件 chatMessages.some 扫描）。高频聊天时 finalizedBubbles 其实
-  // 几乎不变（只在 task 收尾 + reply 落地两个时刻变化），却被每条新消息拖着重算——浪费。
-  // B23 把「退场判定」从「每次重算 chatMessages.some」改为「reply 落地 effect 增量回填 ref」：
-  //   - repliedTaskIdsRef.current: Set<string> 记录已退场 task_id（reply 已落地的 task）。
-  //   - logs 桥接 effect（line ~628 setChatMessages）每次新 agent_reply 落地后，若其 task_id
-  //     非空就把 task_id 加入 ref（标记该 task 的定稿气泡可退场）。
-  //   - finalizedBubbles 改用 repliedTaskIdsRef.current.has(e.taskId) 判退场（O(1) 集合查），
-  //     不再 chatMessages.some 扫描 → deps 去掉 chatMessages（chatMessages 变化不再触发重算）。
-  // 切群 effect（line ~661）清空 ref（新群定稿状态独立）。
-  //为何用 ref 不用 state：ref 变化不触发渲染（避免「回填 ref → finalizedBubbles 重算 → 渲染」
-  // 链）。finalizedBubbles 的重算时机回归「events/streaming/agentStatuses 变化时」——这是
-  // 定稿气泡真正变化的时机（task 收尾事件入 events / 流式缓冲清空 / agent 名变）。ref 只是
-  // 让 finalizedBubbles 在重算时能读到最新退场集合，不自己驱动重算。这复刻 logsLenRef（B17
-  // 增量桥接）+ spokenIdsRef（TTS 去重）+ lastDateRef（日期分组）的同款 ref-as-truth 模式。
-  const repliedTaskIdsRef = useRef<Set<string>>(new Set())
+  // 每条新消息（含 task_log）都换新引用 → finalizedBubbles 全量重算。B23 把退场判定从「每次
+  // 重算 chatMessages.some」改为「reply 落地 effect 增量回填 repliedTaskIds 集合」：
+  //   - repliedTaskIds: Set<string> 记录已退场 task_id（announce reply 已落地的 task）。
+  //   - logs 桥接 effect 每次新 agent_reply 落地后，若其 task_id 非空就把它加入集合
+  //     （标记该 task 的定稿气泡可退场）。
+  //   - finalizedBubbles 用 repliedTaskIds.has(e.taskId) 判退场（O(1) 集合查），不再
+  //     chatMessages.some 扫描。
+  // 为何用 state 不用 ref（缺陷5 修复）：B23 原用 ref + 把 chatMessages 移出 memo deps 避高频
+  // 重算，但埋了时序 bug——emit 顺序是 emit_task_completed（registry:421）先于 _reply announce
+  // （registry:460），agent_reply 落地时 logs effect 回填 ref（commit 后），而 finalizedBubbles
+  // memo 在 render 期算；本批 memo 算时 ref 仍空 → 渲染 finalized bubble。随后 setChatMessages
+  // 触发的重渲染里 memo deps [events/streaming/agentStatuses] 均未变 → memo 返回缓存 →
+  // finalized bubble 卡住不退场（即「一轮多泡」缺陷的 finalized 那条）。改用 state 并把
+  // repliedTaskIds 纳入 memo deps：reply 落地 effect setRepliedTaskIds → 触发重渲染 → memo
+  // 重算 → repliedTaskIds.has 命中 → finalized bubble 退场。perf 不回归：repliedTaskIds 仅在
+  // agent_reply 落地时变化（每 task 一次，低频），不像 chatMessages 每 token/log 换引用——
+  // 故纳入 deps 不会重拾 B23 想避开的高频重算。切群 effect 清空集合（新群定稿状态独立）。
+  // reload-safe：重连/切群回灌历史 agent_reply 经 logs effect 重扫回填（历史 agent_reply 带
+  // task_id 同样入集合，prev.has 去重），故 reload 后退场状态与 live 一致。
+  const [repliedTaskIds, setRepliedTaskIds] = useState<Set<string>>(new Set())
 
   // 是否展示「回到底部」浮动按钮：上滑离底部一段距离（>120px）时显示。
   // 距底 80px 内视为贴底（与 stickToBottomRef 同阈值，但浮动按钮用更宽的 120px 门槛，
@@ -676,14 +680,14 @@ export default function ChatPanel({
   const finalizedBubbles = useMemo(() => {
     const out: FinalizedBubble[] = []
     const seen = new Set<string>()
-    // B23：退场判定读 repliedTaskIdsRef（reply 落地 effect 增量回填的 task_id 集合），
-    // 不再 chatMessages.some 全量扫描——chatMessages 变化不再触发本 memo 重算（deps 去掉
-    // chatMessages）。reply 落地时 effect 往 ref 加 task_id，本 memo 下次因 events/streaming
-    // 变化重算时读到最新集合。集合查 O(1) vs chatMessages.some O(n) 扫描，且避 chatMessages
-    // 每条新消息拖重算。reload-safe：切群/重连回灌从 DB 拉 chatMessages 时，logs 桥接
-    // effect 重扫历史 agent_reply 也会回填 ref（历史 agent_reply 带 task_id 同样入集合），
-    // 故 reload 后退场状态与 live 一致。
-    const repliedTaskIds = repliedTaskIdsRef.current
+    // 缺陷5 修复：退场判定读 repliedTaskIds state（reply 落地 effect setRepliedTaskIds 回填的
+    // task_id 集合），并把它纳入 memo deps——reply 落地触发 setRepliedTaskIds → 重渲染 →
+    // memo 重算 → repliedTaskIds.has(e.taskId) 命中 → finalized bubble 退场。修掉了 B23
+    // ref 时序 bug（emit_task_completed 先于 _reply announce，ref 在 commit 后回填，memo
+    // 在 render 期算时 ref 仍空 → finalized 卡住不退场）。集合查 O(1) vs chatMessages.some
+    // O(n)。reload-safe：切群/重连回灌从 DB 拉 chatMessages 时，logs effect 重扫历史
+    // agent_reply 也 setRepliedTaskIds（历史 agent_reply 带 task_id 同样入集合），故 reload
+    // 后退场状态与 live 一致。
     for (const e of events) {
       if (e.kind !== 'complete' && e.kind !== 'failed') continue
       if (!e.taskId || seen.has(e.taskId)) continue
@@ -692,7 +696,6 @@ export default function ChatPanel({
       if (streaming[e.taskId]) continue
       // 持久化回复已落地 → 已被替换，不再渲染定稿气泡。
       // B22：主路径按 task_id 精确匹配（repliedTaskIds.has，reload-safe，不依赖时钟同步）。
-      // B23：改读 repliedTaskIdsRef（reply 落地 effect 回填），去 chatMessages.some 扫描。
       // 兜底 sender+时间戳保留：chat 路径无 task_id 时防御性退场（实际不命中——chat 路径
       // 无 complete/failed 事件不进循环）。chatMessages 仍读一次仅供兜底时间戳比较（只在
       // repliedTaskIds 未命中时才扫，主路径 task_id 命中即短路不扫——hot path O(1)）。
@@ -717,15 +720,15 @@ export default function ChatPanel({
       })
     }
     return out
-  }, [events, streaming, agentStatuses])
-  // B23：deps 去掉 chatMessages——退场判定改读 repliedTaskIdsRef（reply 落地 effect 回填），
-  // 不再 chatMessages.some 扫描。chatMessages 仅在兜底时间戳分支读一次（主路径 task_id
-  // 命中即短路不扫），故 chatMessages 变化无需触发本 memo 重算——避每条新消息拖重算。
-  // chatMessages 仍读一次的原因：兜底分支需它做时间戳比较（task_id-less 路径防御性退场），
-  // 但读它是「重算时顺带读最新 chatMessages」，非「chatMessages 变化驱动重算」——chatMessages
-  // 不进 deps 不影响兜底正确性（兜底命中的极端 case——chat 路径无 complete/failed 事件
-  // 实际不进循环——本就几乎不触发，且触发时 chatMessages 已含该回复，下次 events 变化
-  // 重算时读到）。
+  }, [events, streaming, agentStatuses, repliedTaskIds, chatMessages])
+  // 缺陷5 修复：deps 加回 repliedTaskIds（reply 落地 setRepliedTaskIds 触发重算退场）+
+  // chatMessages（兜底时间戳分支需读最新 chatMessages）。B23 原把 chatMessages 移出 deps 避
+  // 高频重算，但那是为配 ref-as-truth；既改回 state，repliedTaskIds 必须进 deps 才能在 reply
+  // 落地时重算退场（这正是 B23 ref 方案卡住不退场的根因）。chatMessages 也须进 deps：兜底分支
+  // 读它做时间戳比较，若不进 deps 会在 chatMessages 更新后仍读到旧引用 → 兜底退场失效。perf
+  // 可接受：chatMessages 每条新消息确实触发重算，但 finalizedBubbles memo 主体是 O(events)
+  // 遍历（events cap 500，且只在 kind=complete/failed 时入 out），单次 <1ms；高频聊天的 perf
+  // 瓶颈在 HighlightMessage 渲染而非本 memo（见 [[chat-lag-jitter-fix-2026-07-23]]）。
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
   // 按类型白名单过滤：agent_reply/user_input/task_log/slash_card 桥接成聊天气泡，
@@ -790,15 +793,23 @@ export default function ChatPanel({
           created_at: new Date(log.timestamp).toISOString(),
         }]
       })
-      // B23：reply 落地回填退场集合——agent_reply 带 task_id 即该 task 的持久化回复已落地，
-      // 标记其定稿气泡可退场（finalizedBubbles 据 repliedTaskIdsRef.has(task_id) 过滤）。
-      // 只记 agent_reply（type='agent_reply' 是收尾 announce；task_log/user_input/slash_card
-      // 无 task_id 或非回复语义）。task_id 为空（chat 路径）不入集合——其退场靠兜底时间戳
-      // （finalizedBubbles 仍保留 sender+时间戳兜底分支，但 chat 路径无 complete/failed 事件
-      // 实际不进循环，故兜底不命中）。增量回填：每次新 agent_reply 落地加一项 O(1)，不触发
-      // 渲染（ref 变化不渲染）——finalizedBubbles 下次因 events/streaming 变化重算时读到最新集合。
+      // 缺陷5 修复：reply 落地回填退场集合——agent_reply 带 task_id 即该 task 的持久化回复已落地，
+      // 标记其定稿气泡可退场（finalizedBubbles 据 repliedTaskIds.has(task_id) 过滤）。只记
+      // agent_reply（type='agent_reply' 是收尾 announce；task_log/user_input/slash_card 无 task_id
+      // 或非回复语义）。task_id 为空（chat 路径）不入集合——其退场靠兜底时间戳（finalizedBubbles
+      // 仍保留 sender+时间戳兜底分支，但 chat 路径无 complete/failed 事件实际不进循环，故兜底
+      // 不命中）。
+      // B23 原用 ref.add（不触发渲染），缺陷5 改用 setRepliedTaskIds（state 更新触发重渲染 →
+      // finalizedBubbles memo 重算 → 退场命中）。这是修「emit_task_completed 先于 _reply
+      // announce → ref 在 commit 后回填但 memo 在 render 期已算完 → finalized 卡住不退场」
+      // 时序 bug 的关键。set 用函数式更新 + prev.has 去重，避免重复 add 触发无谓重渲染。
       if (log.type === 'agent_reply' && log.taskId) {
-        repliedTaskIdsRef.current.add(log.taskId)
+        setRepliedTaskIds((prev) => {
+          if (prev.has(log.taskId)) return prev
+          const next = new Set(prev)
+          next.add(log.taskId)
+          return next
+        })
       }
     }
   }, [logs, chatGroupId, tts.enabled, tts.autoPlay, ttsSupported])
@@ -836,11 +847,11 @@ export default function ChatPanel({
     // 与旧群无关，避免 logsLenRef 停在旧群长度导致漏桥接/错位。切群后 logs effect
     // 从 0 重新扫，wsMsgId 去重保证不重复加气泡。
     logsLenRef.current = 0
-    // B23：重置退场集合——新群的已退场 task_id 与旧群无关，避免旧群退场状态泄漏到新群
+    // 缺陷5 修复：重置退场集合——新群的已退场 task_id 与旧群无关，避免旧群退场状态泄漏到新群
     // （旧群某 task_id 恰好与新群 task_id 撞——虽 tid 是 task_+uuid 概率极低，但语义独立
-    // 应清）。新群历史 agent_reply 经 logs 桥接 effect 重扫回填（历史 agent_reply 带 task_id
-    // 同样入集合），故 reload 后退场状态从历史重建，与 live 一致。
-    repliedTaskIdsRef.current = new Set()
+    // 应清）。新群历史 agent_reply 经 logs 桥接 effect 重扫 setRepliedTaskIds 回填（历史
+    // agent_reply 带 task_id 同样入集合），故 reload 后退场状态从历史重建，与 live 一致。
+    setRepliedTaskIds(new Set())
     if (chatGroupId) {
       setChatLoading(true)
       messageApi
