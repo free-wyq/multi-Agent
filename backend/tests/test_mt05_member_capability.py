@@ -7,7 +7,7 @@ MT-05 链路（GroupPage 群信息抽屉「成员能力概况」展示）：
   前端 GroupPage MemberCapabilityOverview 组件，数据来自 4 路 HTTP：
     · GET /api/groups/{id}/members → 成员列表（agent_id 平铺）
     · GET /api/agents → 全量智能体（含 skills/extra_skills/mounted_skills/
-      mounted_mcp/allowed_tools/denied_tools 六类能力字段）
+      mounted_mcp 四类能力字段）
     · GET /api/skills → 建 skillNameMap（id→name），解析 mounted_skills 为可读名
     · GET /api/mcp → 建 mcpNameMap（id→name），解析 mounted_mcp 为可读名
   组件聚合规则（跨群主+成员去重，反映团队级能力盘）：
@@ -15,10 +15,9 @@ MT-05 链路（GroupPage 群信息抽屉「成员能力概况」展示）：
     rosterAgents = agents.filter(a => roster.has(a.id))
     · 角色技能    = dedup(union(a.skills + a.extra_skills))
     · 已挂载技能  = dedup(union(a.mounted_skills)).map(id => skillNameMap[id] ?? id)
-    · 可用工具    = dedup(union(a.allowed_tools))
-    · 禁用工具    = dedup(union(a.denied_tools))         # 前缀「禁:」
     · MCP 工具源  = dedup(union(a.mounted_mcp)).map(id => mcpNameMap[id] ?? id)
     空能力段不渲染（filter items.length>0），全空显占位。
+    (allowed/denied 段随 allowed_tools/denied_tools 死代码删除一并移除，2026-07-27)
 
 为何不复刻前端渲染：组件是 4 路 HTTP 数据的纯函数（无内部状态/副作用），HTTP 层
 验证「能力字段可落库 + 4 路可读回 + 聚合逻辑（在测试里复刻）产出正确分段」即
@@ -26,17 +25,17 @@ MT-05 链路（GroupPage 群信息抽屉「成员能力概况」展示）：
 逻辑成立」同构）。前端 Tag/图标渲染是 UI 表现非数据契约。
 
 为何用 update_agent(PUT) 设置能力字段：mounted_skills/mounted_mcp 虽有专用 mount
-端点（AG-08/MC-06 已测），但 allowed_tools/denied_tools 无专用端点只能走 PUT；
-为统一设置路径 + 聚焦 MT-05 的「展示聚合」而非「挂载动作」（挂载 AG-08/MC-06 已
-覆盖），全用 PUT /api/agents/{id} 一次性写齐六类字段（update_agent model_dump
-extra=allow → setattr 落库，回读校验）。仍创建探针 skill/mcp 以验证 id→name 解析。
+端点（AG-08/MC-06 已测）；为统一设置路径 + 聚焦 MT-05 的「展示聚合」而非「挂载
+动作」（挂载 AG-08/MC-06 已覆盖），全用 PUT /api/agents/{id} 一次性写齐四类字段
+（update_agent model_dump extra=allow → setattr 落库，回读校验）。仍创建探针
+skill/mcp 以验证 id→name 解析。
 
 验证八块（确定性断言，无 LLM 依赖）：
   ① 探针落库：创建 probe_coord(member? role=coordinator, skills) + probe_member1
      (skills+extra) + probe_member2(空,后续 PUT 写齐能力) + probe_member3(全空) +
      probe_skill + probe_mcp + group(coordinator=coord, members=[m1,m2,m3])；
-  ② 能力字段写入：PUT probe_member2 body={allowed_tools,denied_tools,mounted_skills,
-     mounted_mcp,extra_skills} → 200 + 回读字段 == payload 原值（六类能力可落库）；
+  ② 能力字段写入：PUT probe_member2 body={mounted_skills,mounted_mcp,
+     extra_skills} → 200 + 回读字段 == payload 原值（四类能力可落库）；
   ③ 四路真源可读：GET members(3) / agents(含4探针) / skills(含探针) / mcp(含探针)
      全 200 非空；
   ④ 解析映射成立：skillNameMap[probe_skill.id] == probe_skill.name（非 id）且
@@ -45,9 +44,8 @@ extra=allow → setattr 落库，回读校验）。仍创建探针 skill/mcp 以
   ⑤ 聚合-角色技能：roster={coord,m1,m2,m3} 四 agent，roleSkills 去重 union 含
      coord 的 '需求分析'/'任务拆解' + m1 的 'React'/'TypeScript' + m2 的 'Python'
      （m3 全空贡献无）——证明跨成员去重合并 skills+extra_skills；
-  ⑥ 聚合-挂载/工具/MCP：mountedSkillNames==[probe_skill.name]（解析后非裸 id）、
-     allowedTools=={'Read','Write','Bash'}、deniedTools=={'Drop','RmRf'}、
-     mountedMcpNames==[probe_mcp.name]——证明四类分段各自正确聚合 + 解析；
+  ⑥ 聚合-挂载/MCP：mountedSkillNames==[probe_skill.name]（解析后非裸 id）、
+     mountedMcpNames==[probe_mcp.name]——证明两类分段各自正确聚合 + 解析；
   ⑦ 边界-空能力成员不破坏：probe_member3 全空入群，聚合分段数量/内容不变
      （空字段被 filter 掉不渲染空行，与组件 filter items.length>0 一致）；
   ⑧ 收尾清理：DELETE group(级联 members) + 4 agent + skill + mcp，校验无残留。
@@ -70,8 +68,7 @@ COORD_EXTRA = ["调度"]
 MEMBER1_SKILLS = ["React"]
 MEMBER1_EXTRA = ["TypeScript"]
 MEMBER2_EXTRA = ["Python"]
-MEMBER2_ALLOWED = ["Read", "Write", "Bash"]
-MEMBER2_DENIED = ["Drop", "RmRf"]
+# (allowed_tools/denied_tools 死代码已删，2026-07-27——被受控工具池/denylist 取代)
 
 TIMEOUT = 30.0
 
@@ -198,8 +195,9 @@ def _check(name: str, cond: bool, detail: str = "") -> bool:
 def _aggregate(roster_agents: list[dict], skill_name_map: dict, mcp_name_map: dict) -> dict:
     """复刻 MemberCapabilityOverview 聚合逻辑（跨成员去重）。
 
-    返回 5 个分段各自的去重列表，与组件 sections 一一对应：
-    role/mounted/allowed/denied/mcp。mounted/mcp 段经 id→name 映射解析。
+    返回 3 个分段各自的去重列表，与组件 sections 一一对应：
+    role/mounted/mcp。mounted/mcp 段经 id→name 映射解析。
+    (allowed/denied 段随 allowed_tools/denied_tools 死代码删除一并移除，2026-07-27)
     """
     def _union(field: str) -> list[str]:
         seen: list[str] = []
@@ -215,14 +213,10 @@ def _aggregate(roster_agents: list[dict], skill_name_map: dict, mcp_name_map: di
             if v not in role_skills:
                 role_skills.append(v)
     mounted_skill_names = [skill_name_map.get(sid, sid) for sid in _union("mounted_skills")]
-    allowed = _union("allowed_tools")
-    denied = _union("denied_tools")
     mounted_mcp_names = [mcp_name_map.get(mid, mid) for mid in _union("mounted_mcp")]
     return {
         "role": role_skills,
         "mounted": mounted_skill_names,
-        "allowed": allowed,
-        "denied": denied,
         "mcp": mounted_mcp_names,
     }
 
@@ -304,7 +298,7 @@ async def main() -> int:
             errs.append("[setup] 探针落库异常")
 
         # ── 2. 能力字段写入：PUT probe_member2 一次性写齐四类能力字段 ──
-        print("\n[check 2] 能力字段写入：PUT /api/agents/{member2}（六类能力）")
+        print("\n[check 2] 能力字段写入：PUT /api/agents/{member2}（四类能力）")
         updated = await update_agent(member2["id"], {
             "name": member2["name"],
             "role": member2["role"],
@@ -312,8 +306,6 @@ async def main() -> int:
             "skills": [],
             "mounted_skills": [probe_skill_id],
             "mounted_mcp": [probe_mcp_id],
-            "allowed_tools": MEMBER2_ALLOWED,
-            "denied_tools": MEMBER2_DENIED,
         })
         if not _check("PUT → 200 + AgentDefinition", updated is not None):
             errs.append("[put] member2 更新非 200")
@@ -322,10 +314,8 @@ async def main() -> int:
                 updated.get("extra_skills") == MEMBER2_EXTRA
                 and updated.get("mounted_skills") == [probe_skill_id]
                 and updated.get("mounted_mcp") == [probe_mcp_id]
-                and updated.get("allowed_tools") == MEMBER2_ALLOWED
-                and updated.get("denied_tools") == MEMBER2_DENIED
             )
-            if _check("回读六类能力字段 == payload 原值", field_ok, f"got={updated}"):
+            if _check("回读四类能力字段 == payload 原值", field_ok, f"got={updated}"):
                 pass
             else:
                 errs.append("[put] 能力字段落库不一致")
@@ -391,28 +381,14 @@ async def main() -> int:
         else:
             errs.append(f"[agg-role] 角色技能聚合不一致：{sections['role']}")
 
-        # ── 6. 聚合-挂载/工具/MCP：四类分段各自正确 ──
-        print("\n[check 6] 聚合-挂载技能/可用工具/禁用工具/MCP 工具源")
+        # ── 6. 聚合-挂载/MCP：两类分段各自正确 ──
+        print("\n[check 6] 聚合-挂载技能/MCP 工具源")
         mounted_ok = sections["mounted"] == [probe_skill["name"]]
         if _check("mountedSkillNames == [probe_skill.name]（解析后非裸 id）", mounted_ok,
                   f"got={sections['mounted']}"):
             print(f"      mountedSkillNames={sections['mounted']}")
         else:
             errs.append(f"[agg-mounted] 挂载技能聚合/解析不一致：{sections['mounted']}")
-
-        allowed_ok = set(sections["allowed"]) == set(MEMBER2_ALLOWED) and len(sections["allowed"]) == 3
-        if _check(f"allowedTools == {set(MEMBER2_ALLOWED)}", allowed_ok,
-                  f"got={sections['allowed']}"):
-            pass
-        else:
-            errs.append(f"[agg-allowed] 可用工具聚合不一致：{sections['allowed']}")
-
-        denied_ok = set(sections["denied"]) == set(MEMBER2_DENIED) and len(sections["denied"]) == 2
-        if _check(f"deniedTools == {set(MEMBER2_DENIED)}", denied_ok,
-                  f"got={sections['denied']}"):
-            pass
-        else:
-            errs.append(f"[agg-denied] 禁用工具聚合不一致：{sections['denied']}")
 
         mcp_ok = sections["mcp"] == [probe_mcp["name"]]
         if _check("mountedMcpNames == [probe_mcp.name]（解析后非裸 id）", mcp_ok,
@@ -429,7 +405,6 @@ async def main() -> int:
         m3_empty = (
             not (m3.get("skills") or []) and not (m3.get("extra_skills") or [])
             and not (m3.get("mounted_skills") or []) and not (m3.get("mounted_mcp") or [])
-            and not (m3.get("allowed_tools") or []) and not (m3.get("denied_tools") or [])
         )
         # member3 在 roster 内但聚合分段内容不变（全空贡献无）
         boundary_ok = m3_empty and member3["id"] in roster_ids
@@ -440,7 +415,7 @@ async def main() -> int:
             errs.append("[boundary] 空能力成员破坏聚合或不在 roster")
         # 再确认聚合分段无空段（组件 filter items.length>0 的等价：每段非空才渲染）
         all_sections_nonempty = all(len(v) > 0 for v in sections.values())
-        if _check("五分段均非空（无空段噪音，组件会渲染全部 5 段）", all_sections_nonempty):
+        if _check("三分段均非空（无空段噪音，组件会渲染全部 3 段）", all_sections_nonempty):
             pass
         else:
             errs.append("[boundary] 出现空段（组件会过滤，但预期全非空）")
@@ -473,12 +448,12 @@ async def main() -> int:
         return 1
     print("PASS — 成员能力概况展示端到端验证通过：")
     print("  · 探针落库：coord+3member+skill+mcp+group 全部 200；")
-    print("  · 能力写入：PUT /api/agents/{id} 一次性写齐六类能力字段，回读一致；")
+    print("  · 能力写入：PUT /api/agents/{id} 一次性写齐四类能力字段，回读一致；")
     print("  · 四路真源：members/agents/skills/mcp 全 200 含探针；")
     print("  · 解析映射：skillNameMap/mcpNameMap 把裸 id 解析为可读 name；")
     print("  · 聚合-角色技能：跨群主+成员去重 union(skills+extra_skills)；")
-    print("  · 聚合-挂载/工具/MCP：四类分段各自正确 + id→name 解析；")
-    print("  · 边界：空能力成员入群不破坏聚合，五分段均非空。")
+    print("  · 聚合-挂载/MCP：两类分段各自正确 + id→name 解析；")
+    print("  · 边界：空能力成员入群不破坏聚合，三分段均非空。")
     return 0
 
 

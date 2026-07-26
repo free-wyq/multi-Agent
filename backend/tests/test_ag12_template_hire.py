@@ -30,7 +30,7 @@ AG-12 链路（雇佣预设角色加入员工列表）：
   ⑤ 字段真源一致：hired agent 的 role/system_prompt/skills/extra_skills/description/
      slug/icon_emoji == GET /api/agents/templates 取的同 template_id 模板原值（跨端点单一真源）；
   ⑥ 未知 template_id → 404（catalog 无此条目）；
-  ⑦ bare agent：mounted_skills/mcp/allowed_tools/denied_tools 均空 list（挂载是
+  ⑦ bare agent：mounted_skills/mcp 均空 list（挂载是
      AG-08/AG-09 独立用户动作，雇佣只创建角色身份，与 AG-01 生成同立场）；
   ⑧ AG-08 元数据继承：slug == template_id 去掉 ``tpl:`` 前缀（如 backend-engineer），
      icon_emoji == 模板 catalog 的 emoji（如 🔧），证明 hire_template 把模板元数据
@@ -316,20 +316,18 @@ async def main() -> int:
     else:
         errs.append(f"[404] 未知 template_id status={s404} 非 404")
 
-    # ── 7. bare agent：mounted_skills/mcp/tools 全空 ──
-    print("\n[check 7] bare agent：mounted_skills/allowed_tools/denied_tools 空")
+    # ── 7. bare agent：mounted_skills/mcp 全空 ──
+    print("\n[check 7] bare agent：mounted_skills/mounted_mcp 空")
     if agent:
         bare = (
             agent.get("mounted_skills") == []
-            and agent.get("allowed_tools") == []
-            and agent.get("denied_tools") == []
+            and agent.get("mounted_mcp") == []
         )
-        if _check("mounted_skills/allowed_tools/denied_tools 均 == []（bare agent）",
-                  bare, f"mounted={agent.get('mounted_skills')} "
-                  f"allowed={agent.get('allowed_tools')} denied={agent.get('denied_tools')}"):
+        if _check("mounted_skills/mounted_mcp 均 == []（bare agent）",
+                  bare, f"mounted={agent.get('mounted_skills')} mcp={agent.get('mounted_mcp')}"):
             pass
         else:
-            errs.append("[bare] 雇佣的 agent 含挂载/工具字段非空（应与 AG-01 生成同 bare 立场）")
+            errs.append("[bare] 雇佣的 agent 含挂载字段非空（应与 AG-01 生成同 bare 立场）")
 
     # ── 8. AG-08 元数据继承：slug 去 tpl: 前缀 + icon_emoji 继承模板 ──
     # hire_template 把 slug=template.template_id.removeprefix("tpl:")、icon_emoji=template.icon_emoji

@@ -77,8 +77,7 @@ function summarize(text: string | null | undefined, max = 200): string {
  *
  * 数据来自 `agentApi.list()`（前端按 name/id 解析到目标 agent）——一个智能体的全部配置聚合
  * 展示：身份（name/role/description）+ system_prompt 摘要 + 核心技能 skills/extra_skills +
- * 已挂载技能 mounted_skills + 已挂载 MCP mounted_mcp + 工具权限 allowed/denied_tools +
- * 运行参数 model/max_turns。让用户在聊天里 /agent 快速回看某智能体的完整配置画像，
+ * 已挂载技能 mounted_skills + 已挂载 MCP mounted_mcp + 运行参数 model/max_turns。让用户在聊天里 /agent 快速回看某智能体的完整配置画像，
  * 不必跳 AgentPage 翻卡片。
  *
  * AD-02 编辑入口（单 agent 模式）：
@@ -88,14 +87,14 @@ function summarize(text: string | null | undefined, max = 200): string {
  *       每次变更实时调 skillApi.mount/unmount，返回最新 AgentDefinition 同步 local。
  *    ② 已挂载 MCP（同上，options 来自 mcpApi.list 未挂载项）——mcpApi.mount/unmount。
  *    ③ 身份与行为（name / role / description / system_prompt）+ 运行参数（model /
- *       max_turns / allowed_tools / denied_tools）——底部「保存」调
+ *       max_turns）——底部「保存」调
  *       agentApi.update(id, {...})，成功后同步 local。
  *  - 设计原则：mount/unmount 是即时生效的细粒度操作（每次 Select 变更即调 api），
  *    身份+运行参数是批量保存（Modal 底部「保存」按钮）——与 AgentPage 编辑 Modal 一致风格。
  *
  * 设计：
  *  - 两种模式：单 agent → 完整聚合详情（+ 编辑入口）；多 agent → 紧凑名册列表（无编辑）。
- *  - 详情按「身份 → 角色描述 → 核心技能 → 已挂载技能 → 已挂载 MCP → 工具权限 → 运行参数」
+ *  - 详情按「身份 → 角色描述 → 核心技能 → 已挂载技能 → 已挂载 MCP → 运行参数」
  *    分段，每段标题灰底小标签，值用 Tag 行或文本，空段不渲染（避免空标签行噪音）。
  *  - system_prompt 只展示前 200 字摘要 + Tooltip 全文（system_prompt 可能数百字，全展开撑爆卡片）。
  *  - 紫边卡片 #d3adf7——智能体是「系统配置」类（与 ModelCard 紫边呼应），区别于查看类蓝边。
@@ -213,9 +212,6 @@ function AgentDetailView({
   const allSkills = [...(agent.skills ?? []), ...(agent.extra_skills ?? [])]
   const mountedSkills = agent.mounted_skills ?? []
   const mountedMcp = agent.mounted_mcp ?? []
-  const allowed = agent.allowed_tools ?? []
-  const denied = agent.denied_tools ?? []
-  const hasTools = allowed.length > 0 || denied.length > 0
   const hasRuntime = agent.model != null || agent.max_turns != null
 
   /** 分段标题：灰底小标签，保持视觉一致。 */
@@ -294,19 +290,8 @@ function AgentDetailView({
         </Section>
       )}
 
-      {/* 工具权限 */}
-      {hasTools && (
-        <Section title="工具权限">
-          <div style={{ display: 'flex', gap: 4, flexWrap: 'wrap' }}>
-            {allowed.map((t) => (
-              <Tag key={t} color="green" style={{ margin: 0 }}>{t}</Tag>
-            ))}
-            {denied.map((t) => (
-              <Tag key={t} color="red" style={{ margin: 0 }}>禁:{t}</Tag>
-            ))}
-          </div>
-        </Section>
-      )}
+      {/* 工具权限段已移除：allowed_tools/denied_tools 死代码已删（2026-07-27）。
+          后端不再落库；工具门控由受控工具池 + skill-sandbox denylist 负责。 */}
 
       {/* 运行参数 */}
       {hasRuntime && (
@@ -328,7 +313,7 @@ function AgentDetailView({
 
       {/* 空配置兜底：啥都没有时给个提示，避免卡片只剩标题 */}
       {!agent.description && !hasSys && allSkills.length === 0 &&
-        mountedSkills.length === 0 && mountedMcp.length === 0 && !hasTools && !hasRuntime && (
+        mountedSkills.length === 0 && mountedMcp.length === 0 && !hasRuntime && (
         <Empty
           image={Empty.PRESENTED_IMAGE_SIMPLE}
           description="该智能体无额外配置"
@@ -350,9 +335,9 @@ function AgentDetailView({
  *  2. 已挂载 MCP——同上，options = mcpApi.list 未挂载项；mcpApi.mount/unmount。
  *  3. 身份与行为——name（Input）/ role（Input）/ description（TextArea autoSize）/
  *     system_prompt（TextArea autoSize），底部「保存」调 agentApi.update。
- *  4. 运行参数 + 工具权限——model（Input）/ max_turns（Input type=number）/
- *     allowed_tools（Select tags）/ denied_tools（Select tags），底部「保存」调 agentApi.update。
+ *  4. 运行参数——model（Input）/ max_turns（Input type=number），底部「保存」调 agentApi.update。
  *     （3+4 同一次 payload 一起保存。）
+ *     （工具白/黑名单 allowed_tools/denied_tools 已删：死代码，2026-07-27）
  *
  * 数据流：mount/unmount 返回最新 AgentDefinition → onUpdated 同步父 local → 卡片立即刷新。
  * model/tools 保存后同样 onUpdated。Modal 内 options（skills/mcps 全量列表）懒加载：
@@ -376,19 +361,18 @@ export function AgentEditButton({
   const [mcps, setMcps] = useState<McpConnection[]>([])
   const [optsLoading, setOptsLoading] = useState(false)
 
-  // Modal 表单态：身份段 name/role/description/system_prompt + 运行段 model/max_turns/allowed/denied
+  // Modal 表单态：身份段 name/role/description/system_prompt + 运行段 model/max_turns
   const [nameVal, setNameVal] = useState(agent.name || '')
   const [roleVal, setRoleVal] = useState(agent.role || '')
   const [descVal, setDescVal] = useState(agent.description ?? '')
   const [sysPromptVal, setSysPromptVal] = useState(agent.system_prompt ?? '')
   const [modelVal, setModelVal] = useState(agent.model || '')
   const [maxTurns, setMaxTurns] = useState<number | null>(agent.max_turns ?? null)
-  const [allowedTools, setAllowedTools] = useState<string[]>(agent.allowed_tools ?? [])
-  const [deniedTools, setDeniedTools] = useState<string[]>(agent.denied_tools ?? [])
   const [saving, setSaving] = useState(false)
 
-  // 运行参数段（model/max_turns/allowed/denied_tools）当前先隐藏：本阶段聚焦身份字段。
+  // 运行参数段（model/max_turns）当前先隐藏：本阶段聚焦身份字段。
   // state 与 payload 保留（隐藏时仍以原值回传，不会误清空），需要时改 true 即恢复整段。
+  // (allowed_tools/denied_tools 已删：死代码，被受控工具池/denylist 取代，2026-07-27)
   const showRuntime = false
 
   // Modal 打开时懒拉取 skills/mcps 全量列表（供 Select options）。
@@ -415,8 +399,6 @@ export function AgentEditButton({
     setSysPromptVal(agent.system_prompt ?? '')
     setModelVal(agent.model || '')
     setMaxTurns(agent.max_turns ?? null)
-    setAllowedTools(agent.allowed_tools ?? [])
-    setDeniedTools(agent.denied_tools ?? [])
     void loadOptions()
     setOpen(true)
   }
@@ -479,8 +461,6 @@ export function AgentEditButton({
         system_prompt: sysPromptVal,
         model: modelVal,
         max_turns: maxTurns ?? 0,
-        allowed_tools: allowedTools,
-        denied_tools: deniedTools,
       }
       const updated = await agentApi.update(agent.id, payload)
       if (updated) {
@@ -669,26 +649,7 @@ export function AgentEditButton({
                   placeholder="0"
                 />
               </div>
-              <div>
-                <div style={{ fontSize: 12, marginBottom: 4 }}>工具白名单（allowed_tools）</div>
-                <Select
-                  mode="tags"
-                  style={{ width: '100%' }}
-                  placeholder="输入工具名回车添加"
-                  value={allowedTools}
-                  onChange={(v: string[]) => setAllowedTools(v)}
-                />
-              </div>
-              <div>
-                <div style={{ fontSize: 12, marginBottom: 4 }}>工具黑名单（denied_tools）</div>
-                <Select
-                  mode="tags"
-                  style={{ width: '100%' }}
-                  placeholder="输入工具名回车添加"
-                  value={deniedTools}
-                  onChange={(v: string[]) => setDeniedTools(v)}
-                />
-              </div>
+              {/* 工具白/黑名单（allowed_tools/denied_tools）已删：死代码，被受控工具池取代（2026-07-27） */}
             </Space>
           </>
         )}

@@ -43,8 +43,12 @@ class AgentEntity(Base):
     # At execution time the engine loads these as LangChain tools via
     # langchain-mcp-adapters and merges with the framework tools (PL-07).
     mounted_mcp: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    allowed_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
-    denied_tools: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    # NOTE: ``allowed_tools`` / ``denied_tools`` columns removed (死代码清理 ·
+    # 2026-07-27). Seed always wrote []; the engine never consumed them
+    # (tool gating is the skill-sandbox denylist in engine/tools.py + the MCP
+    # stdio whitelist, per [[mcp-security-vh61-2026-07-23]]). Legacy DBs keep
+    # the columns physically (SQLite never DROPs on its own) but the ORM no
+    # longer maps/reads/writes them — additive migration never drops.
     startup_strategy: Mapped[str] = mapped_column(String, nullable=False, default="")
     model: Mapped[str] = mapped_column(String, nullable=False, default="")
     max_turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)

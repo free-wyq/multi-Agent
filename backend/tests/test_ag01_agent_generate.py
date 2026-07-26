@@ -26,7 +26,7 @@ AG-01 链路：
   ④ skills 是非空 list[str]（3-5 个）——证明 LLM 真生成（fallback 为空 []）；
   ⑤ extra_skills 是 list（可空，类型校验）；
   ⑥ description 非空（一句话定位）；
-  ⑦ mounted_skills/mounted_mcp/allowed_tools/denied_tools 全空——证明生成不含挂载（AG-08 独立动作）；
+  ⑦ mounted_skills/mounted_mcp 全空——证明生成不含挂载（AG-08 独立动作）；
   ⑧ system_prompt 语义相关（含描述关键词 ≥1）——证明针对描述生成非万能模板；
   ⑨ 持久化交叉验证：GET /api/agents/{id} 回读 == 生成响应 + GET /api/agents 列表含该 agent；
   ⑩ 边界：空 description → 400。
@@ -214,18 +214,15 @@ async def main() -> int:
         else:
             errs.append("[description] description 为空")
 
-        # ── 7. mounted_skills/mounted_mcp/allowed_tools/denied_tools 全空 ──
+        # ── 7. mounted_skills/mounted_mcp 全空 ──
         print("\n[check 7] 挂载字段全空（生成不含挂载，AG-08 独立动作）")
         mounted_empty = (
             agent.get("mounted_skills", []) == []
             and agent.get("mounted_mcp", []) == []
-            and agent.get("allowed_tools", []) == []
-            and agent.get("denied_tools", []) == []
         )
-        if _check("mounted_skills/mounted_mcp/allowed_tools/denied_tools 全空",
+        if _check("mounted_skills/mounted_mcp 全空",
                   mounted_empty,
-                  f"mounted={agent.get('mounted_skills')} mcp={agent.get('mounted_mcp')} "
-                  f"allowed={agent.get('allowed_tools')} denied={agent.get('denied_tools')}"):
+                  f"mounted={agent.get('mounted_skills')} mcp={agent.get('mounted_mcp')}"):
             pass
         else:
             errs.append("[mounted] 生成时意外填充了挂载字段（应全空，挂载是 AG-08 动作）")

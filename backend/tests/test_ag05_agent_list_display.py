@@ -1,4 +1,4 @@
-"""AG-05 自测：员工列表展示名称/描述/技能/工具（端到端）。
+"""AG-05 自测：员工列表展示名称/描述/技能（端到端）。
 
 不依赖 pytest，直接 asyncio 跑。沿用 SK-09 自测模式（httpx HTTP 真源交叉验证）。
 
@@ -13,25 +13,23 @@ AG-05 架构关键点（先读代码确认）：
       · role → agent-card-role（主题色 + 图标，getRoleTheme）
       · description → agent-card-desc（非空才渲染，2 行截断）
       · 技能 → allSkills = 去重(skills + extra_skills)（合并展示，非空显 Tag 否则「暂无技能」）
-      · allowed_tools/denied_tools → 非空才显工具权限区
       · mounted_skills → 非空才显「已挂载」区（skillNameMap 映射 id→name）
 
 为何不复刻前端渲染（像 SK-09 复刻 filteredSkills）：AG-05 是展示非过滤，前端逻辑是
 「字段非空即渲染 Tag」的直白条件渲染，无算法可复刻断言；改为「后端字段契约完整 +
-每个展示字段符合前端渲染条件（类型正确 + 值合理）」即等价证明「列表能展示名称/描述/技能/工具」。
+每个展示字段符合前端渲染条件（类型正确 + 值合理）」即等价证明「列表能展示名称/描述/技能」。
 即：前端读什么字段，后端就返回什么字段且类型/值能让卡片正确渲染，列表展示即成立。
 这是与 SK-09「复刻过滤算法」等价的展示页验证方式（字段契约 + 渲染条件而非算法断言）。
 
 验证五块（确定性断言）：
   ① 浏览：GET /api/agents 返回列表（含种子 agent），列表非空；
   ② 字段契约：每个 AgentDefinition 含前端卡片必读字段（id/name/role/description/skills/
-     extra_skills/mounted_skills/allowed_tools/denied_tools）且类型正确；
+     extra_skills/mounted_skills）且类型正确；
   ③ 名称/描述：每个 agent 的 name 非空 str；description 为 str 或 null（前端 desc 非空才渲染）；
   ④ 技能展示：allSkills = 去重(skills+extra_skills) 至少有一个 agent 的合并技能非空
      （种子 frontend_engineer skills=React/TS/CSS + extra=Ant Design/ReactFlow → 5 个），
      验证「技能列表能展示」；同时校验去重逻辑（若 skills 与 extra 重叠不重复）；
-  ⑤ 工具权限：allowed_tools/denied_tools 均为 list（当前种子为空，验证「空时前端不渲染工具区」
-     的前提——字段存在且为 list，非空才渲染）；
+  ⑤ (工具权限段已移除：allowed_tools/denied_tools 死代码已删，2026-07-27)；
   ⑥ 持久化一致：GET /api/agents/{id} 单读 == 列表项（id/name/role/description/skills 一致）。
 
 为何不连 WS：AG-05 是同步 HTTP 接口（list_agents 直接查 DB 返回），不经引擎 inbox/WS，
@@ -51,8 +49,9 @@ import httpx
 
 BASE = "http://localhost:8000"
 
-# 前端 AgentPage 卡片必读字段（含 AG-05 新增的 allowed_tools/denied_tools）。
+# 前端 AgentPage 卡片必读字段。
 # 卡片渲染 + allSkills 合成都依赖这些字段存在且类型正确。
+# (allowed_tools/denied_tools 死代码已删，2026-07-27——被受控工具池/denylist 取代)
 REQUIRED_FIELDS = [
     "id",
     "name",
@@ -61,8 +60,6 @@ REQUIRED_FIELDS = [
     "skills",
     "extra_skills",
     "mounted_skills",
-    "allowed_tools",
-    "denied_tools",
 ]
 
 
@@ -113,7 +110,7 @@ def _check(name: str, cond: bool, detail: str = "") -> bool:
 
 
 async def main() -> int:
-    print("=== AG-05 自测：员工列表展示名称/描述/技能/工具 ===")
+    print("=== AG-05 自测：员工列表展示名称/描述/技能 ===")
     if not await health_ok():
         print("[fatal] backend 不在线")
         return 2
@@ -146,7 +143,7 @@ async def main() -> int:
                 errs.append(f"[fields] agent {a.get('id')} 缺字段 {f}")
                 print(f"  ✗ {a.get('id')} 缺字段 {f}")
         # 类型校验：列表字段必须是 list
-        for f in ["skills", "extra_skills", "mounted_skills", "allowed_tools", "denied_tools"]:
+        for f in ["skills", "extra_skills", "mounted_skills"]:
             v = a.get(f)
             if v is not None and not isinstance(v, list):
                 field_ok = False
@@ -203,22 +200,10 @@ async def main() -> int:
     else:
         errs.append("[skills] 合并去重异常")
 
-    # ── 5. 工具权限：allowed_tools/denied_tools 为 list（空时不渲染，非空才显） ──
-    print("\n[check 5] 工具权限：allowed_tools/denied_tools 字段存在且为 list")
-    tools_ok = all(
-        isinstance(a.get("allowed_tools"), list) and isinstance(a.get("denied_tools"), list)
-        for a in agents
-    )
-    if _check("所有 agent allowed_tools/denied_tools 均为 list", tools_ok):
-        # 当前种子为空，前端空时不渲染工具区（符合设计）；非空才显。统计非空情况。
-        nonempty = [
-            a for a in agents
-            if (a.get("allowed_tools") or a.get("denied_tools"))
-        ]
-        print(f"      当前 {len(nonempty)} 个 agent 有工具权限配置（种子为空属正常，"
-              f"非空时前端渲染工具 Tag 区）")
-    else:
-        errs.append("[tools] allowed_tools/denied_tools 字段缺失或非 list，前端工具区无法正确渲染")
+    # ── 5. (工具权限段已移除：allowed_tools/denied_tools 死代码已删，2026-07-27) ──
+    # 原 check 5 校验 allowed_tools/denied_tools 为 list；这两列已被受控工具池
+    # + skill-sandbox denylist 取代（[[mcp-security-vh61-2026-07-23]]），不再落库。
+    # 前端 AgentPage 工具权限区不再渲染——此段从测试中移除。
 
     # ── 6. 持久化一致：GET /api/agents/{id} 单读 == 列表项 ──
     print("\n[check 6] 浏览数据一致性：列表项 == 单读 GET /api/agents/{id}")
@@ -237,8 +222,6 @@ async def main() -> int:
             and reread.get("skills") == a.get("skills")
             and reread.get("extra_skills") == a.get("extra_skills")
             and reread.get("mounted_skills") == a.get("mounted_skills")
-            and reread.get("allowed_tools") == a.get("allowed_tools")
-            and reread.get("denied_tools") == a.get("denied_tools")
         )
         if not same:
             consistent = False
@@ -246,7 +229,7 @@ async def main() -> int:
             print(f"  ✗ {a['id']} 列表项 ≠ 单读")
     if consistent:
         print(f"  ✓ {len(agents)} 个 agent 列表项与单读一致（id/name/role/description/"
-              "skills/extra_skills/mounted_skills/allowed_tools/denied_tools）")
+              "skills/extra_skills/mounted_skills）")
 
     # ── 汇总 ──
     print("\n" + "=" * 56)
@@ -255,13 +238,12 @@ async def main() -> int:
         for e in errs:
             print(f"  - {e}")
         return 1
-    print("PASS — 员工列表展示名称/描述/技能/工具端到端验证通过：")
+    print("PASS — 员工列表展示名称/描述/技能端到端验证通过：")
     print("  · 浏览：GET /api/agents 返回非空列表；")
     print("  · 字段契约：每个 AgentDefinition 含前端卡片必读字段（id/name/role/description/")
-    print("    skills/extra_skills/mounted_skills/allowed_tools/denied_tools）且类型正确；")
+    print("    skills/extra_skills/mounted_skills）且类型正确；")
     print("  · 名称/描述：name 非空 + 至少 1 个有 description（卡片 desc 区可渲染）；")
     print("  · 技能展示：allSkills=去重(skills+extra_skills) 非空 + 去重正确（技能 Tag 可展示）；")
-    print("  · 工具权限：allowed_tools/denied_tools 为 list（空时不渲染非空才显，契约就绪）；")
     print("  · 持久化一致：列表项 == 单读 GET /api/agents/{id}。")
     return 0
 

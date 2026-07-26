@@ -25,9 +25,6 @@ export interface AgentDefinition {
   /** PRD AG-08: 英文 slug（URL 安全 id）+ emoji 头像。均可空，向后兼容旧 agent 行。 */
   slug?: string | null
   icon_emoji?: string | null
-  /** AG-05: 工具权限白名单/黑名单（后端 AgentDefinition 字段，当前种子为空）。 */
-  allowed_tools?: string[]
-  denied_tools?: string[]
   created_at: string
   updated_at: string
 }
@@ -42,11 +39,6 @@ export interface AgentCreatePayload {
   /** PRD AG-08: 雇佣模板时继承的英文 slug + emoji 头像（可空，create 时可不传）。 */
   slug?: string
   icon_emoji?: string
-  /** AD-02: agentApi.update 透传的工具权限白/黑名单（后端 AgentCreatePayload extra="allow"
-   *  + AgentEntity 有 allowed_tools/denied_tools 列，update_agent model_dump(exclude_unset)
-   *  + setattr 落库）。create 时通常不传（挂载是独立动作），仅 update 用。 */
-  allowed_tools?: string[]
-  denied_tools?: string[]
   /** AD-02: agentApi.update 透传的运行参数（后端 AgentEntity model/max_turns 列）。 */
   model?: string
   max_turns?: number
@@ -57,7 +49,7 @@ export interface AgentCreatePayload {
  *
  * 与 AgentDefinition 有意不同：模板是「可被发现待雇佣」的对象，尚未落本地库——
  *  - 用 `template_id` 标识（形如 `tpl:backend-engineer`），而非 Agent 的 `id`；
- *  - 无 mounted_skills/mounted_mcp/allowed_tools/denied_tools——挂载是独立用户动作
+ *  - 无 mounted_skills/mounted_mcp——挂载是独立用户动作
  *    （AG-08/AG-09），模板只承载角色身份（是谁、能做什么），与 AG-01 生成同立场；
  *  - 带 UI 元数据 `category`/`icon_emoji` 供广场分组与徽标渲染。
  *

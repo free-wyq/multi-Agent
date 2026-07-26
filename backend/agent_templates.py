@@ -10,11 +10,11 @@ A curated, static set of ready-to-hire role templates backing
   - ``AgentTemplate`` is the DTO returned to the frontend; ``get_template`` backs
     AG-12 hire (resolve template_id → build ``AgentCreatePayload`` → ``crud.create_agent``).
 
-Template fields intentionally **exclude** ``mounted_skills`` / ``mounted_mcp`` /
-``allowed_tools`` / ``denied_tools``: those reference skill/mcp ids that wiring is
-a separate user action (AG-08/AG-09). A hired template is a bare agent carrying
-only its *identity* (who it is, what it can do) — same stance as AG-01 generation.
-This keeps templates about "role definition", not "wiring configuration".
+Template fields intentionally **exclude** ``mounted_skills`` / ``mounted_mcp``:
+those reference skill/mcp ids that wiring is a separate user action
+(AG-08/AG-09). A hired template is a bare agent carrying only its *identity*
+(who it is, what it can do) — same stance as AG-01 generation. This keeps
+templates about "role definition", not "wiring configuration".
 
 ``role`` is snake_case English matching the seed convention
 (``frontend_engineer`` / ``backend_engineer`` / ``coordinator``) so the hired

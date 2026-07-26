@@ -25,9 +25,10 @@ interface DrawerMemberItem extends GroupMember {
  * 群信息抽屉一眼看到团队整体能力盘，而不必逐个点开 AgentPage 查：
  *  - 角色技能：agent.skills + agent.extra_skills（去重，角色身份自带的能力）
  *  - 已挂载技能：agent.mounted_skills（技能 id，经 skillNameMap 解析为可读技能名）
- *  - 可用工具：agent.allowed_tools（工具白名单，AG-05）
- *  - 禁用工具：agent.denied_tools（工具黑名单，前缀「禁:」与可用区分）
  *  - MCP 工具源：agent.mounted_mcp（MCP 连接 id，经 mcpNameMap 解析为可读连接名）
+ *
+ * (allowed_tools/denied_tools「可用工具」「禁用工具」两段已移除：死代码，后端已
+ *  不再落库，被受控工具池 + skill-sandbox denylist 取代，2026-07-27)
  *
  * 聚合规则：跨成员去重（同一技能多人挂载只显示一次，反映「团队级」能力盘）。
  * 空能力的类别不渲染该行；全部为空时显示占位「暂无能力配置」。
@@ -82,12 +83,6 @@ export default function MemberCapabilityOverview({
   const mountedSkillNames = Array.from(
     new Set(rosterAgents.flatMap((a) => a.mounted_skills ?? [])),
   ).map((id) => skillNameMap[id] ?? id)
-  const allowedTools = Array.from(
-    new Set(rosterAgents.flatMap((a) => a.allowed_tools ?? [])),
-  )
-  const deniedTools = Array.from(
-    new Set(rosterAgents.flatMap((a) => a.denied_tools ?? [])),
-  )
   const mountedMcpNames = Array.from(
     new Set(rosterAgents.flatMap((a) => a.mounted_mcp ?? [])),
   ).map((id) => mcpNameMap[id] ?? id)
@@ -98,13 +93,11 @@ export default function MemberCapabilityOverview({
     title: string
     items: string[]
     color: string
-    tagColor: 'purple' | 'geekblue' | 'green' | 'red' | 'orange'
+    tagColor: 'purple' | 'geekblue' | 'orange'
     prefix?: string
   }> = [
     { key: 'role', icon: <BulbOutlined />, title: '角色技能', items: roleSkills, color: '#722ed1', tagColor: 'purple' as const },
     { key: 'mounted', icon: <ToolOutlined />, title: '已挂载技能', items: mountedSkillNames, color: '#F26522', tagColor: 'geekblue' as const },
-    { key: 'allowed', icon: <ApiOutlined />, title: '可用工具', items: allowedTools, color: '#52c41a', tagColor: 'green' as const },
-    { key: 'denied', icon: <ToolOutlined />, title: '禁用工具', items: deniedTools, color: '#ff4d4f', tagColor: 'red' as const, prefix: '禁:' },
     { key: 'mcp', icon: <ApiOutlined />, title: 'MCP 工具源', items: mountedMcpNames, color: '#fa8c16', tagColor: 'orange' as const },
   ].filter((s) => s.items.length > 0)
 

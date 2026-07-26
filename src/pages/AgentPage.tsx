@@ -557,18 +557,8 @@ export default function AgentPage() {
                   )}
                 </div>
 
-                {/* 工具权限行:保留原样(agent 特有,模板没有) */}
-                {(agent.allowed_tools?.length || agent.denied_tools?.length) ? (
-                  <div className="agent-card-meta-line">
-                    <span className="agent-card-meta-label">工具</span>
-                    {agent.allowed_tools?.map((t) => (
-                      <Tag key={t} color="green" className="agent-skill-tag">{t}</Tag>
-                    ))}
-                    {agent.denied_tools?.map((t) => (
-                      <Tag key={t} color="red" className="agent-skill-tag">禁:{t}</Tag>
-                    ))}
-                  </div>
-                ) : null}
+                {/* 工具权限行已移除：allowed_tools/denied_tools 死代码已删（2026-07-27）。
+                    工具门控由受控工具池 + skill-sandbox denylist 负责，不再落库展示。 */}
 
                 {/* 已挂载技能行:保留原样 */}
                 {agent.mounted_skills && agent.mounted_skills.length > 0 && (

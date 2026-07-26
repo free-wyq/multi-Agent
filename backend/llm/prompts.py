@@ -158,11 +158,11 @@ def build_agent_generate_prompt(description: str) -> str:
     returned as strict JSON. The endpoint (``POST /api/agents/generate``) parses
     this and creates the agent via ``crud.create_agent``.
 
-    Generated fields intentionally exclude ``mounted_skills`` / ``mounted_mcp`` /
-    ``allowed_tools`` / ``denied_tools``: those reference skill/mcp ids or tool
-    names that do not exist at generation time, and mounting is a separate user
-    action (AG-08). The generator only fills in the agent's *identity* (who it is
-    and what it can do); wiring specific skills/tools is left to the user.
+    Generated fields intentionally exclude ``mounted_skills`` / ``mounted_mcp``:
+    those reference skill/mcp ids or tool names that do not exist at generation
+    time, and mounting is a separate user action (AG-08). The generator only
+    fills in the agent's *identity* (who it is and what it can do); wiring
+    specific skills/tools is left to the user.
 
     ``role`` is constrained to snake_case English (matching the seed convention
     ``frontend_engineer`` / ``backend_engineer`` / ``coordinator``) so it is a

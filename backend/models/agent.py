@@ -21,8 +21,6 @@ class AgentDefinition(BaseModel):
     extra_skills: list[str] = []
     mounted_skills: list[str] = []
     mounted_mcp: list[str] = []
-    allowed_tools: list[str] = []
-    denied_tools: list[str] = []
     startup_strategy: str = ""
     model: str = ""
     max_turns: int = 0
