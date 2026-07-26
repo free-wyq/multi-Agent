@@ -1333,6 +1333,8 @@ export default function ChatPanel({
             //   - toolEvents/thinkEvents：extractTraceEvents(msg.data) 把 data.trace 解析成
             //     TraceEvent[]（后端 registry.on_log 落的 tool_start/tool_end/think/answer）
             //   - statusLine：复用 extractCoordStats 状态行渲染（model · Ns · ↓ N tokens）
+            //   - finalStats：把 stats 透传给「🔍 执行过程详情」面板的「📝 最终生成」item，
+            //     只放元数据（字数 + tokens + 耗时 + model），不重复渲染 content 正文。
             //   - footerExtra：追问引导 chip（气泡外、wrap 内，与 mockup 一致）
             // hideFooterAction=true：抑制 footer 内置「复制+重新生成」操作栏，统一走顶部
             //   hover actionGroup（含复制/朗读/重新生成），避免双份操作栏。ChatMessageBubble
@@ -1383,6 +1385,17 @@ export default function ChatPanel({
                 {' · 完成'}
               </div>
             ) : undefined
+            // finalStats 透传给「📝 最终生成」Timeline item：stats 有值时把 elapsedMs/tokens/
+            // reasoningTokens/model 全传；无 stats 时也传一个最小对象（仅字数会从 content 自算），
+            // 让持久化气泡的「📝 最终生成」item 始终渲染（完成态元数据可见）。
+            const finalStats = stats
+              ? {
+                  elapsedMs: stats.elapsed_ms,
+                  tokens: stats.tokens,
+                  reasoningTokens: stats.reasoning_tokens,
+                  model: stats.model,
+                }
+              : {}
             const footerExtra = followUps.length > 0 ? (
               <div className="chat-followup-chips">
                 <span className="chat-followup-label">💡 您可能还想问：</span>
@@ -1409,6 +1422,7 @@ export default function ChatPanel({
                 timestamp={msg.created_at}
                 actionGroup={actionGroup}
                 statusLine={statusLine}
+                finalStats={finalStats}
                 hideFooterAction
                 footerExtra={footerExtra}
               />,

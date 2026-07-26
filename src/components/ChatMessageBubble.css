@@ -81,74 +81,42 @@
   margin-top: 4px;
 }
 
-/* Timeline 自定义 dot：├─（调用中）/ ↳（已返回），对齐用户草图树形缩进语义。 */
-.chat-tool-timeline-dot {
-  font-size: 12px;
-  color: #8c8c8c;
-  font-family: 'monospace';
-  line-height: 1;
+/* ── 统一「🔍 执行过程详情」面板 Timeline（替换原三块独立折叠区）──
+ * 原 .chat-tool-timeline 保留（向后兼容，未删——避免回归）。新面板用 .chat-process-timeline。
+ * Timeline 自带竖向 padding 偏大（每 item 20px 间距），这里收紧到 12px 让多事件不撑高气泡。
+ * 不加动画（项目硬约束「不要灵动」）。 */
+.chat-process-timeline {
+  padding-left: 6px;
+  margin-top: 4px;
 }
 
-/* Timeline item 内容行：横向紧凑铺开（图标 + 工具名 + 耗时 + 详情触发 + 参数预览），不竖排堆叠。 */
-.chat-tool-timeline-row {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 12px;
-  line-height: 1.6;
+.chat-process-timeline .ant-timeline-item {
+  padding-bottom: 12px;
 }
 
-/* 单条工具摘要行 label（保留旧 class 供 args/elapsed 复用，但 Collapse 展开态改为 Timeline 行） */
-.chat-tool-row-label {
+.chat-process-timeline .ant-timeline-item:last-child {
+  padding-bottom: 0;
+}
+
+/* Timeline item 内部容器：让 Space 标题行 + Paragraph 正文紧凑铺排。
+ * 由 antd Space + Typography.Paragraph 接管内容渲染，不再需要手搓 title/meta/pre 子样式。 */
+.chat-process-item {
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
-  font-size: 12px;
+  flex-direction: column;
+  gap: 2px;
+  margin-bottom: 8px;
 }
 
-.chat-tool-row-name {
-  font-family: 'monospace';
-  font-weight: 600;
+.chat-process-item:last-child {
+  margin-bottom: 0;
 }
 
-.chat-tool-row-args {
-  color: inherit;
-  opacity: 0.65;
-  font-family: 'monospace';
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 220px;
-}
-
-.chat-tool-row-elapsed {
-  opacity: 0.55;
-  flex-shrink: 0;
-}
-
-/* 详情触发标签：点 chip 弹 Popover 看 args/output payload，替代旧的手写展开 pre。
- * 视觉是可点链接风（蓝色小字），与 Timeline 行其他灰字区分，提示「这里可点」。 */
-.chat-tool-detail-trigger {
-  color: #1677ff;
-  cursor: pointer;
-  font-size: 11px;
-  padding: 0 4px;
-  flex-shrink: 0;
-}
-
-.chat-tool-detail-trigger:hover {
-  color: #4096ff;
-  text-decoration: underline;
-}
-
-/* Popover 内 payload pre：与原 payload 视觉一致（深色 code 块）。 */
+/* 详情 Popover 内 payload pre：与原 payload 视觉一致（深色 code 块）。 */
 .chat-tool-payload-popover .chat-tool-payload {
   margin: 0;
 }
 
-/* 工具 payload 详情块（可折叠展开后） */
+/* 工具 payload 详情块（Popover 内深色 code 块）。 */
 .chat-tool-payload {
   background: #1e1e1e;
   color: #c9d1d9;
@@ -162,19 +130,6 @@
   word-break: break-all;
   max-height: 200px;
   overflow-y: auto;
-}
-
-.chat-tool-payload-label {
-  font-size: 10px;
-  color: #8b949e;
-  margin-top: 6px;
-  margin-bottom: 2px;
-  letter-spacing: 0.5px;
-  text-transform: uppercase;
-}
-
-.chat-tool-payload-label:first-child {
-  margin-top: 0;
 }
 
 /* ── 状态行（Claude-Code 风格 "model · Ns · ↓ N tokens · thinking"）── */

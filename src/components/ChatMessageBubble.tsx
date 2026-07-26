@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { Bubble, ThoughtChain } from '@ant-design/x'
-import { Collapse, Tooltip, Button, message, Timeline, Popover, Card, Descriptions, List, Table, Empty } from 'antd'
-import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedListOutlined, ProfileOutlined, ReloadOutlined } from '@ant-design/icons'
+import { Bubble } from '@ant-design/x'
+import { Collapse, Tooltip, Button, message, Timeline, Popover, Card, Descriptions, List, Table, Empty, Typography, Tag, Space, Badge, Divider } from 'antd'
+import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedListOutlined, ProfileOutlined, ReloadOutlined, CheckCircleOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import { groupApi } from '../services/api'
 import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
@@ -321,6 +321,13 @@ interface ChatMessageBubbleProps {
   groupId?: string
   /** 是否正在流式生成（PL-08 逐字 token）。true → 气泡加 streaming 描边 + 正文尾追加闪烁光标。 */
   isStreaming?: boolean
+  /** 完成态元数据（「📝 最终生成」Timeline item 用）。
+   *  ChatPanel 在持久化/finalized 气泡路径把已有的 stats（extractCoordStats 或流式 coordStats
+   *  落地的真值）传进来——字数从 content.length 自算，tokens/耗时/model/reasoningTokens 从 stats 取。
+   *  未传（undefined）→ 完成态不渲染「📝 最终生成」item（流式气泡 / finalized 过渡气泡无 stats 时
+   *  自然不显示，向后兼容）。协调者流式气泡已有顶部 statusLine，传 finalStats 后📝 item 仅显示
+   *  字数 + 耗时（避免与顶部 statusLine 的 tokens 重复，由渲染层自行选择字段）。 */
+  finalStats?: { elapsedMs?: number; tokens?: number; reasoningTokens?: number; model?: string }
   /** ST-04：是否失败定稿（task_failed 收尾）。true → 气泡加红描边标记失败语义。 */
   isFailed?: boolean
   /** 是否用户自己发的消息（决定左右对齐 + self/other 气泡样式 + @mention 是否高亮）。 */
@@ -428,6 +435,7 @@ export default function ChatMessageBubble({
   artifactFiles = [],
   groupId,
   isStreaming = false,
+  finalStats,
   isFailed = false,
   isUser = false,
   renderContent,
@@ -438,15 +446,16 @@ export default function ChatMessageBubble({
   hideFooterAction = false,
   footerExtra,
 }: ChatMessageBubbleProps) {
-  // 工具调用整组折叠（外层 Collapse「工具调用 (N)」）——展开策略：
-  //  · 流式中（isStreaming=true）默认收起（过程信息按需查看，不撑高气泡）；
-  //  · 回答完成（isStreaming=false）默认展开（用户要看到工具调用全过程）。
-  // 懒初始化按 isStreaming 决定，避免历史消息回显首帧 flash；完成后由 autoExpandOnDone effect 接管。
-  const [toolBlockExpanded, setToolBlockExpanded] = useState(() => !isStreaming)
+  // 工具调用整组折叠（外层 Collapse「🔍 执行过程详情」）——展开策略：
+  //  · 流式中（isStreaming=true）默认展开（让用户看见思考/工具过程实时流出）；
+  //  · 回答完成（isStreaming=false）默认展开（持久化气泡 mount 即完成态，过程详情一目了然）。
+  // 懒初始化按 isStreaming 决定（避免历史消息回显首帧 flash）；完成后由 autoExpandOnDone effect 接管。
+  // 重命名 toolBlockExpanded → processPanelExpanded（语义从「工具折叠」扩为「过程详情面板」，
+  // 因为现在三块合并成一个统一面板）。受控机制 + 用户手动 toggle 5s 内不覆盖语义保留。
+  const [processPanelExpanded, setProcessPanelExpanded] = useState(() => !isStreaming)
   // ST-06（task 22）：正在下载的产物文件 key（file.path）。下载期间该文件按钮 loading，
   // 其余文件按钮禁用——与 TaskPage 同款单下载串行（避免并发下载多文件挤占带宽/混淆进度）。
   const [downloading, setDownloading] = useState<string | null>(null)
-
   // ST-06（task 22）：下载单个产物文件——复用 PL-12 groupApi.downloadFile + saveBlob，
   // 与 TaskPage 交付物卡同入口同逻辑（GET /api/groups/{id}/files/{name} → Blob → a.download）。
   // 无 groupId 时禁用按钮（前置守卫，不报错）；失败 toast 提示。串行：downloading 非空时其余禁用。
@@ -468,40 +477,56 @@ export default function ChatMessageBubble({
     }
   }
 
-  // toolEvents → 按时间序的摘要行（每条 task_tool 一行）。
-  // 先按时间序排，再按工具名 LIFO 配对 start/end 算耗时：end 弹出最近同名未配对 start，
-  // 差值即该次调用耗时（嵌套同名调用按内层先闭合）；clamp 0 防时钟倒序产生负值。
+  // toolEvents → 按时间序的摘要行（start/end 配对成「一个工具调用 = 一个 row」）。
+  // LIFO 配对：end 弹出最近同名未配对 start 合并成一个 row（isEnd=true + elapsedMs + args 来自
+  // start + payload 来自 end.output）。嵌套同名调用按内层先闭合；clamp 0 防时钟倒序产生负值。
+  // 孤儿 start（流式期 end 未到 / trace 缺 end）→ 单独产 🔄 执行中 row。这样完成态每条工具调用
+  // 只出现一次（✅ + 耗时 + 参数 + 👁️输出），不会 start🔄 / end✅ 重复两条（原每事件一行的回归）。
   const toolRows = useMemo<ToolRow[]>(() => {
     const sorted = [...toolEvents].sort((a, b) => a.timestamp - b.timestamp)
-    const pending: Record<string, number[]> = {}
-    return sorted.map((e) => {
+    const pendingStacks: Record<string, TraceEvent[]> = {}
+    const rows: ToolRow[] = []
+    for (const e of sorted) {
       const data = (e.data || {}) as Record<string, unknown>
       const isEnd = data['phase'] === 'end'
       const name = String(data['name'] || '(unknown)')
-      const payload = isEnd ? data['output'] : data['args']
-      let elapsedMs: number | undefined
       if (isEnd) {
-        const stack = pending[name]
-        if (stack && stack.length > 0) {
-          elapsedMs = Math.max(0, e.timestamp - stack.pop()!)
-        }
+        const stack = pendingStacks[name]
+        const startEv = stack && stack.length > 0 ? stack.pop()! : null
+        const startData = startEv ? ((startEv.data || {}) as Record<string, unknown>) : null
+        rows.push({
+          key: e.id,
+          name,
+          argsPreview: startData ? toPreview(startData['args']) : '',
+          payload: data['output'],
+          isEnd: true,
+          elapsedMs: startEv ? Math.max(0, e.timestamp - startEv.timestamp) : undefined,
+          timestamp: startEv ? startEv.timestamp : e.timestamp,
+        })
       } else {
-        ;(pending[name] || (pending[name] = [])).push(e.timestamp)
+        ;(pendingStacks[name] || (pendingStacks[name] = [])).push(e)
       }
-      return {
-        key: e.id,
-        name,
-        argsPreview: isEnd ? '' : toPreview(data['args']),
-        payload,
-        isEnd,
-        elapsedMs,
-        timestamp: e.timestamp,
+    }
+    // 剩余未配对的 start（流式期 end 未返回）→ 🔄 执行中 row
+    for (const name of Object.keys(pendingStacks)) {
+      for (const startEv of pendingStacks[name]) {
+        const data = (startEv.data || {}) as Record<string, unknown>
+        rows.push({
+          key: startEv.id,
+          name: String(data['name'] || '(unknown)'),
+          argsPreview: toPreview(data['args']),
+          payload: data['args'],
+          isEnd: false,
+          timestamp: startEv.timestamp,
+        })
       }
-    })
+    }
+    rows.sort((a, b) => a.timestamp - b.timestamp)
+    return rows
   }, [toolEvents])
 
-  const toggleToolBlock = () => {
-    setToolBlockExpanded((v) => !v)
+  const toggleProcessPanel = () => {
+    setProcessPanelExpanded((v) => !v)
   }
 
   const hasTools = toolRows.length > 0
@@ -517,39 +542,16 @@ export default function ChatMessageBubble({
     [content],
   )
   const hasCards = contentSegments.some((s) => s.type === 'card')
-  // execute 轮判定：气泡携带工具调用或 ReAct 思考事件（hasTools || hasThinks）。
-  // （仅作「气泡是 execute 轮还是 chat 轮」的语义标签 + effect 依赖项；思考折叠策略已统一为
-  // 「过程默认收起」，但保留 isExecuteTurn 作语义标签供未来扩展，避免回归时丢失上下文。）
-  const isExecuteTurn = toolRows.length > 0 || thinkEvents.length > 0
 
-  // 思考折叠区主动展开/收起态——用户反馈「think 步多+工具多全展开太散像竖排步骤列表」→
-  // 默认收起，让最终回答（Bubble.content）一眼可见；想看过程再手动点开。
+  // 思考折叠展开策略（已简化）：
+  //  · 思考活跃期（isStreaming && reasoning && 正文未流出）→ 展开全文，让用户看见实时思考逐字流出；
+  //  · 其他时候（正文开始流 / 已定稿 / execute 轮定稿后回顾）→ 折叠成单行摘要，由 antd
+  //    Typography.Paragraph ellipsis 接管「行尾展开图标」交互，不再手搓 click toggle + slice 截断。
   //
-  // 统一规则（不再按 execute/chat 轮分叉）：
-  //  · **思考活跃期**（isStreaming + reasoning + 正文未流出）→ 自动展开，让用户看见实时思考逐字流出；
-  //  · **其他时候**（正文开始流 / 已定稿 / execute 轮定稿后回顾）→ 自动收起，让位给最终回答。
-  //
-  // 这替换了旧逻辑里「execute 轮整轮保持展开（含定稿回顾）」——用户明确抱怨全展开太散，
-  // 故 execute 轮定稿后也默认收起，过程信息降级为「按需查看」。
-  //
-  // 用户手动展开/收起（点标题）优先——手动操作后 5s 内不自动覆盖（尊重用户意图）；5s 后若思考
-  // 仍在流（新 delta 到达触发 effect 重跑），恢复自动收起。
+  // 这替换了旧逻辑里 reasoningExpanded / userToggledAt / thinkActiveKeys / userExpandedThinks /
+  // userCollapsedThinks / onThinkCollapseChange 一整套手搓受控折叠态——antd Paragraph ellipsis
+  // 原生支持「rows:1 + expandable:'icon' + onEllipsis」，自动截断 + 出展开图标，更干净。
   const reasoningActive = isStreaming && hasReasoning && !hasContent
-  const [reasoningExpanded, setReasoningExpanded] = useState(() => !isStreaming && hasReasoning)
-  const [userToggledAt, setUserToggledAt] = useState(0)
-  useEffect(() => {
-    // 5s 内用户手动 toggle 过 → 尊重用户意图，不自动覆盖
-    if (Date.now() - userToggledAt < 5000) return
-    // 流式态：思考活跃期展开、其他时候（含定稿后）收起
-    if (isStreaming) {
-      setReasoningExpanded(reasoningActive)
-    }
-    // 完成态：由 autoExpandOnDoneRef effect 接管首次展开，不在此处反复重置（避免覆盖用户收起操作）
-  }, [reasoning, reasoningActive, userToggledAt, isStreaming, isExecuteTurn])
-  const toggleReasoning = () => {
-    setUserToggledAt(Date.now())
-    setReasoningExpanded((v) => !v)
-  }
   // ST-06（task 21 数据管道）：worker 任务产物文件列表（task_complete data.artifact.files[]）。
   // 仅 finalizedBubbles 传入（task 21 从 task_complete 事件 data.artifact 提取）；流式/协调者
   // 气泡不传（默认空数组）。hasArtifacts 让「既无工具也无内容也无思考也无产物」的防御兜底放行，
@@ -577,87 +579,25 @@ export default function ChatMessageBubble({
         key: e.id || `think-${e.timestamp}`,
         phase,
         text,
+        // 带出 timestamp 供 processItems 按真实时序与工具交错排序（ReAct 是 think→tool→think→tool
+        // 交替，非「所有思考在前所有工具在后」）。单位毫秒，与 toolRows.timestamp 同。
+        timestamp: e.timestamp,
       }
     })
   }, [thinkEvents])
-  // ReAct think 折叠块主动展开/收起态——用户反馈「think 步多全展开太散像竖排步骤列表」→
-  // 默认只展开最后一条 think（通常是最关键/最接近结论的中间步），其余收起。这样既能让用户一眼
-  // 看到最终回答（Bubble.content，think 之外的正文），又保留了「过程一目了然」的最低限度可见性——
-  // 最后一条 think 像目录里的「当前焦点」，想看完整过程再点开其余项。
-  //
-  // 受控展开机制（保留）：expandedKeys=thinkActiveKeys（直接计算：默认含 lastThinkKey，叠加
-  // userExpandedThinks 显式展开项，扣 userCollapsedThinks 显式收起项）。onExpand=onThinkCollapseChange
-  // 把用户的折叠/展开意图分别记入 userExpanded/userCollapsed 两个 Set，覆盖默认策略。
-  //  · 默认应展开（最后一条）但 keys 不含 → 用户收起它 → userCollapsedThinks.add
-  //  · 默认应收起（非最后一条）但 keys 含 → 用户展开它 → userExpandedThinks.add
-  //  · 当前态 == 默认态 → 该 key 无用户覆盖，从对应 Set 移除（避免 stale 残留）
-  // 流式期 thinkRows 动态增长，新到达的行若非最后一条默认收起；最后一条随增长自动成为展开焦点。
-  const [userExpandedThinks, setUserExpandedThinks] = useState<Set<string>>(new Set())
-  const [userCollapsedThinks, setUserCollapsedThinks] = useState<Set<string>>(new Set())
-  const lastThinkKey = thinkRows.length > 0 ? thinkRows[thinkRows.length - 1].key : null
-  const thinkActiveKeys = thinkRows
-    .map((r) => r.key)
-    .filter((k) => {
-      // 用户显式收起 → 不展开
-      if (userCollapsedThinks.has(k)) return false
-      // 用户显式展开 → 展开
-      if (userExpandedThinks.has(k)) return true
-      // 默认：流式中只展开最后一条（过程焦点）；回答完成（!isStreaming）全展开（看完整过程）
-      return isStreaming ? k === lastThinkKey : true
-    })
-  const onThinkCollapseChange = (keys: string[]) => {
-    // diff 当前 activeKey 集合 vs 默认策略，把用户的折叠意图记入 userExpanded/userCollapsed Set：
-    //  · 默认应展开但 keys 不含 → 用户收起它 → userCollapsed.add
-    //  · 默认应收起但 keys 含 → 用户展开它 → userExpanded.add
-    //  · 当前态 == 默认态 → 该 key 无用户覆盖，从对应 Set 移除（避免 stale 残留）。
-    // 默认策略：流式中只展开最后一条；完成态全展开。
-    setUserExpandedThinks((prev) => {
-      const next = new Set(prev)
-      for (const r of thinkRows) {
-        const defaultExpanded = isStreaming ? r.key === lastThinkKey : true
-        const currentExpanded = keys.includes(r.key)
-        if (currentExpanded && !defaultExpanded) {
-          next.add(r.key)
-        } else {
-          next.delete(r.key)
-        }
-      }
-      return next
-    })
-    setUserCollapsedThinks((prev) => {
-      const next = new Set(prev)
-      for (const r of thinkRows) {
-        const defaultExpanded = isStreaming ? r.key === lastThinkKey : true
-        const currentExpanded = keys.includes(r.key)
-        if (!currentExpanded && defaultExpanded) {
-          next.add(r.key)
-        } else {
-          next.delete(r.key)
-        }
-      }
-      return next
-    })
-  }
-  // 回答完成时自动展开三个折叠区（仅一次，不覆盖后续用户操作）。
+  // 回答完成时自动展开过程详情面板（仅一次，不覆盖后续用户操作）。
   // 触发条件：!isStreaming（回答完成/历史消息回显）且 autoExpandOnDoneRef.current=false。
-  // 首次进入完成态时：
-  //  · toolBlockExpanded → true
-  //  · reasoningExpanded → true（仅当 hasReasoning，避免空壳展开）
-  //  · thinkActiveKeys → 全部 think key（由 thinkActiveKeys 计算逻辑的 !isStreaming 分支自动实现）
-  // 然后置 autoExpandOnDoneRef.current=true，之后即使用户收起某区，也不再自动重置（尊重用户意图）。
-  // 流式→完成 transition：isStreaming 由 true 转 false 时，effect 重跑，首次 false 触发展开。
+  // 首次进入完成态时 processPanelExpanded → true（思考折叠已交 antd Paragraph ellipsis 接管，
+  // 不再需要 setReasoningExpanded / thinkActiveKeys 等手搓态）。
+  // 流式→完成 transition：isStreaming 由 true 转 false 时 effect 重跑，首次 false 触发展开。
   // 历史消息回显：mount 时 isStreaming=false，effect 首跑即触发展开（同步 setState 在 commit 前生效）。
   const autoExpandOnDoneRef = useRef(false)
   useEffect(() => {
     if (!isStreaming && !autoExpandOnDoneRef.current) {
       autoExpandOnDoneRef.current = true
-      setToolBlockExpanded(true)
-      if (hasReasoning) {
-        setReasoningExpanded(true)
-      }
-      // think 默认全展开由 thinkActiveKeys 的 !isStreaming 分支自动实现，无需在此 setState
+      setProcessPanelExpanded(true)
     }
-  }, [isStreaming, hasReasoning])
+  }, [isStreaming])
   // 流式前 ~200ms 首个 stats 未到时用 reasoning.length//3 临时估算（与后端 live_reasoning_tokens
   // 同启发式）。用 token 不用字符数——与状态行「↓ N tokens」同单位。
   const reasoningTokenLabel =
@@ -666,6 +606,196 @@ export default function ChatMessageBubble({
       : Math.max(1, Math.ceil((reasoning?.length || 0) / 3))
   // 既无工具也无内容也无推理也无思考也无产物且非流式 → 不该渲染气泡（父组件应已过滤，此为防御兜底）
   if (!hasTools && !hasContent && !hasReasoning && !hasThinks && !hasArtifacts && !isStreaming) return null
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // 统一「🔍 执行过程详情」面板：把原三块（reasoning Collapse + think ThoughtChain +
+  // tool Collapse+Timeline）合并成一个 Timeline，按事件时序升序串起。每条事件一个
+  // Timeline item：
+  //   · dot   = antd Outlined 小号图标 + 状态色（BulbOutlined 思考琥珀 / ToolOutlined 工具
+  //             成功绿·执行中琥珀 / CheckCircleOutlined 最终生成蓝），不用 emoji 堆叠。
+  //   · color = 与 dot 同步的状态色字符串（思考 '#faad14' / 工具 isEnd?'#52c41a':'#faad14' /
+  //             最终 '#1677ff'），让 Timeline 轴线段着色与 dot 一致。
+  //   · children = 一行轻量内容：Space + Typography.Text + Tag + Popover，
+  //             不用 Descriptions bordered 表格（多工具嵌多表视觉臃肿）。
+  //   · 思考项正文用 Typography.Paragraph ellipsis={{rows:1, expandable:'icon'}} 原生折叠，
+  //             不再手搓 chat-process-summary div + onClick + slice(0,60) 截断。
+  //
+  // 事件来源（三态）：
+  //   · 协调者 reasoning 字符串 → 单个思考 item（无 per-event timestamp，时间戳用气泡 timestamp）
+  //   · worker thinkEvents → 每条 think 一个思考 item（有 timestamp，phase 区分思考/结论）
+  //   · toolEvents start/end 配对 → 每个工具调用一个工具 item（已配对算 elapsedMs）
+  //   · 完成态 !isStreaming && hasContent → 一个「最终生成」item（仅元数据，不重复正文）
+  //
+  // 排序：按事件 timestamp 升序——协调者 reasoning 无 timestamp，用 0（最早位）；
+  // worker think 各自带 timestamp；tool start/end 配对后用 start 时间。最终生成放最末（Infinity）。
+  // 同 timestamp 的事件保持稳定顺序（思考在前、工具在后），不强行二次排序避免抖动。
+  // ─────────────────────────────────────────────────────────────────────────
+  type ProcessItem = {
+    /** 排序键（时间戳，秒级）。协调者 reasoning 无 timestamp 用 0（最早）。最终生成用 Infinity（最末）。 */
+    sortKey: number
+    /** Timeline item 唯一 key（React 列表 key）。 */
+    itemKey: string
+    /** Timeline dot 节点（antd Outlined 小号图标，状态色 inline）。 */
+    dot: React.ReactNode
+    /** Timeline color（思考琥珀 / 工具成功绿·执行中琥珀 / 最终生成蓝）。 */
+    color: string
+    /** Timeline children 节点（Space+Typography.Text+Tag+Popover 一行轻量）。 */
+    children: React.ReactNode
+  }
+
+  const processItems: ProcessItem[] = []
+
+  // ── 1. 思考阶段 item ──
+  // 协调者气泡用 reasoning 字符串（无 per-event timestamp）；worker 气泡用 thinkEvents 每条一个 item。
+  // 流式活跃期（isActive）→ Paragraph ellipsis={false} 展开全文逐字流出；
+  // 完成态 → Paragraph ellipsis={{rows:1, expandable:'icon'}} 让 antd 接管折叠展开。
+  if (hasReasoning) {
+    // 协调者 reasoning：单 item。
+    const isActive = reasoningActive
+    processItems.push({
+      sortKey: 0,
+      itemKey: 'reasoning',
+      dot: <BulbOutlined style={{ color: '#faad14', fontSize: 12 }} />,
+      color: '#faad14',
+      children: (
+        <div className="chat-process-item">
+          <Space size={6} style={{ marginBottom: 2 }}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+              思考
+            </Typography.Text>
+            <Tag color="orange" bordered={false} style={{ fontSize: 11 }}>
+              {reasoningTokenLabel} tokens
+            </Tag>
+            {isActive && <Badge status="processing" />}
+          </Space>
+          <Typography.Paragraph
+            ellipsis={isActive ? false : { rows: 1, expandable: 'collapsible' }}
+            style={{ margin: 0, fontSize: 12, color: '#595959' }}
+          >
+            {reasoning}
+          </Typography.Paragraph>
+        </div>
+      ),
+    })
+  }
+
+  if (hasThinks) {
+    // worker think：每条 think 一个 item，按时间序。流式最后一条 isActive 展开全文，
+    // 其余完成态由 antd Paragraph ellipsis 接管折叠。
+    const sorted = [...thinkRows]
+    sorted.forEach((row, idx) => {
+      const isActive = isStreaming && idx === sorted.length - 1
+      processItems.push({
+        // 用 think 事件的真实 timestamp（毫秒）做 sortKey——ReAct 是 think→tool→think→tool
+        // 交替，think 项应按真实发生时间与工具项交错排，而非全堆在最前。
+        sortKey: row.timestamp || 0,
+        itemKey: `think-${row.key}`,
+        dot: <BulbOutlined style={{ color: '#faad14', fontSize: 12 }} />,
+        color: '#faad14',
+        children: (
+          <div className="chat-process-item">
+            <Space size={6} style={{ marginBottom: 2 }}>
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>
+                {row.phase === 'final' ? '结论' : '思考'}
+              </Typography.Text>
+              <Tag color="orange" bordered={false} style={{ fontSize: 11 }}>
+                {row.text.length} 字
+              </Tag>
+              {isActive && <Badge status="processing" />}
+            </Space>
+            <Typography.Paragraph
+              ellipsis={isActive ? false : { rows: 1, expandable: 'collapsible' }}
+              style={{ margin: 0, fontSize: 12, color: '#595959' }}
+            >
+              {row.text}
+            </Typography.Paragraph>
+          </div>
+        ),
+      })
+    })
+  }
+
+  // ── 2. 工具调用 item（复用 toolRows useMemo 计算：start/end LIFO 配对算耗时）──
+  // 一行轻量：工具名(code) + 状态Tag(success/processing) + 详情Link(Popover) + 参数预览(secondary ellipsis)。
+  // 不用 Descriptions bordered 表格——多工具嵌多表视觉臃肿。
+  toolRows.forEach((row) => {
+    processItems.push({
+      sortKey: row.timestamp || 0,
+      itemKey: `tool-${row.key}`,
+      dot: <ToolOutlined style={{ color: row.isEnd ? '#52c41a' : '#faad14', fontSize: 12 }} />,
+      color: row.isEnd ? '#52c41a' : '#faad14',
+      children: (
+        <div className="chat-process-item">
+          <Space size={6} wrap>
+            <Typography.Text code style={{ fontSize: 12 }}>{row.name}</Typography.Text>
+            <Tag color={row.isEnd ? 'success' : 'processing'} bordered={false} style={{ fontSize: 11 }}>
+              {row.isEnd ? formatElapsed(row.elapsedMs ?? 0) : '执行中'}
+            </Tag>
+            {row.isEnd && row.payload != null && (
+              <Popover
+                placement="rightTop"
+                title="输出"
+                content={
+                  <pre className="chat-tool-payload">
+                    {typeof row.payload === 'string'
+                      ? row.payload
+                      : JSON.stringify(row.payload, null, 2)}
+                  </pre>
+                }
+                trigger="click"
+                overlayClassName="chat-tool-payload-popover"
+              >
+                <Typography.Link style={{ fontSize: 11 }}>详情</Typography.Link>
+              </Popover>
+            )}
+            {!row.isEnd && row.argsPreview && (
+              <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, maxWidth: 220 }}>
+                {row.argsPreview}
+              </Typography.Text>
+            )}
+          </Space>
+        </div>
+      ),
+    })
+  })
+
+  // ── 3. 最终生成 item（仅完成态 !isStreaming && hasContent && finalStats）──
+  // 只放元数据：字数 + [可选] tokens/耗时/model/推理 tokens。不重复渲染 content 正文（正文在 Bubble.content 里）。
+  // 用 antd Divider type="vertical" 做段间分隔，不用 emoji。
+  if (!isStreaming && hasContent && finalStats) {
+    processItems.push({
+      sortKey: Infinity,
+      itemKey: 'final-generation',
+      dot: <CheckCircleOutlined style={{ color: '#1677ff', fontSize: 12 }} />,
+      color: '#1677ff',
+      children: (
+        <div className="chat-process-item">
+          <Space size={8} split={<Divider type="vertical" style={{ margin: 0 }} />}>
+            <Typography.Text type="secondary" style={{ fontSize: 12 }}>最终生成</Typography.Text>
+            <Typography.Text style={{ fontSize: 12 }}>{content.length} 字</Typography.Text>
+            {finalStats.elapsedMs != null && finalStats.elapsedMs > 0 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{formatElapsed(finalStats.elapsedMs)}</Typography.Text>
+            )}
+            {finalStats.tokens != null && finalStats.tokens > 0 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>↓ {finalStats.tokens}</Typography.Text>
+            )}
+            {finalStats.reasoningTokens != null && finalStats.reasoningTokens > 0 && (
+              <Typography.Text style={{ fontSize: 12, color: '#faad14' }}>含 {finalStats.reasoningTokens} 推理</Typography.Text>
+            )}
+            {finalStats.model && (
+              <Typography.Text style={{ fontSize: 12, color: '#722ed1' }}>{finalStats.model}</Typography.Text>
+            )}
+          </Space>
+        </div>
+      ),
+    })
+  }
+
+  // 按 sortKey 升序稳定排序（思考在前 0、工具按 timestamp、📝 在末 Infinity）。
+  // 稳定排序保序：相同 sortKey 的项保持插入顺序（思考在前、think 在 reasoning 之后）。
+  processItems.sort((a, b) => a.sortKey - b.sortKey)
+
+  const hasProcessItems = processItems.length > 0
 
   return (
     <div
@@ -736,185 +866,34 @@ export default function ChatMessageBubble({
               .join(' '),
           }}
           header={
-            hasReasoning || hasThinks || hasTools ? (
-              <>
-                {/* 推理过程折叠区（气泡顶部，工具摘要之上）—— 推理模型在可见 content 前流出的内部思维链。
-                    用 antd Collapse（项目约定：有现成开源组件就不手写）。默认收起——让最终回答一眼可见，
-                    想看模型「怎么想的」再手动点开。仅思考活跃期（isStreaming + reasoning + 正文未流出）
-                    自动展开让用户看见实时思考逐字流出，正文一开始流即收起让位。
-                    用户手动点标题展开/收起优先——手动操作后 5s 内不自动覆盖（尊重用户意图）。 */}
-                {hasReasoning && (
-                  <div style={{ marginBottom: 6 }}>
-                    <Collapse
-                      size="small"
-                      ghost
-                      activeKey={reasoningExpanded ? ['reasoning'] : []}
-                      onChange={() => toggleReasoning()}
-                      items={[{
-                        key: 'reasoning',
-                        label: (
-                          <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <BulbOutlined style={{ fontSize: 12 }} />
-                            思考过程（{reasoningTokenLabel} tokens）
-                          </span>
-                        ),
-                        children: (
-                          <pre
-                            style={{
-                              margin: '6px 0 2px',
-                              padding: '8px 10px',
-                              background: 'rgba(250, 173, 20, 0.06)',
-                              borderLeft: '2px solid #faad14',
-                              borderRadius: 4,
-                              fontSize: 12,
-                              lineHeight: 1.6,
-                              color: '#595959',
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-word',
-                              maxHeight: 320,
-                              overflowY: 'auto',
-                              fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                            }}
-                          >
-                            {reasoning}
-                          </pre>
-                        ),
-                      }]}
-                    />
-                  </div>
-                )}
-
-                {/* ST-05（task 19）：worker ReAct 思考折叠区——task_think 事件按 task_id 归并（task 18）
-                    后渲染为气泡内折叠块。换成 @ant-design/x ThoughtChain（多 item 时间线模型匹配 ReAct
-                    多步思考，比手写 Collapse items 更贴合开源组件抽象）。
-                      · phase=thinking（中间推理）→ 标签「思考」；
-                      · phase=final（task_answer 最终答案）→ 标签「结论」。
-                    受控展开：expandedKeys=thinkActiveKeys（默认只展开最后一条 think——既给用户「过程焦点」
-                    一眼可见，又不让多步全展开散成竖排步骤列表）；onExpand=onThinkCollapseChange 把用户
-                    折叠意图记入 userExpanded/userCollapsed Set 覆盖默认策略。
-                    视觉沿用 reasoning 折叠区色系 #faad14 + BulbOutlined，让用户一眼认出「这是模型的思考」。
-                    位置在 reasoning 折叠区之下、工具摘要之上：reasoning 是协调者流式推理（coordReasoning），
-                    think 是 worker ReAct 思考（task_think），两者来源不同但视觉同区，按气泡类型择一渲染
-                    （worker 气泡无 reasoning、有 think；协调者气泡有 reasoning、无 think）。 */}
-                {hasThinks && (
-                  <div style={{ marginBottom: 6 }}>
-                    <ThoughtChain
-                      items={thinkRows.map((row) => ({
-                        key: row.key,
-                        icon: <BulbOutlined style={{ color: '#faad14', fontSize: 12 }} />,
-                        title: (
-                          <span style={{ color: '#faad14', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            {row.phase === 'final' ? '结论' : '思考'}
-                            {row.text ? `（${row.text.length} 字）` : ''}
-                          </span>
-                        ),
-                        content: row.text ? (
-                          <pre
-                            style={{
-                              margin: '6px 0 2px',
-                              padding: '8px 10px',
-                              background: 'rgba(250, 173, 20, 0.06)',
-                              borderLeft: '2px solid #faad14',
-                              borderRadius: 4,
-                              fontSize: 12,
-                              lineHeight: 1.6,
-                              color: '#595959',
-                              whiteSpace: 'pre-wrap',
-                              wordBreak: 'break-word',
-                              maxHeight: 320,
-                              overflowY: 'auto',
-                              fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
-                            }}
-                          >
-                            {row.text}
-                          </pre>
-                        ) : (
-                          <span style={{ color: '#bfbfbf', fontSize: 12 }}>（空）</span>
-                        ),
-                        collapsible: true,
-                      }))}
-                      expandedKeys={thinkActiveKeys}
-                      onExpand={onThinkCollapseChange}
-                    />
-                  </div>
-                )}
-
-                {/* 工具调用折叠区——外层 AntD Collapse 标题行「🔧 工具调用 (N) · 总耗时 Xs」默认收起；
-                    展开后用 AntD Timeline 渲染树形缩进明细（每条 tool 一个 Timeline item，dot 用 ▸
-                    让展开的明细有「├─」树形视觉对齐用户草图）。仍保留受控展开 state：
-                    展开某条 tool 详情用 Popover（点 chip 弹出 args/output payload）——chip 是横向
-                    紧凑标签，整组明细竖排成树形列表（步骤语义，竖排可接受）。 */}
-                {hasTools && (
-                  <div className="chat-tool-block">
-                    <Collapse
-                      size="small"
-                      ghost
-                      activeKey={toolBlockExpanded ? ['tools'] : []}
-                      onChange={() => toggleToolBlock()}
-                      items={[{
-                        key: 'tools',
-                        label: (
-                          <span style={{ color: '#8c8c8c', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-                            <ToolOutlined style={{ fontSize: 12 }} />
-                            工具调用 ({toolRows.length})
-                          </span>
-                        ),
-                        children: (
-                          <Timeline
-                            className="chat-tool-timeline"
-                            items={toolRows.map((row) => ({
-                              key: row.key,
-                              color: row.isEnd ? 'gray' : 'green',
-                              dot: (
-                                <span className="chat-tool-timeline-dot">
-                                  {row.isEnd ? '↳' : '├─'}
-                                </span>
-                              ),
-                              children: (
-                                <span className="chat-tool-timeline-row">
-                                  <ToolOutlined style={{ fontSize: 11, opacity: 0.7, flexShrink: 0 }} />
-                                  <span className="chat-tool-row-name">{row.name}</span>
-                                  {row.isEnd ? (
-                                    <span className="chat-tool-row-elapsed">
-                                      · {formatElapsed(row.elapsedMs ?? 0)}
-                                    </span>
-                                  ) : (
-                                    <span className="chat-tool-row-elapsed">· 调用中</span>
-                                  )}
-                                  {row.payload != null && (
-                                    <Popover
-                                      placement="rightTop"
-                                      title={row.isEnd ? '输出' : '参数'}
-                                      content={
-                                        <pre className="chat-tool-payload">
-                                          {typeof row.payload === 'string'
-                                            ? row.payload
-                                            : JSON.stringify(row.payload, null, 2)}
-                                        </pre>
-                                      }
-                                      trigger="click"
-                                      overlayClassName="chat-tool-payload-popover"
-                                    >
-                                      <span className="chat-tool-detail-trigger" title="点击查看详情">
-                                        详情
-                                      </span>
-                                    </Popover>
-                                  )}
-                                  {row.argsPreview && (
-                                    <span className="chat-tool-row-args" title={toPreview(row.payload, 500)}>
-                                      {row.argsPreview}
-                                    </span>
-                                  )}
-                                </span>
-                              ),
-                            }))}
-                          />
-                        ),
-                      }]}
-                    />
-                  </div>
-                )}
-              </>
+            hasProcessItems ? (
+              <div className="chat-tool-block">
+                <Collapse
+                  size="small"
+                  ghost
+                  activeKey={processPanelExpanded ? ['process'] : []}
+                  onChange={() => toggleProcessPanel()}
+                  items={[{
+                    key: 'process',
+                    label: (
+                      <span style={{ color: '#8c8c8c', fontSize: 12, display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                        🔍 执行过程详情 ({processItems.length})
+                      </span>
+                    ),
+                    children: (
+                      <Timeline
+                        className="chat-process-timeline"
+                        items={processItems.map((item) => ({
+                          key: item.itemKey,
+                          color: item.color,
+                          dot: item.dot,
+                          children: item.children,
+                        }))}
+                      />
+                    ),
+                  }]}
+                />
+              </div>
             ) : undefined
           }
           footer={
