@@ -1,11 +1,261 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bubble, ThoughtChain } from '@ant-design/x'
-import { Collapse, Tooltip, Button, message, Timeline, Popover } from 'antd'
-import { ToolOutlined, BulbOutlined, DownloadOutlined } from '@ant-design/icons'
+import { Collapse, Tooltip, Button, message, Timeline, Popover, Card, Descriptions, List, Table, Empty } from 'antd'
+import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedListOutlined, ProfileOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import { groupApi } from '../services/api'
 import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
 import './ChatMessageBubble.css'
+
+// ════════════════════════════════════════════════════════════════════════════
+// 需求2-前端：结构化结果卡片段（[需求2-设计] commit 9df5116 单真源
+// `docs/structured-result-card-schema.md`，[需求2-后端] commit b9a0597 提示词/解析已落）
+//
+// 线格式：markdown fenced code block + `card` info string 包 JSON payload。
+//   ```card
+//   {"icon":"🔥","title":"百度热搜 Top 5","kind":"table",
+//    "columns":["排名","标题","热度"],
+//    "rows":[["1","神舟二十号","9821"],...]}
+//   ```
+// 卡片是 `content` 子串，走现有 _unified_reply → persist_agent_reply → emit_message_added
+// 全程透传（不改 DB / 不加事件 / 不改 message dict）。本组件负责「把 content 里的 ```card```
+// 块切出来渲染成 AntD 卡片，剩余散文按原路径渲染」。
+//
+// CARD_RE 必须与后端 `backend/llm/card_fragment.py CARD_FRAGMENT_RE` byte-identical
+// （/```card\s*\n([\s\S]*?)```/g）——后端 count_card_fragments 计数与前端 parseCards 解析对同一
+// content 的「块数」判定必须一致（后端日志验证 LLM 是否遵守 CARD_OUTPUT_CONTRACT，前端渲染
+// 同一份 content），否则两边对不齐。模式语义：三反引号 + 字面 `card` info string + 换行，
+// 非贪婪捕获（[\s\S] 跨换行）到闭合三反引号。
+// ════════════════════════════════════════════════════════════════════════════
+
+/** 与后端 `llm.card_fragment.CARD_FRAGMENT_RE` byte-identical 的 card 围栏正则。
+ *  `g` flag 用于 matchAll 全局扫描；调用前需手动重置 lastIndex（matchAll 自管，不重置）。 */
+const CARD_RE = /```card\s*\n([\s\S]*?)```/g
+
+/** card payload JSON schema（设计单真源 docs/structured-result-card-schema.md §4）。
+ *  字段全 optional——前端容错（缺字段当空/降级），后端提示词负责产出合法结构。
+ *  值类型统一 string（数字也 stringify，如 "9821" 而非 9821——避免渲染时数字不显示/排序歧义）。
+ *  - kind=kv:    items: Array<{label:string, value:string}>
+ *  - kind=list:  items: Array<string>
+ *  - kind=table: columns: Array<string>, rows: Array<Array<string>>
+ *  未知 kind → 整块降级为普通代码块（不崩，显示原始 JSON）。 */
+interface CardPayload {
+  icon?: string
+  title?: string
+  kind?: 'kv' | 'list' | 'table' | string
+  items?: Array<{ label: string; value: string }> | Array<string> | unknown
+  columns?: string[] | unknown
+  rows?: Array<Array<string>> | unknown
+}
+
+/** 解析 content，返回各 card 块的 payload + 字符区间。
+ *  非法 JSON 的块：按设计 §6「降级为普通代码块渲染，不静默丢弃」——返回 raw 字段（原 ```card...```
+ *  原文），渲染时当普通 code 块走（让用户看到原始 JSON 便于调提示词，而非吞掉）。
+ *
+ *  对齐后端 `extract_card_payloads` 的优雅降级：后端 skip 非法 JSON 块（不 surface 为卡片），
+ *  前端则把非法块保留为普通代码块（同一语义的两种表现——都不当卡片解析，都不崩）。 */
+interface ParsedCard {
+  /** 解析成功的合法 payload（json 非 null）；失败块为 null（用 raw 走 code 块降级）。 */
+  json: CardPayload | null
+  /** 解析失败时保留的原 ```card...``` 原文（含围栏），降级为普通 code 块显示。 */
+  raw: string
+  /** content 内字符区间 [start, end)——用于切片剔除卡片段、剩余走散文渲染。 */
+  start: number
+  end: number
+}
+
+function parseCards(content: string): ParsedCard[] {
+  const out: ParsedCard[] = []
+  if (!content) return out
+  // matchAll 自管 lastIndex，但 CARD_RE 带 g flag 是模块级共享单例——matchAll 内部用副本迭代，
+  // 不会污染外部 state（matchAll 语义保证）。仍显式 reset 以防被前次 matchAll 之外的 exec 残留。
+  CARD_RE.lastIndex = 0
+  for (const m of content.matchAll(CARD_RE)) {
+    const raw = m[0]
+    const start = m.index ?? 0
+    const end = start + raw.length
+    try {
+      const json = JSON.parse(m[1]) as CardPayload
+      // 顶层非 object（如裸 JSON 数组/数字）→ 降级 code 块（schema 要求顶层 object）
+      if (typeof json !== 'object' || json === null || Array.isArray(json)) {
+        out.push({ json: null, raw, start, end })
+      } else {
+        out.push({ json, raw, start, end })
+      }
+    } catch {
+      // 非法 JSON：降级为普通代码块（不静默丢弃——设计 §6 契约）
+      out.push({ json: null, raw, start, end })
+    }
+  }
+  return out
+}
+
+/** 把 content 切成「散文段 + 卡片段」交替列表（按出现顺序）。
+ *  卡片块在 content 内的字符区间被剔除，剩余片段按散文渲染；卡片插回原位置。
+ *  设计 §3：worker 可在回复里穿插任意段散文 + 多张卡片，前端按出现顺序渲染。 */
+type ContentSegment =
+  | { type: 'text'; text: string }
+  | { type: 'card'; card: ParsedCard }
+
+function splitContentByCards(content: string): ContentSegment[] {
+  const cards = parseCards(content)
+  if (cards.length === 0) return [{ type: 'text', text: content }]
+  const segs: ContentSegment[] = []
+  let cursor = 0
+  for (const card of cards) {
+    // 卡片前的散文段（可能为空串——跳过空段避免渲染空白）
+    if (card.start > cursor) {
+      const text = content.slice(cursor, card.start)
+      if (text) segs.push({ type: 'text', text })
+    }
+    segs.push({ type: 'card', card })
+    cursor = card.end
+  }
+  // 最后一个卡片之后的尾部散文
+  if (cursor < content.length) {
+    const text = content.slice(cursor)
+    if (text) segs.push({ type: 'text', text })
+  }
+  return segs
+}
+
+/** 安全取 string：payload 里值理论上全是 string，但容错——数字/布尔强转 string，对象/数组 JSON 化。 */
+function asString(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v)
+  return JSON.stringify(v)
+}
+
+/** 需求2-前端 结构化结果卡渲染子组件。
+ *  三 kind 分支（设计 §4）：
+ *   - kv    → AntD Descriptions（键值表，size="small" column=1）
+ *   - list  → AntD List（bullet 竖排，每项前 `•`）
+ *   - table → AntD Table（size="small" pagination=false，columns/rows 全 string）
+ *  未知 kind → 普通代码块（设计 §5：不崩，显示原始 JSON，便于调提示词）。
+ *  字段缺失/类型错 → 容错：items 非数组当空；rows 行长≠columns 截断补空（设计 §5）。
+ *  外层 AntD Card（size="small"）包标题+图标，与 ModelCard 同款视觉（聊天流内卡片）。 */
+function StructuredCard({ card }: { card: ParsedCard }) {
+  // 解析失败 → 降级普通代码块（保留围栏原文，让用户看到 LLM 产出的原始 JSON）
+  if (!card.json) {
+    return (
+      <pre className="chat-card-fallback" title="卡片 JSON 解析失败，已降级为代码块">
+        {card.raw}
+      </pre>
+    )
+  }
+  const { icon, title, kind } = card.json
+  const iconStr = asString(icon)
+  const titleStr = asString(title)
+
+  // 渲染卡片头部：图标 + 标题（任一非空才渲染头部；都空则无头部卡——设计 §5 允许空标题卡）
+  const header = (iconStr || titleStr) ? (
+    <span className="chat-card-title">
+      {iconStr && <span className="chat-card-icon">{iconStr}</span>}
+      {titleStr && <span className="chat-card-label">{titleStr}</span>}
+    </span>
+  ) : null
+
+  let body: React.ReactNode
+  if (kind === 'kv') {
+    // items: [{label, value}]——非数组/元素非对象当空
+    const items = Array.isArray(card.json.items) ? card.json.items : []
+    const descItems = items
+      .map((it) => {
+        if (typeof it !== 'object' || it === null || Array.isArray(it)) return null
+        const obj = it as { label?: unknown; value?: unknown }
+        return {
+          key: `${asString(obj.label)}-${asString(obj.value)}`,
+          label: asString(obj.label) || '—',
+          children: asString(obj.value) || '—',
+        }
+      })
+      .filter((x): x is { key: string; label: string; children: string } => x !== null)
+    body = descItems.length > 0 ? (
+      <Descriptions size="small" column={1} colon={false} items={descItems} />
+    ) : (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无键值项" />
+    )
+  } else if (kind === 'list') {
+    // items: [string]——非数组当空
+    const items = Array.isArray(card.json.items) ? card.json.items : []
+    const strs = items.map(asString).filter((s) => s.length > 0)
+    body = strs.length > 0 ? (
+      <List
+        size="small"
+        dataSource={strs}
+        renderItem={(s) => (
+          <List.Item style={{ padding: '2px 0', borderBlockEnd: 'none' }}>
+            <span className="chat-card-list-item"><span className="chat-card-bullet">•</span>{s}</span>
+          </List.Item>
+        )}
+      />
+    ) : (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无列表项" />
+    )
+  } else if (kind === 'table') {
+    // columns: [string], rows: [[string]]——行长≠columns 截断补空（设计 §5）
+    const colsRaw = Array.isArray(card.json.columns) ? card.json.columns : []
+    const cols = colsRaw.map(asString)
+    const rowsRaw = Array.isArray(card.json.rows) ? card.json.rows : []
+    const rows = rowsRaw.map((r) => {
+      if (!Array.isArray(r)) return cols.map(() => '')
+      // 截断/补齐到 columns 长度
+      const cells = r.map(asString)
+      while (cells.length < cols.length) cells.push('')
+      return cells.slice(0, cols.length)
+    })
+    body = cols.length > 0 ? (
+      <Table
+        size="small"
+        pagination={false}
+        rowKey={(_r, idx) => String(idx)}
+        columns={cols.map((c, i) => ({ title: c, dataIndex: String(i), key: String(i) }))}
+        dataSource={rows.map((cells) => {
+          const row: Record<string, string> = {}
+          cells.forEach((cell, i) => { row[String(i)] = cell })
+          return row
+        })}
+        scroll={{ x: 'max-content' }}
+      />
+    ) : (
+      <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="无表头" />
+    )
+  } else {
+    // 未知 kind → 降级普通代码块（设计 §5：不崩，显示原始 JSON）
+    return (
+      <pre className="chat-card-fallback" title={`未知卡片 kind: ${kind ?? '(缺)'}`}>
+        {card.raw}
+      </pre>
+    )
+  }
+
+  // kind 图标（标题旁小标，区分三 kind 视觉）
+  const kindIcon =
+    kind === 'kv' ? <ProfileOutlined /> :
+    kind === 'list' ? <UnorderedListOutlined /> :
+    kind === 'table' ? <TableOutlined /> : null
+
+  return (
+    <Card
+      size="small"
+      className="chat-card-block"
+      title={
+        header ? (
+          <span className="chat-card-title">
+            {kindIcon && <span className="chat-card-kind-icon">{kindIcon}</span>}
+            {iconStr && <span className="chat-card-icon">{iconStr}</span>}
+            {titleStr}
+          </span>
+        ) : (
+          kindIcon ? <span className="chat-card-kind-icon">{kindIcon}</span> : undefined
+        )
+      }
+    >
+      {body}
+    </Card>
+  )
+}
 
 /** ST-06（task 21 数据 / task 22 渲染）：worker 任务产物文件条目。
  *  形状对齐后端 scan_workspace_artifacts（workspace.py）manifest 的 files[] 元素：
@@ -229,6 +479,16 @@ export default function ChatMessageBubble({
   const hasTools = toolRows.length > 0
   const hasContent = content && content.length > 0
   const hasReasoning = !!(reasoning && reasoning.length > 0)
+  // 需求2-前端：content 内的 ```card``` 围栏块数（无卡片=0，纯散文回复）。流式期 content 逐字
+  // 增长，每帧重算 parseCards 是 O(content.length) 扫描——但内容普遍 <2KB（卡片占大头，纯文本不长），
+  // 且 memo 历史 content 不变的气泡后，重算只在当前流式气泡，可接受（与 HighlightMessage 同款判断）。
+  // hasCards 让「有卡片但正文散文被卡片挤到空」的回复仍渲染（content 有值但 prose 段为空时，
+  // splitContentByCards 会只产卡片段，text 段过滤掉——hasCards 保底 contentRender 仍走卡片分支）。
+  const contentSegments = useMemo(
+    () => splitContentByCards(content || ''),
+    [content],
+  )
+  const hasCards = contentSegments.some((s) => s.type === 'card')
   // execute 轮判定：气泡携带工具调用或 ReAct 思考事件（hasTools || hasThinks）。
   // （仅作「气泡是 execute 轮还是 chat 轮」的语义标签 + effect 依赖项；思考折叠策略已统一为
   // 「过程默认收起」，但保留 isExecuteTurn 作语义标签供未来扩展，避免回归时丢失上下文。）
@@ -396,12 +656,40 @@ export default function ChatMessageBubble({
           variant="borderless"
           streaming={isStreaming}
           content={content}
-          contentRender={(c) => (
-            <div className={hasTools ? 'chat-bubble-content' : undefined}>
-              {renderContent ? renderContent(String(c)) : String(c)}
-              {isStreaming && <span className="chat-streaming-cursor" />}
-            </div>
-          )}
+          contentRender={(c) => {
+            // 需求2-前端：content 含 ```card``` 围栏块时，按段切——散文段走原渲染（renderContent
+            // / 纯文本），卡片段走 StructuredCard。无卡片时走原路径（零行为变）。
+            // 流式光标：仅当存在散文尾部段时追加到末尾散文后；纯卡片或空散文时追加到整段末尾。
+            if (!hasCards) {
+              return (
+                <div className={hasTools ? 'chat-bubble-content' : undefined}>
+                  {renderContent ? renderContent(String(c)) : String(c)}
+                  {isStreaming && <span className="chat-streaming-cursor" />}
+                </div>
+              )
+            }
+            return (
+              <div className={hasTools ? 'chat-bubble-content' : undefined}>
+                {contentSegments.map((seg, i) => {
+                  if (seg.type === 'text') {
+                    // 散文段：末尾段（最后一段 text）流式时追光标
+                    const isLast = i === contentSegments.length - 1
+                    return (
+                      <span key={`seg-${i}`} className="chat-card-prose">
+                        {renderContent ? renderContent(seg.text) : seg.text}
+                        {isStreaming && isLast && <span className="chat-streaming-cursor" />}
+                      </span>
+                    )
+                  }
+                  return <StructuredCard key={`seg-${i}`} card={seg.card} />
+                })}
+                {/* 全是卡片段、无尾部散文时，流式光标兜底放末尾 */}
+                {isStreaming && contentSegments.every((s) => s.type === 'card') && (
+                  <span className="chat-streaming-cursor" />
+                )}
+              </div>
+            )
+          }}
           classNames={{
             root: [
               'chat-bubble',

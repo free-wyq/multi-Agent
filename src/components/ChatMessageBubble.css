@@ -259,3 +259,94 @@
   height: auto;
   font-size: 13px;
 }
+
+/* ── 需求2-前端 结构化结果卡（气泡内正文区，散文与卡片交替）──
+ * [需求2-设计] commit 9df5116 单真源 docs/structured-result-card-schema.md。
+ * 卡片是 content 子串（```card``` 围栏 + JSON），由 parseCards 切出后渲染成 AntD Card。
+ * 三 kind：kv→Descriptions / list→List / table→Table（百度热搜 Top30 主用）。
+ * 视觉与 ModelCard（/model 命令卡）同款——聊天流内的小卡，size="small" 紧凑。 */
+.chat-card-block {
+  margin: 6px 0;
+  /* 卡片宽度自适应内容，但不超过气泡正文宽——避免表格撑爆气泡 */
+  max-width: 100%;
+}
+
+/* 卡片标题：图标 + 标题文字 */
+.chat-card-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+}
+
+/* kind 小图标（标题旁，区分 kv/list/table 视觉，比 emoji 图标更轻量） */
+.chat-card-kind-icon {
+  color: #8c8c8c;
+  font-size: 13px;
+  opacity: 0.7;
+}
+
+/* emoji 图标（如 🔥/🌤️/💡）——原样显示，无特殊样式 */
+.chat-card-icon {
+  font-size: 14px;
+  line-height: 1;
+}
+
+.chat-card-label {
+  font-weight: 600;
+}
+
+/* kv Descriptions：单列纵向铺字段，label 灰 */
+.chat-card-block .ant-descriptions {
+  font-size: 12px;
+}
+
+.chat-card-block .ant-descriptions-item-label {
+  color: #8c8c8c;
+}
+
+/* list bullet 列表：收紧行距 */
+.chat-card-list-item {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: 6px;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+.chat-card-bullet {
+  color: #b37feb;
+  flex-shrink: 0;
+}
+
+/* table：百度热搜主用，紧凑表格 */
+.chat-card-block .ant-table {
+  font-size: 12px;
+}
+
+.chat-card-block .ant-table-cell {
+  padding: 4px 8px !important;
+}
+
+/* 散文段（卡片段之间/前后的文本）——inline span，保留原换行 */
+.chat-card-prose {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* 卡片 JSON 解析失败 / 未知 kind 的降级 code 块——保留围栏原文供调提示词 */
+.chat-card-fallback {
+  margin: 6px 0;
+  padding: 8px 10px;
+  background: rgba(255, 77, 79, 0.06);
+  border-left: 2px solid rgba(255, 77, 79, 0.4);
+  border-radius: 4px;
+  font-size: 12px;
+  font-family: 'monospace';
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: #595959;
+  max-height: 200px;
+  overflow-y: auto;
+}
