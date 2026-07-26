@@ -218,14 +218,18 @@ def assert_byte_identical() -> list[str]:
     """C 段：CARD_RE ↔ CARD_FRAGMENT_RE byte-identical（后端计数 = 前端解析）."""
     errs: list[str] = []
     bubble = BUBBLE_TSX.read_text(encoding="utf-8") if BUBBLE_TSX.exists() else ""
+    # [任务10d] CARD_RE 从 ChatMessageBubble.tsx 抽到 src/lib/cardSegments.ts（单一真源）。
+    # 两处都查：组件文件可能保留 import 引用，纯函数定义在 lib。
+    card_segments = (REPO / "src" / "lib" / "cardSegments.ts").read_text(encoding="utf-8") if (REPO / "src" / "lib" / "cardSegments.ts").exists() else ""
+    fe_src = card_segments or bubble
     backend_cf = BACKEND_CARD_FRAGMENT.read_text(encoding="utf-8") if BACKEND_CARD_FRAGMENT.exists() else ""
 
-    # 前端 CARD_RE 正则字面量模式
-    fe_m = re.search(r"const CARD_RE\s*=\s*/([^/]+)/([gimsuy]*)", bubble)
+    # 前端 CARD_RE 正则字面量模式（cardSegments.ts 单一真源，回退查 ChatMessageBubble.tsx）
+    fe_m = re.search(r"const CARD_RE\s*=\s*/([^/]+)/([gimsuy]*)", fe_src)
     # 后端 CARD_FRAGMENT_RE = re.compile(r"...")
     be_m = re.search(r"CARD_FRAGMENT_RE\s*=\s*re\.compile\(r\"([^\"]+)\"\)", backend_cf)
     if not fe_m:
-        errs.append("[C12] 前端 CARD_RE 正则字面量未抽到")
+        errs.append("[C12] 前端 CARD_RE 正则字面量未抽到（cardSegments.ts / ChatMessageBubble.tsx 均无）")
     if not be_m:
         errs.append("[C12] 后端 CARD_FRAGMENT_RE re.compile 未抽到")
     if fe_m and be_m:
@@ -299,24 +303,34 @@ def assert_layer_order() -> list[str]:
 
 
 def assert_persisted_path_observation() -> list[str]:
-    """F 段：观察记录（INFO 非 FAIL——持久化路径 card 渲染 gap，tracked for future fix）."""
+    """F 段：观察记录（INFO 非 FAIL——持久化路径 card 渲染 gap，任务4 已修复·留观测确认）."""
     infos: list[str] = []
     panel = PANEL_TSX.read_text(encoding="utf-8") if PANEL_TSX.exists() else ""
-    # 持久化非用户消息走 HighlightMessage（仅 @mention 高亮，不解析 card 块）
+    # 持久化非用户气泡复用 ChatMessageBubble（任务4 落地）——card 围栏块经 contentRender
+    # splitContentByCards 切段 + StructuredCard 渲染，reload 后 card 正常渲染为表格/列表/kv。
     flatmap_idx = panel.find("chatMessages.flatMap(")
+    cmb_idx = panel.find("<ChatMessageBubble", flatmap_idx if flatmap_idx >= 0 else 0)
     hm_idx = panel.find("<HighlightMessage", flatmap_idx if flatmap_idx >= 0 else 0)
     if hm_idx >= 0:
         infos.append(
-            "[F17 INFO] 持久化 agent_reply 气泡走 <HighlightMessage>（仅 @mention 高亮，不解析 card 块）"
+            "[F17 INFO] 持久化 agent_reply 气泡仍走 <HighlightMessage>（仅 @mention 高亮，不解析 card 块）"
             "——reload 后 card 不渲染。四层 mockup 在 streaming/finalized 路径（ChatMessageBubble）"
-            "完整落地，持久化路径待统一（未来 task）。本回归不 gate 此项——与 test_req2_frontend_"
-            "card_render.py 同边界（静态源码契约，不覆盖持久化 render path），记录备查。"
+            "完整落地，持久化路径待统一（未来 task）。本回归不 gate 此项。"
         )
         print("[INFO] [F17] 持久化路径 card 渲染 gap（tracked for future fix，非 FAIL）")
+    elif cmb_idx >= 0:
+        # 任务4 落地：持久化非用户气泡复用 ChatMessageBubble → card 经 splitContentByCards +
+        # StructuredCard 渲染，gap 已修复。本观测确认复用就位（renderContent 注入
+        # renderMarkdownWithMentions 做 @mention 高亮，card 围栏仍走 StructuredCard）。
+        infos.append(
+            "[F17 INFO] 持久化 agent_reply 气泡复用 <ChatMessageBubble>（任务4 落地）——card 围栏块"
+            "经 splitContentByCards + StructuredCard 渲染，reload 后 card 正常渲染。持久化路径 card"
+            "渲染 gap 已修复。"
+        )
+        print("[INFO] [F17] 持久化气泡复用 ChatMessageBubble（任务4·card 渲染 gap 已修复）")
     else:
-        # 若已统一（未来修复后 HighlightMessage 不再用于持久化非用户消息），此项自然消失
-        infos.append("[F17 INFO] 持久化气泡未走 HighlightMessage（可能已统一到 ChatMessageBubble）")
-        print("[INFO] [F17] 持久化气泡未走 HighlightMessage（gap 可能已修复）")
+        infos.append("[F17 INFO] 持久化气泡未走 HighlightMessage 也未见 ChatMessageBubble（需排查）")
+        print("[INFO] [F17] 持久化气泡渲染路径未确认（需排查）")
     return infos
 
 

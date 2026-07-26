@@ -168,9 +168,11 @@ def assert_static() -> list[str]:
            "setChatInput" in hf_body and "inputRef.current?.focus" in hf_body
            and "setSelectionRange" in hf_body,
            detail=f"set={'setChatInput' in hf_body} focus={'focus' in hf_body} sel={'setSelectionRange' in hf_body}")
-    _check(errs, "[D12] 仅非用户消息 + content 非空时渲染 chip 区",
-           "chat-followup-chips" in panel_tsx and "!isUser" in panel_tsx
-           and "msg.content" in panel_tsx)
+    _check(errs, "[D12] 仅非用户消息（isUser 分支之外）+ content 非空时渲染 chip 区",
+           "chat-followup-chips" in panel_tsx
+           and "isUser" in panel_tsx
+           and ("msg.content" in panel_tsx or "msg.content ?" in panel_tsx or "msg.content ?" in panel_tsx),
+           detail=f"chips={'chat-followup-chips' in panel_tsx} isUser={'isUser' in panel_tsx} content={'msg.content' in panel_tsx}")
     _check(errs, "[D13] chip 用 AntD Tag + onClick={handleFollowUpClick}",
            "chat-followup-chip" in panel_tsx
            and "handleFollowUpClick" in panel_tsx

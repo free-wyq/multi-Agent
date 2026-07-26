@@ -150,17 +150,22 @@ def assert_contract() -> list[str]:
     src_nc = _strip_ts_comments(src)
     css = BUBBLE_CSS.read_text(encoding="utf-8") if BUBBLE_CSS.exists() else ""
     backend_cf = BACKEND_CARD_FRAGMENT.read_text(encoding="utf-8") if BACKEND_CARD_FRAGMENT.exists() else ""
+    # [任务10d] parseCards/splitContentByCards/CARD_RE 抽到 src/lib/cardSegments.ts（单一真源）。
+    # 组件文件 import 复用，纯函数定义在 lib。两处都查——lib 优先（真源），回退组件（兼容）。
+    card_segments_path = REPO / "src" / "lib" / "cardSegments.ts"
+    card_segments = card_segments_path.read_text(encoding="utf-8") if card_segments_path.exists() else ""
+    cs_src = card_segments or src
 
-    # ── A. 解析器 ──
+    # ── A. 解析器（单一真源 src/lib/cardSegments.ts）──
     # [1] CARD_RE 常量存在
-    if not re.search(r"\bCARD_RE\b\s*=", src):
-        errs.append("[A1] ChatMessageBubble 未定义 CARD_RE 常量")
+    if not re.search(r"\bCARD_RE\b\s*=", cs_src):
+        errs.append("[A1] cardSegments.ts 未定义 CARD_RE 常量")
     else:
-        print("[A1] OK  CARD_RE 常量存在")
+        print("[A1] OK  CARD_RE 常量存在（cardSegments.ts 单一真源）")
     # [2] CARD_RE 模式 byte-identical（含 g flag）
-    m = re.search(r"const CARD_RE\s*=\s*/([^/]+)/([gimsuy]*)", src)
+    m = re.search(r"const CARD_RE\s*=\s*/([^/]+)/([gimsuy]*)", cs_src)
     if not m:
-        errs.append("[A2] CARD_RE 未用正则字面量 /.../flags 定义")
+        errs.append("[A2] CARD_RE 未用正则字面量 /.../flags 定义（cardSegments.ts）")
     else:
         pat, flags = m.group(1), m.group(2)
         if pat != EXPECTED_CARD_RE_PATTERN:
@@ -173,9 +178,9 @@ def assert_contract() -> list[str]:
         else:
             print(f"[A2] OK  CARD_RE 模式 byte-identical + g flag（flags={flags!r}）")
     # [3] parseCards 返回 {json, raw, start, end}
-    pc_body = _fn_body_ts(src, "parseCards")
+    pc_body = _fn_body_ts(cs_src, "parseCards")
     if not pc_body:
-        errs.append("[A3] parseCards 函数未找到")
+        errs.append("[A3] parseCards 函数未找到（cardSegments.ts）")
     else:
         # parseCards 用对象字面量 out.push({...})：
         #   - `json:` / `json =` 出现在 push 的对象字面量里（字段）或 const json =（局部变量）
@@ -200,9 +205,9 @@ def assert_contract() -> list[str]:
         else:
             print("[A3] OK  parseCards 返回 {json, raw, start, end}（合法 payload + 区间 + 非法块 raw）")
     # [4] splitContentByCards 切 text/card 段交替
-    sc_body = _fn_body_ts(src, "splitContentByCards")
+    sc_body = _fn_body_ts(cs_src, "splitContentByCards")
     if not sc_body:
-        errs.append("[A4] splitContentByCards 函数未找到")
+        errs.append("[A4] splitContentByCards 函数未找到（cardSegments.ts）")
     elif "type: 'text'" not in sc_body and "type:'text'" not in sc_body:
         errs.append("[A4] splitContentByCards 未产 text 段（应 text/card 交替）")
     elif "type: 'card'" not in sc_body and "type:'card'" not in sc_body:
@@ -222,7 +227,7 @@ def assert_contract() -> list[str]:
         else:
             print("[A5] OK  非法 JSON 块 catch 分支保留 raw（降级 code 块，不静默丢弃）")
 
-    # ── B. 渲染子组件（StructuredCard · 三 kind 分支）──
+    # ── B. 渲染子组件（StructuredCard · 三 kind 分支，定义在 ChatMessageBubble.tsx）──
     sc_card_body = _fn_body_ts(src, "StructuredCard")
     if not sc_card_body:
         errs.append("[B6] StructuredCard 组件未找到")
@@ -322,13 +327,13 @@ def assert_contract() -> list[str]:
         errs.append("[D17] 三 kind 分支不全（kv/list/table 各一分支）")
 
     # ── E. 与后端 byte-identical ──
-    # [18] CARD_RE 模式字符串 == 后端 CARD_FRAGMENT_RE 模式字符串
+    # [18] CARD_RE 模式字符串 == 后端 CARD_FRAGMENT_RE 模式字符串（前端真源 cardSegments.ts）
     backend_match = re.search(r'CARD_FRAGMENT_RE\s*=\s*re\.compile\(r"([^"]+)"\)', backend_cf)
-    frontend_match = re.search(r"const CARD_RE\s*=\s*/([^/]+)/", src)
+    frontend_match = re.search(r"const CARD_RE\s*=\s*/([^/]+)/", cs_src)
     if not backend_match:
         errs.append("[E18] 后端 CARD_FRAGMENT_RE 未找到（无法对齐 byte-identical）")
     elif not frontend_match:
-        errs.append("[E18] 前端 CARD_RE 未找到（无法对齐 byte-identical）")
+        errs.append("[E18] 前端 CARD_RE 未找到（cardSegments.ts，无法对齐 byte-identical）")
     elif backend_match.group(1) != frontend_match.group(1):
         errs.append(
             f"[E18] CARD_RE({frontend_match.group(1)!r}) != CARD_FRAGMENT_RE"
@@ -341,11 +346,11 @@ def assert_contract() -> list[str]:
         )
 
     # ── F. 行为零变 ──
-    # [19] hasCards=false 走原 renderContent 路径
-    if "renderContent ? renderContent(String(c)) : String(c)" not in src:
-        errs.append("[F19] ChatMessageBubble 缺原 renderContent?...:String(c) 路径（无卡片应走原路径）")
+    # [19] hasCards=false 走原 renderContent 路径（[任务2/55c6eca] fallback 从 String(c) 改 renderMarkdown(c)）
+    if "renderContent ? renderContent(String(c)) : renderMarkdown(String(c))" not in src:
+        errs.append("[F19] ChatMessageBubble 缺原 renderContent?...:renderMarkdown(String(c)) 路径（无卡片应走原路径）")
     else:
-        print("[F19] OK  hasCards=false 走原 renderContent?...:String(c) 路径（行为零变）")
+        print("[F19] OK  hasCards=false 走原 renderContent?...:renderMarkdown(String(c)) 路径（行为零变）")
     # [20] props 签名不变（content/renderContent/isStreaming 仍在）
     for prop in ("content:", "renderContent", "isStreaming"):
         if prop not in src:

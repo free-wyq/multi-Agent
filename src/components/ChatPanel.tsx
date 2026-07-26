@@ -749,7 +749,8 @@ export default function ChatPanel({
   // 读它做时间戳比较，若不进 deps 会在 chatMessages 更新后仍读到旧引用 → 兜底退场失效。perf
   // 可接受：chatMessages 每条新消息确实触发重算，但 finalizedBubbles memo 主体是 O(events)
   // 遍历（events cap 500，且只在 kind=complete/failed 时入 out），单次 <1ms；高频聊天的 perf
-  // 瓶颈在 HighlightMessage 渲染而非本 memo（见 [[chat-lag-jitter-fix-2026-07-23]]）。
+  // 瓶颈在持久化气泡渲染而非本 memo（见 [[chat-lag-jitter-fix-2026-07-23]]）——持久化气泡现
+  // 复用 ChatMessageBubble（任务4），其 props 浅比较可短路历史气泡重渲染。
 
   // 新消息追加到末尾（跳过用户自己发的，已由乐观更新处理）——与 GroupPage 逻辑一致。
   // 按类型白名单过滤：agent_reply/user_input/task_log/slash_card 桥接成聊天气泡，
@@ -1271,8 +1272,8 @@ export default function ChatPanel({
             if (dateDivider) lastDateRef.current = msg.created_at
             // SC-11：slash 命令卡片（type=slash_card）——handler 经 ctx.renderCard 推入，
             // content 存字符串（stub 占位），data.node 存富卡片 ReactNode（SC-03~10 实现）。
-            // 渲染为系统消息（左对齐，头像 + 卡片 + 时间戳），不复用 HighlightMessage 的
-            // @mention 高亮。
+            // 渲染为系统消息（左对齐，头像 + 卡片 + 时间戳），不走 ChatMessageBubble 的
+            // @mention 高亮（slash 卡片已是富 antd Card 节点，无需再 markdown/mention 处理）。
             //
             // 关键：node 是 antd Card（ModelCard/ToolsCard 等，自带白底+边框+圆角+标题），
             // 不再套 .chat-bubble 气泡层——否则灰底气泡 + padding + max-width:70% 会把卡片
@@ -1340,7 +1341,8 @@ export default function ChatPanel({
             //   - statusLine：复用 extractCoordStats 状态行渲染（model · Ns · ↓ N tokens）
             //   - finalStats：把 stats 透传给「🔍 执行过程详情」面板的「📝 最终生成」item，
             //     只放元数据（字数 + tokens + 耗时 + model），不重复渲染 content 正文。
-            //   - footerExtra：追问引导 chip（气泡外、wrap 内，与 mockup 一致）
+            //   - footerExtra：追问引导 chip（chat-bubble 之外、chat-bubble-wrap 之内，与 mockup 一致——
+            //     ChatMessageBubble 把 footerExtra 渲在 Bubble 闭合之后，气泡外 wrap 内）
             // hideFooterAction=true：抑制 footer 内置「复制+重新生成」操作栏，统一走顶部
             //   hover actionGroup（含复制/朗读/重新生成），避免双份操作栏。ChatMessageBubble
             //   footer 仍渲产物卡（持久化气泡当前无 artifact，footer 不显）。
@@ -1401,6 +1403,8 @@ export default function ChatPanel({
                   model: stats.model,
                 }
               : {}
+            // 追问引导 chip 在 chat-bubble 之外、chat-bubble-wrap 之内（ChatMessageBubble
+            //   footerExtra 渲在 Bubble 闭合之后，气泡外 wrap 内，与 mockup「气泡外 chip」一致）。
             const footerExtra = followUps.length > 0 ? (
               <div className="chat-followup-chips">
                 <span className="chat-followup-label">💡 您可能还想问：</span>

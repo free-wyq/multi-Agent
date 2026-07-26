@@ -4,8 +4,8 @@
  * 两处渲染路径共用：
  *  - 流式/定稿气泡（ChatMessageBubble.tsx）：散文段（splitContentByCards 切出的 text 段）
  *    走本函数渲染；card 围栏段走 StructuredCard 不变。
- *  - 持久化气泡（ChatPanel.tsx HighlightMessage）：reload 后的历史消息，本函数 +
- *    @mention 高亮共存（思路 A：在 markdown 文本节点内做 @mention 切分）。
+ *  - 持久化气泡（ChatPanel.tsx 持久化非用户气泡，复用 ChatMessageBubble）：reload 后的历史
+ *    消息，本函数 + @mention 高亮共存（思路 A：在 markdown 文本节点内做 @mention 切分）。
  *
  * 选型：react-markdown + remark-gfm（开源成熟，符合项目硬约束「有开源就用开源 不要自己手搓」）。
  *  - remark-gfm 支持 GFM 表格 / 删除线 / 任务列表 / 自动链接
@@ -286,7 +286,8 @@ export function renderMarkdown(text: string): React.ReactNode {
   )
 }
 
-/** 渲染 markdown 文本为 React 节点，同时做 @mention 高亮（持久化气泡 HighlightMessage 用）。
+/** 渲染 markdown 文本为 React 节点，同时做 @mention 高亮（持久化气泡用——ChatPanel 持久化
+ *  非用户气泡复用 ChatMessageBubble，renderContent 闭包注入本函数做 @mention 高亮）。
  *
  *  实现思路（rehype 阶段切分 text 节点，非事后 cloneElement 递归）：
  *  - 用 react-markdown 的 rehypePlugins 在 hast 树渲染成 React 前，深度遍历把每个 text

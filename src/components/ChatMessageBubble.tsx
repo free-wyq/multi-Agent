@@ -490,7 +490,7 @@ export default function ChatMessageBubble({
   const hasReasoning = !!(reasoning && reasoning.length > 0)
   // 需求2-前端：content 内的 ```card``` 围栏块数（无卡片=0，纯散文回复）。流式期 content 逐字
   // 增长，每帧重算 parseCards 是 O(content.length) 扫描——但内容普遍 <2KB（卡片占大头，纯文本不长），
-  // 且 memo 历史 content 不变的气泡后，重算只在当前流式气泡，可接受（与 HighlightMessage 同款判断）。
+  // 且 memo 历史 content 不变的气泡后，重算只在当前流式气泡，可接受（持久化气泡 content 落盘不变，重算被 useMemo deps=[content] 短路）。
   // hasCards 让「有卡片但正文散文被卡片挤到空」的回复仍渲染（content 有值但 prose 段为空时，
   // splitContentByCards 会只产卡片段，text 段过滤掉——hasCards 保底 contentRender 仍走卡片分支）。
   const contentSegments = useMemo(
