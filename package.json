@@ -19,6 +19,7 @@
   },
   "dependencies": {
     "@ant-design/icons": "^6.2.5",
+    "@ant-design/x": "^2.8.0",
     "antd": "^6.4.4",
     "react-router-dom": "^7.18.1",
     "reactflow": "^11.11.4",

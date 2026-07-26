@@ -3,6 +3,25 @@
  * 复用 ChatPanel.css 的全局 .chat-bubble / .chat-bubble--self / --other（全局 class，
  * import 即注册），本文件只补「流式生成态」「工具摘要行」专有样式，避免污染 ChatPanel.css。 */
 
+/* ── @ant-design/x Bubble borderless 兜底 ──
+ * 迁移到 x.Bubble 后，root 元素同时挂 .ant-bubble 与我们的 .chat-bubble。
+ * x 默认给 root 设 display:flex + columnGap（为 avatar prop 预留 flex slot）；
+ * 我们不用 avatar prop（头像作为 .chat-msg 的 sibling 在 Bubble 外），需把 root 重置为 block，
+ * 让 .chat-bubble--* 的 padding/bg/radius（ChatPanel.css 定义）接管视觉，避免 body/header/footer
+ * 被 flex 拉伸或 columnGap 留白。unlayered CSS 优先级高于 x 的 @layer antdx，此规则必胜。 */
+.chat-bubble.ant-bubble {
+  display: block;
+  column-gap: 0;
+}
+
+/* x Bubble content 元素（.ant-bubble-content-borderless）在 borderless 变体下 backgroundColor:transparent
+ * + padding:0 + minHeight:0——正合我意（让我们 .chat-bubble--* 的 bg 接管），无需 override。
+ * 但 content 自身 box-sizing 与 max-width:100% 可能影响正文换行，这里确保 .chat-bubble-content
+ * 包裹层（contentRender 内的 div）不被额外限制。 */
+.chat-bubble .ant-bubble-content {
+  max-width: 100%;
+}
+
 /* ── 流式生成态气泡 ── */
 .chat-bubble--streaming {
   /* 内嵌淡蓝描边提示「正在生成」，不抢内容视觉 */
