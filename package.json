@@ -13,6 +13,8 @@
     "build": "vite build && tsc -p tsconfig.node.json",
     "test": "vitest run",
     "test:watch": "vitest",
+    "e2e": "playwright test",
+    "e2e:ui": "playwright test --ui",
     "build:python": "cd backend && pyinstaller --onefile --name multi-agent-server main.py",
     "pack": "npm run build && npm run build:python && electron-builder",
     "pack:linux": "npm run build && npm run build:python && electron-builder --linux",
@@ -30,6 +32,7 @@
     "uuid": "^11.1.0"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.0",
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.1",

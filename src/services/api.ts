@@ -5,7 +5,11 @@
  * 页面组件零改。24 个后端 endpoint 见 backend/api/。
  */
 
-const API_BASE = 'http://localhost:8000'
+// API base：默认指向本地 FastAPI（localhost:8000）。允许用 Vite 环境变量
+// ``VITE_API_BASE`` 覆盖——Playwright e2e 跑在独立端口（webServer 起的 vite
+// dev server 用 --port 5174，且不与开发态 5173 冲突），前端打到同一个后端端口，
+// 故默认值不变；只在需要把后端也换端口时才覆盖（本任务后端仍用 8000）。
+const API_BASE = import.meta.env.VITE_API_BASE ?? 'http://localhost:8000'
 
 // ── 类型定义 ──────────────────────────────────────────────────────
 

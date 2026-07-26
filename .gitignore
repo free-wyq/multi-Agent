@@ -51,3 +51,10 @@ state.json
 BUG_LIST.md
 night_run.log*
 night_run.*.log
+
+# Playwright e2e
+.e2e-data/
+test-results/
+playwright-report/
+playwright/.cache/
+
