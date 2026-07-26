@@ -333,11 +333,18 @@ interface ChatMessageBubbleProps {
   /** 气泡右上角的操作按钮组（复制/朗读等）。父组件传 .bubble-action-group 内的按钮，
    *  hover 时显隐。绝对定位锚点由 .chat-bubble-wrap 提供（position:relative）。不传则不渲染。 */
   actionGroup?: React.ReactNode
-  /** 需求2-前端：操作栏「重新生成」回调。父组件（ChatPanel）注入——需后端「按 reply_id 重跑」
-   *  端点（[需求2-后端] 待评估，当前无）支持后才能给出有效回调。未传（undefined）→ 操作栏不渲染
-   *  「重新生成」按钮（仅显示复制），避免点击无响应的空按钮。传则渲染 AntD Button（type=text +
-   *  ReloadOutlined），点击调用。语义：重新触发该气泡对应回复的生成流程。 */
+  /** 需求2-前端：操作栏「重新生成」回调。父组件（ChatPanel）注入——后端「按 reply_id 重跑」
+   *  端点已就绪（[需求2-后端] POST /api/messages/regenerate?replyId=...），ChatPanel 把
+   *  handleRegenerate(replyId) 闭包注入此处。未传（undefined）→ 操作栏的「重新生成」按钮
+   *  disabled + tooltip「重新生成（开发中）」兜底（如 finalized/execute-announce 气泡无 reply_id）。
+   *  传则渲染 AntD Button（type=text + ReloadOutlined），点击调用。语义：重新触发该气泡对应回复
+   *  的生成流程——后端回查该回复的 reply_id，取其前最近 user_input 作原 prompt 重发，新回复经
+   *  现有 WS 事件流到达（历史回复不删，regenerate 是追加）。 */
   onRegenerate?: () => void
+  /** [需求2-后端] 「重新生成」按钮 loading 态——regeneratingReplyIds.has(reply_id) 时转 loading。
+   *  父组件注入：点按钮时把 reply_id 加入集合，请求返回后清。loading 期间按钮转菊花禁用点击，
+   *  防连点重复触发。未传 → 不显示 loading（按需注入，finalized/无 reply_id 气泡不需 loading）。 */
+  regenerating?: boolean
 }
 
 /** 单条 task_tool 事件 → 摘要行数据。 */
@@ -416,6 +423,7 @@ export default function ChatMessageBubble({
   statusLine,
   actionGroup,
   onRegenerate,
+  regenerating,
 }: ChatMessageBubbleProps) {
   // 工具调用整组折叠（外层 Collapse「工具调用 (N)」）——展开策略：
   //  · 流式中（isStreaming=true）默认收起（过程信息按需查看，不撑高气泡）；
@@ -939,16 +947,20 @@ export default function ChatMessageBubble({
                   <div className="chat-action-bar">
                     <BubbleCopyButton content={content} />
                     {/* 「重新生成」：onRegenerate 传入（后端 regenerate 端点就绪后 ChatPanel 注入）→
-                        可点；未传入 → disabled + tooltip 标记「开发中」（regenerate 留 TODO，
-                        [需求2-后端] line 24 待实现「按 reply_id 重跑」端点）。始终渲染按钮本体——
-                        满足「新增重新生成 Button」契约，禁用态明确传达「暂未支持」而非留空占位。 */}
+                        可点；未传入 → disabled + tooltip 标记「开发中」（finalized/execute-announce
+                        气泡无 reply_id 时 disabled 兜底）。始终渲染按钮本体——满足「新增重新生成
+                        Button」契约，禁用态明确传达「暂未支持」而非留空占位。
+                        [需求2-后端]：onRegenerate 闭包调 messageApi.regenerate(replyId)，后端回查
+                        data.reply_id → 取前最近 user_input 重发 → 新回复经 WS 事件流到达。
+                        regenerating=true 时按钮转菊花禁用防连点。 */}
                     <Tooltip title={onRegenerate ? '重新生成' : '重新生成（开发中）'}>
                       <Button
                         type="text"
                         size="small"
                         className="chat-action-regenerate"
                         icon={<ReloadOutlined />}
-                        disabled={!onRegenerate}
+                        disabled={!onRegenerate || regenerating}
+                        loading={regenerating}
                         onClick={onRegenerate}
                       />
                     </Tooltip>

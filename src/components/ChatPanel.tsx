@@ -2,7 +2,7 @@ import { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Button, Collapse, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
 import type { ComponentRef } from 'react'
-import { BulbOutlined, CompressOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { BulbOutlined, CompressOutlined, ReloadOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
   groupApi,
@@ -209,6 +209,18 @@ function extractCoordReasoning(data: Record<string, unknown> | null): string | u
   if (!dd) return undefined
   const r = dd['reasoning']
   return typeof r === 'string' && r ? r : undefined
+}
+
+/** [需求2-后端] 取持久化回复的 reply_id（agent_reply.data.reply_id）。
+ *  chat 路径（worker node_brain / coordinator node_chat）落盘时由 persist_agent_reply
+ *  透传 reply_id 到 message.data——这是 regenerate 端点的回查键。execute 路径模板 announce
+ *  + user_input 行无 reply_id → 返 undefined（操作栏「重新生成」按钮 disabled 兜底）。
+ *  B20：null-guard 复用 services/api.ts safeRecord 单一真源。 */
+function extractReplyId(data: Record<string, unknown> | null): string | undefined {
+  const dd = safeRecord(data)
+  if (!dd) return undefined
+  const rid = dd['reply_id']
+  return typeof rid === 'string' && rid ? rid : undefined
 }
 
 /** ST-06（task 21）：从 task_complete 事件 data 提取产物文件列表（data.artifact.files[]）。
@@ -471,6 +483,14 @@ export default function ChatPanel({
   // reload-safe：重连/切群回灌历史 agent_reply 经 logs effect 重扫回填（历史 agent_reply 带
   // task_id 同样入集合，prev.has 去重），故 reload 后退场状态与 live 一致。
   const [repliedTaskIds, setRepliedTaskIds] = useState<Set<string>>(new Set())
+  // [需求2-后端] regenerate 正在重跑的 reply_id 集合——按钮 loading 态真源。
+  // 点「重新生成」时把该回复的 reply_id 加入集合（按钮转 loading），新 agent_reply
+  // 经 WS bus-event 落地后被 logs 桥接进 chatMessages——此时新一轮已开始，按钮可恢复。
+  // 用 reply_id 作 key 而非 message.id：新回复是不同 message.id 但同一原回复的 regenerate
+  // 源，按 reply_id 标 loading 才能精确定位到被点的那个气泡的按钮。
+  // 简化语义：集合非空 = 该 reply_id 对应的「重新生成」按钮转 loading；新回复落地即清
+  // （新一轮 turn 已接管，旧回复的按钮无需继续 loading——见 handleRegenerate finally）。
+  const [regeneratingReplyIds, setRegeneratingReplyIds] = useState<Set<string>>(new Set())
 
   // 是否展示「回到底部」浮动按钮：上滑离底部一段距离（>120px）时显示。
   // 距底 80px 内视为贴底（与 stickToBottomRef 同阈值，但浮动按钮用更宽的 120px 门槛，
@@ -947,6 +967,41 @@ export default function ChatPanel({
     }
   }
 
+  // [需求2-后端] 按 reply_id 重跑回复——ChatMessageBubble footer 操作栏「重新生成」按钮的回调。
+  // 后端 POST /api/messages/regenerate?replyId=... 回查 chat 路径落盘的 agent_reply
+  // （data.reply_id），取其前最近一条 user_input 的内容作原 prompt，合成新 user_input
+  // 落盘 + 走与 send 相同的路由分流，新回复经现有 WS bus-event 实时到达（与正常发送一致）。
+  // 历史回复不删——新回复作为新气泡追加，旧回复保留（regenerate 是追加不是覆盖）。
+  // replyId 来自该回复持久化 message.data.reply_id（chat 路径 worker/coordinator 回复落盘时
+  // 由 persist_agent_reply 透传；execute 路径模板 announce 无 reply_id → 不该走到这里）。
+  const handleRegenerate = useCallback(
+    async (replyId: string) => {
+      if (!replyId) return
+      // 按钮 loading 态：把该 reply_id 加入集合，对应气泡的「重新生成」按钮转 loading。
+      setRegeneratingReplyIds((prev) => new Set(prev).add(replyId))
+      try {
+        await messageApi.regenerate(replyId)
+        // 成功仅提示「已重新生成」——新回复靠 WS bus-event 实时落地（与 send 同款，
+        // 不在此处手动 append）。loading 不在此处清——新一轮 turn 已被后端路由层接管，
+        // 新回复落地期间按钮保持 loading 更直观（用户能看到「正在重跑」）。
+        message.success('已重新生成，新回复即将到达')
+      } catch (e) {
+        // 后端 404（reply_id 无对应回复 / 模板公告 / 已清会话）或 409（前无 user_input）
+        // 都会走这里——message.error 告知用户重跑失败，按钮恢复可点。
+        message.error(`重新生成失败：${e instanceof Error ? e.message : String(e)}`)
+      } finally {
+        // 清 loading：无论成败，请求本身已返回（fire-and-forget 踢一轮 turn），按钮恢复。
+        // 新回复的流式/落地由 useBusEvent 现有桥接处理，不依赖此 loading 状态。
+        setRegeneratingReplyIds((prev) => {
+          const next = new Set(prev)
+          next.delete(replyId)
+          return next
+        })
+      }
+    },
+    [],
+  )
+
   // SC-11：slash 命令执行——构造 SlashCommandContext 注入 handler，由 handler 自决副作用
   // （renderCard 推卡片进聊天流 / clearChat 清空视图 / 读 busState 纯本地聚合）。
   // 各 handler 当前为 stub（SC-01），SC-03~SC-10 替换为真实实现后自动生效。
@@ -1238,6 +1293,11 @@ export default function ChatPanel({
                 <div className={`chat-bubble-wrap${isUser ? ' chat-bubble-wrap--self' : ''}`}>
                   {/* 单条气泡操作按钮组：hover 显隐。朗读仅非用户消息且总开关开时渲染；
                       复制对所有消息可见（用户/agent 都可复制）。
+                      [需求2-后端] 持久化回复的 agent_reply.data.reply_id 取回查键，注入「重新生成」
+                      按钮——与复制/朗读同列 hover 组（持久化气泡的操作面，区别于 ChatMessageBubble
+                      的 footer 槽位）。execute 路径模板 announce + user_input 无 reply_id → extractReplyId
+                      返 undefined → 不渲染重生成按钮（不留空响应占位）。regenerating 态按 reply_id 精确
+                      匹配本条气泡的按钮（点重跑时转 loading 防连点）。
                       用户气泡右对齐——操作组改定位到左侧（.chat-bubble-wrap--self），
                       否则贴在右边缘会被容器 overflow 裁切、看不到。 */}
                   <div className="bubble-action-group">
@@ -1245,6 +1305,24 @@ export default function ChatPanel({
                     {!isUser && tts.enabled && (
                       <BubbleSpeakButton content={msg.content ?? ''} />
                     )}
+                    {!isUser && (() => {
+                      const replyId = extractReplyId(msg.data)
+                      if (!replyId) return null
+                      const loading = regeneratingReplyIds.has(replyId)
+                      return (
+                        <Tooltip title={loading ? '正在重新生成…' : '重新生成'}>
+                          <Button
+                            type="text"
+                            size="small"
+                            className="bubble-action-btn"
+                            icon={<ReloadOutlined />}
+                            loading={loading}
+                            disabled={loading}
+                            onClick={() => handleRegenerate(replyId)}
+                          />
+                        </Tooltip>
+                      )
+                    })()}
                   </div>
                   <div className={`chat-sender-name ${isUser ? 'chat-sender-name--right' : ''}`}>
                     <SenderName id={msg.sender_id} agents={agents} />

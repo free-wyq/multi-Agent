@@ -546,6 +546,22 @@ export const messageApi = {
   listByTask: (taskId: string, limit = 100) =>
     http<Message[]>('GET', `/api/messages/by-task/${taskId}`, undefined, { limit: String(limit) }),
   send: (body: MessageCreatePayload) => http<Message>('POST', '/api/messages', body),
+  /**
+   * [需求2-后端] 按 reply_id 重跑回复——POST /api/messages/regenerate?replyId=...
+   *
+   * 后端按 replyId 回查 chat 路径落盘的 agent_reply（data.reply_id），取其前最近一条
+   * user_input 的内容作原 prompt，合成新 user_input 落盘 + 走与 send 相同的路由分流
+   * （群聊 route_user_message / 单聊 route_direct_message），新回复经现有 WS 事件流到达。
+   * 历史回复不删（regenerate 是追加不是覆盖）——新回复作为新气泡落地，旧回复保留。
+   *
+   * 404：replyId 无对应回复（模板公告 data 无 reply_id / 已清除会话 / 未知 id）。
+   * 409：回查到回复但其前无 user_input（无法恢复原 prompt，无法重跑）。
+   *
+   * 返回值=新落盘的 user_input 行（content=恢复的原 prompt）；新 agent_reply 通过
+   * WS bus-event 实时推送，调用方无需轮询。
+   */
+  regenerate: (replyId: string) =>
+    http<Message>('POST', '/api/messages/regenerate', undefined, { replyId }),
   clearByGroup: (conversationId: string) =>
     http<boolean>('DELETE', '/api/messages', undefined, { conversationId }),
 }

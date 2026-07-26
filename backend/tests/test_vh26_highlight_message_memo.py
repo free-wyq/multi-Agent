@@ -226,11 +226,12 @@ def assert_contract() -> list[str]:
         errs.append("[C8] HighlightMessage split 正则变（B21 锁的 mention 分割破）")
     else:
         print("[C8] OK  split 正则不变（B21 锁的 @mention 分割）")
-    # [9] Tag 渲染 color="blue" + style 不变
-    if not re.search(r'<Tag key=\{i\} color="blue" style=\{\{ margin: 0, padding: \'0 4px\', lineHeight: \'18px\' \}\}>', body):
+    # [9] Tag 渲染 color="orange" + style 不变（橙主题迁移 commit 43af8fd 把 mention Tag
+    # 蓝→橙，与品牌橙主题统一；测试原锁 blue 已过时——现锁 orange 真源）
+    if not re.search(r'<Tag key=\{i\} color="orange" style=\{\{ margin: 0, padding: \'0 4px\', lineHeight: \'18px\' \}\}>', body):
         errs.append("[C9] HighlightMessage Tag 渲染变（视觉零变破）")
     else:
-        print("[C9] OK  Tag 渲染 color=blue + style 不变（视觉零变）")
+        print("[C9] OK  Tag 渲染 color=orange + style 不变（橙主题，视觉零变）")
     # [10] startsWith('@') + slice(1) 候选判定不变
     if "part.startsWith('@')" not in body or "part.slice(1)" not in body:
         errs.append("[C10] HighlightMessage 候选判定 startsWith+slice 变")

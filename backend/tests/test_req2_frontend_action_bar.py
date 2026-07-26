@@ -39,7 +39,9 @@
   D. onRegenerate optional prop + disabled 兜底
     8. ChatMessageBubbleProps 新增 ``onRegenerate?: () => void``（optional）。
     9. 解构 props 含 ``onRegenerate``。
-   10. Button ``disabled={!onRegenerate}``（未注入 → disabled，不留空响应占位）。
+   10. Button ``disabled`` 守卫含 ``!onRegenerate``（未注入 → disabled，不留空响应占位）；
+       [需求2-后端] 落地 regenerate 端点后追加 ``regenerating`` loading 态——disabled 条件
+       兼容 ``!onRegenerate || regenerating`` 形态（regenerating=true 重跑中也禁用防连点）。
    11. Button tooltip 按 onRegenerate 有无区分（「重新生成」/「重新生成（开发中）」）。
 
   E. 显隐守卫（流式/用户气泡不显示操作栏）
@@ -182,13 +184,16 @@ def assert_contract() -> list[str]:
             print(f"[D9] OK  onRegenerate 解构 + 使用（出现 {cnt} 次）")
     else:
         print("[D9] OK  props 解构含 onRegenerate")
-    # [10] Button disabled={!onRegenerate}
+    # [10] Button disabled 守卫含 !onRegenerate（[需求2-后端] 追加 regenerating loading 态后
+    # 兼容 `disabled={!onRegenerate || regenerating}` / `disabled={!onRegenerate}` 两形态）
     if not footer_body:
         errs.append("[D10] footer prop 体未抽到（无法校验 disabled 兜底）")
-    elif not re.search(r"disabled\s*=\s*\{\s*!\s*onRegenerate\s*\}", footer_body):
-        errs.append("[D10] 重新生成 Button 缺 disabled={!onRegenerate}（未注入应 disabled 兜底）")
+    elif "!onRegenerate" not in footer_body:
+        errs.append("[D10] 重新生成 Button disabled 守卫缺 !onRegenerate（未注入应 disabled 兜底）")
+    elif "disabled" not in footer_body:
+        errs.append("[D10] 重新生成 Button 缺 disabled 守卫")
     else:
-        print("[D10] OK  Button disabled={!onRegenerate}（未注入 → disabled 不留空响应占位）")
+        print("[D10] OK  Button disabled 含 !onRegenerate 兜底（regenerating loading 态兼容）")
     # [11] tooltip 按 onRegenerate 有无区分
     if not footer_body:
         errs.append("[D11] footer prop 体未抽到（无法校验 tooltip 区分）")

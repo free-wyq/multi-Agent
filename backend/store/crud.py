@@ -671,6 +671,46 @@ async def list_messages(conversation_id: str | None = None, limit: int = 100) ->
         return msgs[-limit:] if limit else msgs
 
 
+async def get_message_by_reply_id(reply_id: str) -> Message | None:
+    """Find the agent_reply row whose ``data.reply_id`` equals ``reply_id``.
+
+    [需求2-后端] regenerate 端点的回查钩子——chat 路径（worker node_brain /
+    coordinator node_chat）的流式 reply_id 在 ``persist_agent_reply`` 落盘时
+    塞进 ``message.data.reply_id``（见 reply.py docstring + registry.py:459 透传
+    turn_reply_id）。本函数按该 reply_id 精确定位回复行，供 regenerate 端点取
+    ``task_id``（execute 路径回复）+ ``conversation_id`` + ``sender_id`` 上下文。
+
+    实现用 SQLite ``json_extract``（JSON1 扩展，aiosqlite 默认启用）查
+    ``data->>'$.reply_id'``——避免把整列拉回 Python 再过滤（长会话可能几千行）。
+    execute 路径回复（registry.py:459 ``turn_reply_id != task_id`` 才透传）有
+    ``data.reply_id``；模板 announce（``turn_reply_id == task_id``）+ user_input
+    行 ``data`` 为 None → ``json_extract`` 返 NULL ≠ reply_id → 不命中（语义正确：
+    模板 announce 不是 brain LLM 输出，不应被 regenerate）。
+
+    Args:
+        reply_id: 裸 uuid hex（无 ``task_`` 前缀，见 docs/naming-conventions.md §2.2），
+            与 ``coordinator.py:1951`` / ``worker.py:228`` 生成的 reply_id 同构。
+
+    Returns:
+        The persisted ``Message`` whose ``data.reply_id`` matches, or ``None`` if
+        no agent_reply carries that reply_id (unknown / execute-announce path
+        that didn't thread a reply_id / stale reply_id from a cleared session).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        stmt = (
+            select(MessageEntity)
+            .where(
+                MessageEntity.type_ == "agent_reply",
+                func.json_extract(MessageEntity.data, "$.reply_id") == reply_id,
+            )
+            .limit(1)
+        )
+        row = (await db.execute(stmt)).scalars().first()
+        return _message_to_model(row) if row else None
+
+
 async def list_messages_by_task(task_id: str, limit: int = 100) -> list[Message]:
     from store.database import SessionLocal
 
@@ -683,6 +723,42 @@ async def list_messages_by_task(task_id: str, limit: int = 100) -> list[Message]
         rows = (await db.execute(stmt)).scalars().all()
         msgs = [_message_to_model(r) for r in rows]
         return msgs[-limit:] if limit else msgs
+
+
+async def find_preceding_user_input(
+    conversation_id: str, before_created_at: str
+) -> Message | None:
+    """[需求2-后端] Find the most recent ``user_input`` preceding a timestamp.
+
+    regenerate 端点的「恢复原 prompt」回查——按目标 agent_reply 的 created_at 锚点，
+    在同一 conversation 内向前找最近一条 user_input（用户最初问的那句）。返回的
+    content 即重跑时复用的 prompt（regenerate 把它当新 user_input 重发，触发
+    agent 重新作答）。
+
+    ``before_created_at`` 是目标回复行的 ISO 字符串时间戳（Message.created_at）。
+    用 ``MessageEntity.created_at < before_created_at`` 精确排除目标回复本身及
+    其后消息；同时间戳并列时取 created_at 倒序首条（最近的一条 user_input）。
+    created_at 已建索引（entities.py:161 ``index=True``），扫描是索引范围扫，非全表。
+
+    Returns ``None`` when no user_input precedes the target (e.g. the reply was
+    the first message in the conversation, or all prior messages are agent_reply /
+    task_log / slash_card — no recoverable prompt).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        stmt = (
+            select(MessageEntity)
+            .where(
+                MessageEntity.conversation_id == conversation_id,
+                MessageEntity.type_ == "user_input",
+                MessageEntity.created_at < before_created_at,
+            )
+            .order_by(MessageEntity.created_at.desc())
+            .limit(1)
+        )
+        row = (await db.execute(stmt)).scalars().first()
+        return _message_to_model(row) if row else None
 
 
 async def create_message(payload: Any) -> Message:
