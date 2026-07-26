@@ -1314,6 +1314,11 @@ export default function ChatPanel({
                 >
                   <ChatAvatar id={msg.sender_id} agents={agents} />
                   <div className="chat-bubble-wrap chat-bubble-wrap--self">
+                    {/* hover 操作组：复制按钮（用户消息也支持复制，与 AI 气泡对齐）。
+                        .chat-bubble-wrap position:relative 提供 hover 显隐锚点。 */}
+                    <div className="bubble-action-group">
+                      <BubbleCopyButton content={msg.content ?? ''} />
+                    </div>
                     <div className="chat-sender-name chat-sender-name--right">
                       <SenderName id={msg.sender_id} agents={agents} />
                     </div>
