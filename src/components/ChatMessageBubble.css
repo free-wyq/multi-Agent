@@ -194,20 +194,25 @@
   border-top-color: rgba(255, 255, 255, 0.18);
 }
 
-/* 单个产物文件小卡：紧凑行式，图标 + 文件名（截断）+ 大小 + 下载按钮。
- * 背景比气泡底色稍深一档，营造「可点文件」的卡片感，与正文文本区分。 */
-.chat-artifact-card {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 3px 8px;
+/* 单个产物文件小卡（antd Card，variant="borderless"）：紧凑行式，图标 + 文件名（截断）+ 大小 + 下载按钮。
+ * 背景比气泡底色稍深一档，营造「可点文件」的卡片感，与正文文本区分。
+ * Card borderless 去边框，仅留背景圆角；body 收紧 padding + inline-flex 行式布局。
+ * [[use-open-source-not-handrolled]]：手写 div → antd Card（对齐 TaskPage 产物卡范式）。 */
+.chat-artifact-card.ant-card {
   background: rgba(0, 0, 0, 0.04);
   border-radius: 6px;
   font-size: 12px;
   max-width: 100%;
 }
 
-.chat-bubble--self .chat-artifact-card {
+.chat-artifact-card .ant-card-body {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+}
+
+.chat-bubble--self .chat-artifact-card.ant-card {
   background: rgba(255, 255, 255, 0.12);
 }
 

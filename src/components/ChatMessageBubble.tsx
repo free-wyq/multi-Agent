@@ -869,7 +869,13 @@ export default function ChatMessageBubble({
                       const isLoading = downloading === key
                       const disabled = !groupId || (downloading !== null && downloading !== key)
                       return (
-                        <div key={key} className="chat-artifact-card">
+                        <Card
+                          key={key}
+                          size="small"
+                          variant="borderless"
+                          className="chat-artifact-card"
+                          styles={{ body: { padding: '3px 8px', display: 'inline-flex', alignItems: 'center', gap: 6 } }}
+                        >
                           {fileIconFor(f.name, { fontSize: 14, flexShrink: 0 })}
                           <Tooltip title={f.path || f.name}>
                             <span className="chat-artifact-name">{f.name}</span>
@@ -886,7 +892,7 @@ export default function ChatMessageBubble({
                               onClick={() => handleArtifactDownload(f)}
                             />
                           </Tooltip>
-                        </div>
+                        </Card>
                       )
                     })}
                   </div>
