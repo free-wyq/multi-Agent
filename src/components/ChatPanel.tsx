@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
-import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, message } from 'antd'
+import { Button, Empty, Input, Spin, Tag, Tooltip, Typography, Upload, message } from 'antd'
+import type { UploadProps } from 'antd'
 import type { ComponentRef } from 'react'
-import { CompressOutlined, ReloadOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { CompressOutlined, PaperClipOutlined, ReloadOutlined, RobotOutlined, SendOutlined, SettingOutlined, UserOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
 import {
   messageApi,
   groupApi,
@@ -890,16 +891,20 @@ export default function ChatPanel({
     }
   }, [chatGroupId])
 
-  const handleSendMessage = async () => {
-    if (!chatInput.trim() || !chatGroupId || sending) return
+  const handleSendMessage = async (overrideContent?: string) => {
+    // overrideContent：文件上传（任务8）把读出的文件文本拼进 chatInput 后直接调本函数发送，
+    // 不依赖异步 setState 生效——传显式 content 走与手输完全一致的路径（@收束拦截/打断/
+    // optimistic/失败回填），零特例分支。手输回车/点发送时为 undefined → 走 chatInput 闭包值。
+    const raw = overrideContent ?? chatInput
+    if (!raw.trim() || !chatGroupId || sending) return
     // @收束 前端拦截（converge-turn-design）：开关亮但消息无 @ → 不发，toast 提示。
     // 收束必须 @ 收口对象（@某成员后再开收束开关）。后端也会 400 兜底，但前端先拦避免无效请求。
-    if (convergeActive && !/@\S/.test(chatInput)) {
+    if (convergeActive && !/@\S/.test(raw)) {
       message.warning('收束必须选择 @ 收口对象（先 @ 某成员再开收束开关）')
       return
     }
     setSending(true)
-    const content = chatInput.trim()
+    const content = raw.trim()
     const wasConverge = convergeActive
     setChatInput('')
     setConvergeActive(false)
@@ -1136,6 +1141,59 @@ export default function ChatPanel({
       inputRef.current?.focus()
     }, 0)
   }, [])
+
+  // 任务8：对话框文件上传（方案 A 零后端端点）——antd Upload beforeUpload 读 File.text()
+  // 把文件文本拼进 chatInput 直接发送。不传文件到后端（零上传端点 / 零 multipart / 零存储），
+  // 文件内容作为普通消息文本走现有 messageApi.send 路径，与手输完全一致。
+  //
+  // 决策点自决（铁律 #2/#5）：
+  //  - accept 仅 .md/.txt：纯文本/markdown，读出即 UTF-8 文本可直拼；二进制（docx/pdf/图片）
+  //    不在范围（需后端解析，超本任务边界）。前端 accept 仅是 OS 文件选择器过滤提示，
+  //    beforeUpload 仍要按扩展名二次校验（用户可拖入任意文件绕过选择器）。
+  //  - <100KB 校验：防超大文本撑爆单条消息（后端 content 是 TEXT 列无硬上限，但 LLM context
+  //    有窗口，超大文本会吃满 token 且前端 TextArea 渲染卡顿）。100KB ≈ 2.5万汉字/5万英文词，
+  //    足够覆盖常规 md/txt 文档。
+  //  - 上传即发送（非填入输入框等用户改）：与「追问 chip 不自动发送」不同——文件上传是用户明确
+  //    的「把这个文件内容发给智能体」意图，点即发符合预期；若填入输入框反而要多一步点发送，
+  //    与「上传」语义不符。文件名作标题行「📄 filename.md\n」前缀拼进 content，让智能体知道
+  //    来源文件。纯文本内容直接拼，markdown 渲染由 ChatMessageBubble contentRender 接管。
+  //  - 多文件逐个发：Upload multiple 不开（一次一个，避免并发发送乱序）；beforeUpload 返
+  //    Upload.LIST_IGNORE 不进 Upload 的内置文件列表（本组件不维护文件列表 UI）。
+  const MAX_FILE_SIZE = 100 * 1024 // 100KB
+  const ACCEPTED_FILE_EXT = ['.md', '.txt']
+  const beforeUploadFile: UploadProps['beforeUpload'] = (file) => {
+    // 扩展名二次校验（OS 选择器可被绕过，这里以实际 file.name 判定）
+    const name = file.name.toLowerCase()
+    const isAccepted = ACCEPTED_FILE_EXT.some((ext) => name.endsWith(ext))
+    if (!isAccepted) {
+      message.error(`不支持的文件类型：仅支持 ${ACCEPTED_FILE_EXT.join('/')}（当前：${file.name}）`)
+      return Upload.LIST_IGNORE
+    }
+    // 大小校验
+    if (file.size > MAX_FILE_SIZE) {
+      message.error(`文件过大：${file.name}（${(file.size / 1024).toFixed(1)}KB），请控制在 100KB 以内`)
+      return Upload.LIST_IGNORE
+    }
+    // 异步读文本——beforeUpload 支持返回 Promise<RcFile>，但这里不传文件给后端，
+    // 读出文本后直接拼进 chatInput 发送，返回 LIST_IGNORE 让 Upload 不进文件列表。
+    file
+      .text()
+      .then((text) => {
+        // 拼装：文件名标题行 + 原文。若已有输入（用户在输入框写了话再上传），用空行分隔
+        // 已有内容与文件内容，避免挤在一行。文件名前缀让智能体感知来源。
+        const fileLabel = `📄 ${file.name}\n`
+        const existing = chatInput.trim()
+        const composed = existing ? `${existing}\n\n${fileLabel}${text}` : `${fileLabel}${text}`
+        // 直接发送（不 setChatInput + 手动调 send——异步 setState 不可靠，传显式 content
+        // 走 handleSendMessage 同款路径，含 @收束拦截/打断/optimistic/失败回填）。
+        void handleSendMessage(composed)
+      })
+      .catch((e) => {
+        message.error(`读取文件失败：${e instanceof Error ? e.message : String(e)}`)
+      })
+    return Upload.LIST_IGNORE
+  }
+
 
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // ── 补全下拉打开时，优先处理导航/选择（拦截 Enter/Arrow/Escape）──
@@ -1663,10 +1721,24 @@ export default function ChatPanel({
                 收束
               </Button>
             </Tooltip>
+            {/* 任务8：文件上传（方案 A 零后端端点）——antd Upload beforeUpload 读 File.text()
+                拼进 chatInput 直接发送。accept=".md,.txt"+<100KB 校验，非法 toast。
+                showUploadList=false 不显示文件列表（上传即发送，无文件列表 UI）。
+                disabled=sending 与收束/发送按钮一致——发送中禁用避免并发。 */}
+            <Upload
+              beforeUpload={beforeUploadFile}
+              accept=".md,.txt"
+              showUploadList={false}
+              disabled={sending}
+            >
+              <Tooltip title="上传 .md/.txt 文件作为消息发送（<100KB，方案A 零后端端点）">
+                <Button icon={<PaperClipOutlined />} disabled={sending} aria-label="上传文件" />
+              </Tooltip>
+            </Upload>
             <Button
               type="primary"
               icon={<SendOutlined />}
-              onClick={handleSendMessage}
+              onClick={() => void handleSendMessage()}
               loading={sending}
             >
               发送
