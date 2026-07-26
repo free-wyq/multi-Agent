@@ -77,6 +77,11 @@ def _migrate_schema() -> None:
         conn = sqlite3.connect(str(DB_PATH))
         _ensure_column(conn, "agents", "mounted_skills", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "agents", "mounted_mcp", "JSON NOT NULL DEFAULT '[]'")
+        # PRD AG-08 agent fields alignment: english slug + emoji avatar icon.
+        # Nullable (no DEFAULT) so pre-existing agent rows upgrade to NULL —
+        # matches AgentEntity.slug/icon_emoji (String, nullable=True).
+        _ensure_column(conn, "agents", "slug", "VARCHAR")
+        _ensure_column(conn, "agents", "icon_emoji", "VARCHAR")
         # Multi-model provider catalog (PRD 多模型服务商): models JSON list +
         # 6 connection-level columns. Defaults mirror LlmProviderEntity /
         # LlmProvider output model so a legacy row upgrades to a usable config
