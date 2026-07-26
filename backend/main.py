@@ -59,6 +59,10 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
+        # 任务20b：Playwright e2e 的 vite dev server 跑在 5174（与开发态 5173 错开），
+        # 需放行否则前端 fetch 被 CORS 拦（api.ts 直连 http://127.0.0.1:8000）。
+        "http://localhost:5174",
+        "http://127.0.0.1:5174",
         "file://",
     ],
     allow_methods=["*"],

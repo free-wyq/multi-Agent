@@ -26,6 +26,27 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const REPO = __dirname
 const BACKEND_DIR = path.join(REPO, 'backend')
 
+// 任务20b：e2e 后端用独立端口 8766（与开发态 8000 错开）+ reuseExistingServer:false
+// 强制每次新起 uvicorn + 临时 DB（.e2e-data）——不复用开发态 server。
+// 复用开发 server 的致命问题：开发 DB schema 与代码漂移（如 task11a 删了
+// agents.allowed_tools/denied_tools 列但 SQLite 不自动迁移），开发 DB 仍带 NOT NULL
+// 旧列 → e2e 写入（建 agent）触发 NOT NULL constraint 500。只有 fresh DB 的
+// Base.metadata.create_all 才生成正确 schema。读类测试（20a smoke）复用 dev server
+// 能过，但 20b 起的写类流程必须 fresh DB。
+//
+// .e2e-data 持久化（不在 config 里 rmSync）：首跑 init_db 建 fresh DB（正确 schema
+// + seed demo），后续 run 复用（seed 跳过，agents 已在）。**不在 config 顶层 rmSync**
+// ——曾用 fs.rmSync 每轮抹 .e2e-data，但若上一轮 run 被中断（timeout/kill）留下僵尸
+// uvicorn 持有 data.db 文件句柄，rmSync 删文件后新 uvicorn 起来查 DB 报
+// 「unable to open database file」（Linux 文件被 unlink 但句柄未释放）。改为 globalSetup
+// 里走 API 清理（DELETE 非 seed 的 agents/groups/conversations）——无文件竞态，且能
+// 清掉上一轮失败测试残留的测试数据，避免 strict mode 多命中。
+
+// E2E_API_BASE：globalSetup 与 spec 读这个 env 打后端（避免硬编码 8766）。
+// 在 config 顶层设 process.env，globalSetup（同进程）与各 spec（worker 继承）都能读。
+const E2E_BACKEND = 'http://127.0.0.1:8766'
+process.env.E2E_API_BASE = E2E_BACKEND
+
 export default defineConfig({
   testDir: './e2e/specs',
   testMatch: /.*\.spec\.ts/,
@@ -66,19 +87,20 @@ export default defineConfig({
 
   webServer: [
     {
-      // ── 后端 FastAPI ──
-      command: 'python3 -m uvicorn main:app --host 127.0.0.1 --port 8000',
+      // ── 后端 FastAPI（独立 8766，不复用开发态 8000）──
+      // reuseExistingServer:false：每次新起 → MULTI_AGENT_DATA_DIR env 生效 →
+      // fresh .e2e-data DB（Base.metadata.create_all 生成正确 schema，无开发
+      // DB 的 stale NOT NULL 列）。CI 与本地一致行为（本地开发态 8000 server
+      // 仍独立跑，互不干扰）。
+      command:
+        'python3 -m uvicorn main:app --host 127.0.0.1 --port 8766',
       cwd: BACKEND_DIR,
-      url: 'http://127.0.0.1:8000/health',
-      reuseExistingServer: true,
+      url: `${E2E_BACKEND}/health`,
+      reuseExistingServer: false,
       timeout: 60_000,
       env: {
         // 临时 DATA_DIR：与开发态 ~/.local/share/multi-agent 物理隔离。
-        // reuseExistingServer=true 时若开发态 8000 已起，Playwright 不传 env
-        // （复用现有进程，env 只在 spawn 新进程时生效）——故开发态 server 跑
-        // e2e 会落到开发数据。CI / 干净环境时必新起，落到临时目录。
-        MULTI_AGENT_DATA_DIR:
-          process.env.E2E_DATA_DIR ?? path.join(REPO, '.e2e-data'),
+        MULTI_AGENT_DATA_DIR: path.join(REPO, '.e2e-data'),
       },
     },
     {
@@ -93,8 +115,8 @@ export default defineConfig({
       reuseExistingServer: !process.env.CI,
       timeout: 60_000,
       env: {
-        // 前端打到 e2e 后端（8000）。默认 API_BASE 也是 8000，这里显式写契约。
-        VITE_API_BASE: 'http://127.0.0.1:8000',
+        // 前端打到 e2e 后端（8766）。
+        VITE_API_BASE: E2E_BACKEND,
       },
     },
   ],

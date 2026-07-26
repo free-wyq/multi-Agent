@@ -24,7 +24,10 @@ test.describe('任务20a — e2e global setup 冒烟', () => {
   test('后端 active provider 已切到 mock LLM', async ({ request }) => {
     // global-setup 写的 provider base_url 应指向 mock（E2E_MOCK_LLM_BASE）。
     // 直接打后端 GET /api/config（公开 mask 版，含 base_url）。
-    const resp = await request.get('http://127.0.0.1:8000/api/config')
+    // 后端端口由 playwright.config.ts 顶层设的 E2E_API_BASE 决定（8766，与开发
+    // 态 8000 错开，fresh DB 避免 schema 漂移）。
+    const apiBase = process.env.E2E_API_BASE ?? 'http://127.0.0.1:8766'
+    const resp = await request.get(`${apiBase}/api/config`)
     expect(resp.ok()).toBeTruthy()
     const cfg = await resp.json()
     const mockBase = process.env.E2E_MOCK_LLM_BASE ?? ''

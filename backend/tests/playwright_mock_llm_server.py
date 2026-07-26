@@ -80,11 +80,30 @@ def _brain_execute_payload(text: str) -> str:
 
 
 def _coordinator_dispatch_payload(text: str) -> str:
-    # plan 空 list：dispatch action 但无可派工步骤 → coordinator 兜底走 chat
-    # 回复 text（MT-15 兜底）。e2e 只验证「coordinator 被调到 + 回了内容」，
-    # 不锁派工细节（派工是 20b/20c 群聊协作场景的进一步断言）。
+    """coordinator 派工脚本——action=dispatch + 真实可派工 plan。
+
+    20b 群聊协作 e2e 用：发关键词「派工」→ coordinator 走 dispatch 路径
+    （node_dispatch → announce + emit_coordinator_plan → interrupt 等确认），
+    前端 PlanConfirmCard 渲染，用户点「确认继续」→ resume → dispatch_next fan-out
+    到 agent 节点 → worker brain 回复。覆盖计划确认闭环（PL-02）。
+
+    plan 引用 seed agent_frontend_1（前端工程师）——20b 群聊 e2e 建群必含 seed
+    agents（协调者/前端工程师/后端工程师），故 agent_frontend_1 必在群图注册为
+    ``agent_<id>`` 节点，``build_dispatch_sends`` 的 ``Send`` 能命中。instruction
+    不含 card/execute/handoff/派工 关键词，避免 worker brain 收到派发消息时被
+    mock 路由到其他脚本（worker 会按默认 chat 回 DEFAULT_REPLY_TEXT）。
+    """
+    plan = [
+        {
+            "step": 1,
+            "agent_id": "agent_frontend_1",
+            "agent_name": "前端工程师",
+            "instruction": "实现登录页面表单与校验",
+            "depends_on": [],
+        }
+    ]
     return json.dumps(
-        {"action": "chat", "content": text, "plan": []},
+        {"action": "dispatch", "content": text, "plan": plan},
         ensure_ascii=False,
     )
 
@@ -124,6 +143,14 @@ def _pick_response(messages: list[dict]) -> str:
     后端 ``build_brain_prompt`` / ``build_coordinator_prompt`` 把 incoming_message
     拼进 user 消息，故最后一条 user content 即用户输入。关键词命中即分流，
     否则默认 chat 回复。
+
+    匹配优先级（先特后普，避免「派工完成登录」里的「登录」误命中 execute 分支）：
+    1. ``dispatch``/``派工``/``转交`` → coordinator dispatch 脚本（action=dispatch + plan）。
+       仅 coordinator 走这条（worker 不会收到含「派工」的原句——@mention 转交场景
+       worker 收到的是 ``[来自智能体 X]`` 前缀消息，不含原「派工」关键词）。
+    2. ``[卡片]``/``卡片``/``榜单`` → card table 脚本。
+    3. ``execute``/``执行``/``调用工具`` → worker execute 脚本。
+    4. 默认 → chat 脚本（DEFAULT_REPLY_TEXT 探针串）。
     """
     last_user = ""
     for m in reversed(messages or []):
@@ -131,12 +158,15 @@ def _pick_response(messages: list[dict]) -> str:
             last_user = str(m.get("content") or "")
             break
     text = last_user
+    # 「派工」必须先于「执行」匹配——用户消息「请派工完成登录功能」里虽不含「执行」
+    # 二字，但若 dispatch 关键词后置，某些组合消息可能含「执行派工」之类双重命中。
+    # dispatch 优先：一旦命中派工走 coordinator dispatch，不再走 execute。
+    if "dispatch" in text.lower() or "派工" in text or "转交" in text:
+        return _coordinator_dispatch_payload(HANDOFF_REPLY_TEXT)
     if "[卡片]" in text or "卡片" in text or "榜单" in text:
         return _card_table_payload(CARD_REPLY_TEXT)
     if "execute" in text.lower() or "执行" in text or "调用工具" in text:
         return _brain_execute_payload(EXECUTE_REPLY_TEXT)
-    if "handoff" in text.lower() or "转交" in text or "派工" in text:
-        return _coordinator_dispatch_payload(HANDOFF_REPLY_TEXT)
     return _brain_chat_payload(DEFAULT_REPLY_TEXT)
 
 

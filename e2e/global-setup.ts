@@ -77,6 +77,97 @@ async function cleanupStaleMockProviders(apiBase: string): Promise<void> {
   }
 }
 
+// seed 实体 id 前缀——cleanupStaleTestEntities 保留这些，删其他（e2e 测试残留）。
+// 与 backend/store/seed.py 的硬编码 id 对齐：agent_coord_1 / agent_frontend_1 /
+// agent_backend_1 / group_demo_1 / member_1..3 / task_demo_1 / msg_demo_1。
+const SEED_IDS = new Set([
+  'agent_coord_1',
+  'agent_frontend_1',
+  'agent_backend_1',
+  'group_demo_1',
+])
+
+/**
+ * 任务20b：清理上一轮 e2e 残留的测试 agent/group/conversation。
+ *
+ * .e2e-data 是持久 DB（不在 config 顶层 rmSync，避免上一轮 run 被中断留下僵尸
+ * uvicorn 持有 data.db 文件句柄时 rmSync 删文件 → 新 uvicorn 报「unable to open
+ * database file」的竞态）。持久 DB 的副作用：上一轮失败测试可能留下未删的测试实体
+ * （如 e2e改名智能体），seed_demo_data 仅在表空时播种故 seed 跳过（不造成功能问题），
+ * 但残留同名元素会让 getByText strict mode 命中多个。
+ *
+ * 保留 seed 实体（id 在 SEED_IDS 里 或 name 是 seed agent 名），删其他测试 agent/
+ * group/conversation——让每轮 e2e 起点一致。删 group 前先清其 messages（外键）。
+ * best-effort：任何 DELETE 失败不阻断 globalSetup（最坏退化为残留测试数据，测试
+ * 可能 flaky 但不崩）。
+ */
+async function cleanupStaleTestEntities(apiBase: string): Promise<void> {
+  // ── agents：删非 seed 的 ──
+  try {
+    const r = await fetch(`${apiBase}/api/agents`)
+    if (r.ok) {
+      const agents = (await r.json()) as Array<{ id: string; name: string }>
+      for (const a of agents) {
+        if (SEED_IDS.has(a.id)) continue
+        // seed agent 名（协调者/前端工程师/后端工程师）也保留——防 id 体系变更。
+        if (
+          a.name === '协调者' ||
+          a.name === '前端工程师' ||
+          a.name === '后端工程师'
+        )
+          continue
+        await fetch(`${apiBase}/api/agents/${a.id}`, { method: 'DELETE' }).catch(
+          () => {},
+        )
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+
+  // ── groups：删非 seed 的（先清消息避免外键）──
+  try {
+    const r = await fetch(`${apiBase}/api/groups`)
+    if (r.ok) {
+      const groups = (await r.json()) as Array<{ id: string; name: string }>
+      for (const g of groups) {
+        if (SEED_IDS.has(g.id)) continue
+        if (g.name === '演示协作组') continue
+        // 清该群消息（DELETE /api/messages?conversationId=g.id）。
+        await fetch(
+          `${apiBase}/api/messages?conversationId=${encodeURIComponent(g.id)}`,
+          { method: 'DELETE' },
+        ).catch(() => {})
+        await fetch(`${apiBase}/api/groups/${g.id}`, { method: 'DELETE' }).catch(
+          () => {},
+        )
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+
+  // ── conversations（单聊会话，独立实体）：全删（seed 无单聊会话）──
+  try {
+    const r = await fetch(`${apiBase}/api/conversations`)
+    if (r.ok) {
+      const convs = (await r.json()) as Array<{ id: string }>
+      for (const c of convs) {
+        // 清消息（外键）。
+        await fetch(
+          `${apiBase}/api/messages?conversationId=${encodeURIComponent(c.id)}`,
+          { method: 'DELETE' },
+        ).catch(() => {})
+        await fetch(`${apiBase}/api/conversations/${c.id}`, {
+          method: 'DELETE',
+        }).catch(() => {})
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+}
+
 export default async function globalSetup(): Promise<void> {
   // ── 1. spawn mock LLM server ──────────────────────────────────────────
   const port = await freePort()
@@ -117,6 +208,14 @@ export default async function globalSetup(): Promise<void> {
   // 列表）。globalTeardown 不删——active provider 保留到下一轮 e2e 复用更稳
   // （若 globalTeardown 删了，下一轮 globalSetup 会重新建，无副作用）。
   await cleanupStaleMockProviders(apiBase)
+
+  // 任务20b：清理上一轮 e2e 残留的测试 agent/group/conversation（如 e2e改名智能体）。
+  // .e2e-data 是持久 DB（不在 config 顶层 rmSync，避免文件句柄竞态），故上一轮
+  // 失败测试可能留下未删的测试实体；seed_demo_data 仅在表空时播种，若表非空 seed 跳过
+  // 不会造成功能问题，但残留的「e2e测试智能体」「e2e改名智能体」等会让 getByText
+  // strict mode 命中多个同名元素。本清理保留 seed 实体（协调者/前端工程师/后端工程师
+  // /演示协作组 + 其 members/task/message），删其他——让每轮 e2e 起点一致。
+  await cleanupStaleTestEntities(apiBase)
 
   const resp = await fetch(`${apiBase}/api/providers`, {
     method: 'POST',
