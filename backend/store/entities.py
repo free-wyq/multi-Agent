@@ -49,6 +49,10 @@ class AgentEntity(Base):
     model: Mapped[str] = mapped_column(String, nullable=False, default="")
     max_turns: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     description: Mapped[str | None] = mapped_column(String, nullable=True)
+    # PRD AG-08: english slug for URL-safe identification + icon emoji for UI avatar.
+    # Both nullable for backward-compat with pre-existing agent rows.
+    slug: Mapped[str | None] = mapped_column(String, nullable=True)
+    icon_emoji: Mapped[str | None] = mapped_column(String, nullable=True)
     metadata_: Mapped[dict[str, Any] | None] = mapped_column(
         "metadata_", JSON, nullable=True
     )
