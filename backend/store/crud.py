@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import Integer, cast, delete, func, select
+from sqlalchemy import Integer, cast, delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models import (
@@ -24,6 +24,7 @@ from models import (
     GroupMember,
     LlmProvider,
     McpConnection,
+    Memory,
     Message,
     ScheduledTask,
     ScheduledTaskCreatePayload,
@@ -41,6 +42,7 @@ from store.entities import (
     LlmProviderEntity,
     McpConnectionEntity,
     MemberEntity,
+    MemoryEntity,
     MessageEntity,
     ScheduledTaskEntity,
     ScheduledTaskRunEntity,
@@ -60,6 +62,7 @@ _PREFIX_MAP = {
     "sched": "sched_",
     "schedrun": "schedrun_",
     "provider": "prov_",
+    "mem": "mem_",
 }
 
 
@@ -2091,3 +2094,336 @@ async def load_active_provider_into_cache() -> None:
         await db.commit()
         await db.refresh(seeded)
         config.set_active_cache(_provider_to_cache_dict(seeded))
+
+
+# ── Memory (long-term, cross-session) helpers (任务17b) ────────────────────────
+#
+# Memory 是跨会话持久记忆（L2 长期层），与 L1 会话上下文（_memory /
+# _build_context_from_db）物理隔离。FTS5 全文检索用 sidecar ``memories_fts``
+# 虚拟表（``trigram`` tokenizer——中文按 3-gram 子串匹配，unicode61 对中文整条
+# 列当一个 token 无法 MATCH）。create_all 不建 FTS5 虚拟表（SQLAlchemy 元数据
+# 不认 fts5），故由 ``ensure_memories_fts`` 在 crud 层显式建表（idempotent）。
+# 检索用 SQLAlchemy ``text()`` 原生 SQL——FTS5 MATCH + bm25 是 SQLite 方言特性，
+# ORM 没有一等表达式（与 aggregate_usage 的 json_extract 不同，后者走 func.*）。
+
+
+_MEM_FTS_CREATE_SQL = (
+    "CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5("
+    "memory_id UNINDEXED, content, tokenize='trigram'"
+    ")"
+)
+
+
+async def ensure_memories_fts() -> None:
+    """Create the ``memories_fts`` FTS5 virtual table if absent (idempotent).
+
+    SQLAlchemy ``Base.metadata.create_all`` cannot build FTS5 virtual tables
+    (the fts5 dialect is unknown to the declarative metadata). We create it
+    lazily on first memory access. ``trigram`` tokenizer supports Chinese
+    substring match (a 3-char sliding window) — far better than ``unicode61``
+    which treats a whole CJK row as one token and never MATCHes. Verified
+    against sqlite 3.37.2 (no extra deps, satisfies [[use-open-source-not-handrolled]]).
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        await db.execute(text(_MEM_FTS_CREATE_SQL))
+        await db.commit()
+
+
+def _memory_to_model(m: MemoryEntity) -> Memory:
+    return Memory.model_validate(
+        {
+            "id": m.id,
+            "user_id": m.user_id,
+            "scope": m.scope,
+            "scope_ref": m.scope_ref,
+            "content": m.content,
+            "metadata_": m.metadata_,
+            "importance": m.importance,
+            "enabled": bool(m.enabled),
+            "created_at": m.created_at,
+            "updated_at": m.updated_at,
+            "last_accessed_at": m.last_accessed_at,
+            "access_count": m.access_count,
+        }
+    )
+
+
+async def list_memories(
+    *,
+    user_id: str | None = None,
+    scope: str | None = None,
+    scope_ref: str | None = None,
+    enabled: bool | None = None,
+    keyword: str | None = None,
+    limit: int = 200,
+) -> list[Memory]:
+    """List memories, optionally filtered by user/scope/scope_ref/enabled/keyword.
+
+    ``keyword`` is a plain SQL LIKE filter (not FTS5) — used by the management
+    UI's simple text box. Full FTS5 ranking search is ``search_memories``.
+    Ordered by ``importance DESC, created_at DESC`` (most valuable first).
+    """
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    conditions = []
+    if user_id is not None:
+        conditions.append(MemoryEntity.user_id == user_id)
+    if scope is not None:
+        conditions.append(MemoryEntity.scope == scope)
+    if scope_ref is not None:
+        conditions.append(MemoryEntity.scope_ref == scope_ref)
+    if enabled is not None:
+        conditions.append(MemoryEntity.enabled == (1 if enabled else 0))
+    if keyword:
+        conditions.append(MemoryEntity.content.like(f"%{keyword}%"))
+
+    async with SessionLocal() as db:
+        stmt = select(MemoryEntity)
+        if conditions:
+            stmt = stmt.where(*conditions)
+        stmt = stmt.order_by(
+            MemoryEntity.importance.desc(),
+            MemoryEntity.created_at.desc(),
+        ).limit(limit)
+        rows = (await db.execute(stmt)).scalars().all()
+        return [_memory_to_model(r) for r in rows]
+
+
+async def get_memory(memory_id: str) -> Memory | None:
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    async with SessionLocal() as db:
+        row = await db.get(MemoryEntity, memory_id)
+        return _memory_to_model(row) if row else None
+
+
+async def create_memory(payload: Any) -> Memory:
+    """Create a new memory + sync its content into the FTS5 sidecar (dual-write).
+
+    Dedup-merge is intentionally NOT done here (the design reserves it for a
+    future ``upsert_memory`` in the extractor path); the API ``POST`` is an
+    explicit user create and should respect the literal payload. v2 may wrap
+    this with dedup.
+    """
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    ts = _now_iso()
+    scope = getattr(payload, "scope", "global") or "global"
+    entity = MemoryEntity(
+        id=_next_id("mem"),
+        user_id=getattr(payload, "user_id", "local") or "local",
+        scope=scope,
+        scope_ref=getattr(payload, "scope_ref", "") or "",
+        content=getattr(payload, "content", "") or "",
+        metadata_=getattr(payload, "metadata_", None),
+        importance=float(getattr(payload, "importance", 1.0) or 1.0),
+        enabled=1 if getattr(payload, "enabled", True) else 0,
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+        # dual-write to FTS5 sidecar (memory_id UNINDEXED → never re-tokenized)
+        await db.execute(
+            text("INSERT INTO memories_fts(memory_id, content) VALUES (:mid, :c)"),
+            {"mid": entity.id, "c": entity.content},
+        )
+        await db.commit()
+    return _memory_to_model(entity)
+
+
+async def update_memory(memory_id: str, payload: Any) -> Memory | None:
+    """Partial update of a memory. When ``content`` changes, re-sync the FTS5
+    sidecar row (delete + re-insert — FTS5 external-content tables can't UPDATE
+    a single column cleanly under every SQLite version; delete+insert is the
+    documented idempotent sync). Only fields present in the payload are written
+    (``exclude_unset``).
+    """
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(MemoryEntity, memory_id)
+        if not row:
+            return None
+        content_changed = False
+        for k, v in data.items():
+            if k in (
+                "content",
+                "scope",
+                "scope_ref",
+                "importance",
+                "enabled",
+                "metadata_",
+                "user_id",
+            ):
+                if k == "enabled":
+                    row.enabled = 1 if v else 0
+                elif k == "importance":
+                    row.importance = float(v)
+                else:
+                    setattr(row, k, v)
+                if k == "content":
+                    content_changed = True
+        row.updated_at = _now_iso()
+        if content_changed:
+            # FTS5 sync: delete the old sidecar row + insert the new content.
+            await db.execute(
+                text("DELETE FROM memories_fts WHERE memory_id = :mid"),
+                {"mid": memory_id},
+            )
+            await db.execute(
+                text(
+                    "INSERT INTO memories_fts(memory_id, content) VALUES (:mid, :c)"
+                ),
+                {"mid": memory_id, "c": row.content},
+            )
+        await db.commit()
+        await db.refresh(row)
+    return _memory_to_model(row)
+
+
+async def set_memory_enabled(memory_id: str, enabled: bool) -> Memory | None:
+    """Toggle a memory's enabled state (软删除开关)."""
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    async with SessionLocal() as db:
+        row = await db.get(MemoryEntity, memory_id)
+        if not row:
+            return None
+        row.enabled = 1 if enabled else 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return _memory_to_model(row)
+
+
+async def delete_memory(memory_id: str) -> bool:
+    """Delete a memory + its FTS5 sidecar row."""
+    from store.database import SessionLocal
+
+    await ensure_memories_fts()
+    async with SessionLocal() as db:
+        row = await db.get(MemoryEntity, memory_id)
+        if not row:
+            return False
+        await db.execute(
+            text("DELETE FROM memories_fts WHERE memory_id = :mid"),
+            {"mid": memory_id},
+        )
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def search_memories(
+    query: str,
+    *,
+    user_id: str | None = None,
+    scope: str | None = None,
+    scope_ref: str | None = None,
+    top_k: int = 5,
+) -> list[tuple[Memory, float]]:
+    """FTS5 full-text search over memory content, ranked by bm25+importance.
+
+    Returns ``(Memory, score)`` tuples sorted best-first. ``score`` is a
+    positive relevance (negated bm25, so higher = better). The FTS5 MATCH query
+    must escape the raw user input to avoid SQLite operator injection — we
+    double-quote it (``"..."``) and escape internal double-quotes (FTS5
+    string-literal rule: ``"`` → ``""``). ``trigram`` tokenizer handles CJK
+    substring match; for a query shorter than 3 chars (no trigram), falls back
+    to a LIKE scan so single-char / 2-char queries still return hits.
+
+    Only ``enabled=1`` memories are searched. Matching rows update
+    ``last_accessed_at`` + ``access_count`` (衰减排序用).
+    """
+    from store.database import SessionLocal
+
+    if not query or not query.strip():
+        return []
+    await ensure_memories_fts()
+
+    safe_q = '"' + query.replace('"', '""') + '"'
+    clauses = ["m.enabled = 1"]
+    params: dict[str, Any] = {"q": safe_q, "k": top_k}
+    if user_id is not None:
+        clauses.append("m.user_id = :user_id")
+        params["user_id"] = user_id
+    if scope is not None:
+        clauses.append("m.scope = :scope")
+        params["scope"] = scope
+    if scope_ref is not None:
+        clauses.append("m.scope_ref = :scope_ref")
+        params["scope_ref"] = scope_ref
+    where = " AND ".join(clauses)
+
+    # bm25() returns negative scores (more relevant = more negative). We
+    # expose ``-bm25`` so callers see positive-relevance (higher = better),
+    # and weight the ORDER BY by importance so a high-importance memory ranks
+    # above a marginally-better-matching low-importance one (design §5.3).
+    sql = text(
+        f"""
+        SELECT m.id, -bm25(memories_fts) AS score
+        FROM memories m
+        JOIN memories_fts f ON f.memory_id = m.id
+        WHERE memories_fts MATCH :q AND {where}
+        ORDER BY (-bm25(memories_fts)) * (m.importance + 0.1) DESC
+        LIMIT :k
+        """
+    )
+
+    async with SessionLocal() as db:
+        try:
+            ranked = (await db.execute(sql, params)).all()
+        except Exception:
+            # FTS5 MATCH raises on malformed query (operator syntax). Fall back
+            # to a plain LIKE scan so the UI never hard-fails on odd input.
+            ranked = []
+        if not ranked:
+            # LIKE fallback (covers short queries < 3 chars where trigram finds
+            # nothing, and malformed-MATCH cases). Score is a fixed small value
+            # so callers still get ordered results without crashing.
+            like_sql = text(
+                f"""
+                SELECT m.id, 0.0 AS score
+                FROM memories m
+                WHERE m.content LIKE :pat AND {where}
+                ORDER BY m.importance DESC, m.created_at DESC
+                LIMIT :k
+                """
+            )
+            params_like = dict(params)
+            params_like["pat"] = f"%{query}%"
+            ranked = (await db.execute(like_sql, params_like)).all()
+
+        if not ranked:
+            return []
+
+        ids = [r[0] for r in ranked]
+        score_by_id = {r[0]: float(r[1]) for r in ranked}
+        rows = (
+            await db.execute(
+                select(MemoryEntity).where(MemoryEntity.id.in_(ids))
+            )
+        ).scalars().all()
+        # preserve FTS5 rank order (dict loses order)
+        by_id = {r.id: r for r in rows}
+        ordered = [by_id[i] for i in ids if i in by_id]
+
+        # update access stats (last_accessed_at + access_count) for hits.
+        ts = _now_iso()
+        for ent in ordered:
+            ent.last_accessed_at = ts
+            ent.access_count = int(ent.access_count or 0) + 1
+        await db.commit()
+
+        return [(_memory_to_model(ent), score_by_id.get(ent.id, 0.0)) for ent in ordered]

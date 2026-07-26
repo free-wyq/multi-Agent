@@ -14,6 +14,13 @@ from .group import (
 )
 from .llm_provider import LlmModel, LlmProvider, LlmProviderCreatePayload
 from .mcp import McpConnection, McpConnectionCreatePayload
+from .memory import (
+    Memory,
+    MemoryCreatePayload,
+    MemorySearchResponse,
+    MemorySearchResult,
+    MemoryUpdatePayload,
+)
 from .message import (
     BusEventData,
     Message,
@@ -54,6 +61,11 @@ __all__ = [
     "UsageTotals",
     "McpConnection",
     "McpConnectionCreatePayload",
+    "Memory",
+    "MemoryCreatePayload",
+    "MemoryUpdatePayload",
+    "MemorySearchResult",
+    "MemorySearchResponse",
     "ScheduledTask",
     "ScheduledTaskCreatePayload",
     "ScheduledTaskRun",

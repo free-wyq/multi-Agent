@@ -17,6 +17,7 @@ from api import (
     conversations,
     groups,
     mcp,
+    memory,
     messages,
     plan,
     scheduled_tasks,
@@ -71,6 +72,7 @@ app.include_router(tasks.router)
 app.include_router(messages.router)
 app.include_router(skills.router)
 app.include_router(mcp.router)
+app.include_router(memory.router)
 app.include_router(scheduled_tasks.router)
 app.include_router(websocket.router)
 app.include_router(plan.router)

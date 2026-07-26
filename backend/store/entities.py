@@ -262,6 +262,48 @@ class ScheduledTaskRunEntity(Base):
     finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class MemoryEntity(Base):
+    """A long-term memory record (PRD 记忆模块 · 任务17).
+
+    A memory is a single persistent fact/preference/conclusion extracted from
+    conversations and surfaced across sessions. Scoped by ``scope`` (global /
+    agent / conversation); ``content`` is the natural-language statement;
+    ``importance`` (0.0–1.0) ranks relevance at retrieval time. Retrieved
+    memories are injected into the system prompt as a「关于用户的长期记忆」
+    section, distinct from the L1 session-context (recent messages) which is
+    unchanged.
+
+    v1 retrieval uses SQLite FTS5 full-text search over ``content`` via a
+    sidecar ``memories_fts`` virtual table (``trigram`` tokenizer — Chinese
+    substring match, zero external deps). v2 may add a ``vector_embedding``
+    column + semantic search (sqlite-vss / external store); the schema reserves
+    no column slot here (added later via additive ALTER) so v1 keeps the row
+    narrow.
+    """
+
+    __tablename__ = "memories"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    user_id: Mapped[str] = mapped_column(String, nullable=False, default="local", index=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False, default="global", index=True)
+    # global | agent | conversation — see §4.3 of docs/memory-module-design.md
+    scope_ref: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # scope=agent → agent_id; scope=conversation → conversation_id; global → ""
+    content: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # 自然语言陈述，如「用户是 Java 后端工程师，偏好简洁回复」
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # 来源溯源：{source_conversation_id, source_agent_id, extracted_at, ...}
+    importance: Mapped[float] = mapped_column(Float, nullable=False, default=0.5)
+    # 0.0–1.0，检索时与相关性加权排序；MVP 规则版赋值，v2 LLM 评估
+    enabled: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
+    # 软删除/禁用开关（用户可在前端手动禁用某条记忆）
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    last_accessed_at: Mapped[str | None] = mapped_column(String, nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 检索命中时更新（last_accessed_at + access_count），用于衰减排序 + 前端「最近用过」展示
+
+
 class LlmProviderEntity(Base):
     """A configured LLM service provider (PRD 多模型服务商).
 
