@@ -148,9 +148,12 @@ async def test_set_task_artifact() -> None:
     await init_db()
 
     # 8/10: 先建一个 task，再 set artifact，校验只改两列
+    # Path C 严格改名（commit e3a7c53）：TaskCreatePayload.group_id → conversation_id，
+    # crud.create_task 读 payload.conversation_id。这里 stub 补上 conversation_id
+    # （值同 group_id，单测只走 set_task_artifact 不关心其值）。
     payload = type(
         "P", (), {
-            "group_id": "group_pl12_unit_crud",
+            "conversation_id": "group_pl12_unit_crud",
             "title": "t", "description": None,
             "assigned_agent_id": None, "dependencies": [], "dag_order": None,
         }
@@ -158,7 +161,7 @@ async def test_set_task_artifact() -> None:
     t = await crud.create_task(payload)
     # 模拟引擎已写定 status/exit_code（先 update 到 working+exit 7）
     upd = type("U", (), {
-        "group_id": t.group_id, "title": t.title, "description": None,
+        "conversation_id": t.conversation_id, "title": t.title, "description": None,
         "assigned_agent_id": None, "dependencies": [], "dag_order": None,
         "status": "working",  # 别的字段（update_task 只认 payload 字段，status 非其字段则忽略）
     })()
@@ -224,3 +227,11 @@ def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+# pytest collection guard：``test_scan_*`` 用 ``tmp_root`` fixture（文件里
+# 没定义、也没装 pytest-asyncio 处理 ``async def test_set_task_artifact``），
+# 设计是 standalone 单跑（见上 main()）。打 ``__test__ = False`` 让 pytest
+# 不收集，保留 standalone 自测能力。延迟到末尾是因为函数要全部定义完后才能批量打标。
+for _name in list(globals()):
+    if _name.startswith("test_") and callable(globals()[_name]):
+        globals()[_name].__test__ = False  # type: ignore[attr-defined]

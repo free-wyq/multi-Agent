@@ -17,6 +17,16 @@ import sys
 import engine.inbox as inbox
 from engine.inbox import _task_queues, cancel_task
 
+# pytest collection guard：本文件用 ``async def test_...`` 定义测试函数，但
+# 项目没装 pytest-asyncio，pytest 直接收集会报 ``async def functions are not
+# natively supported`` 把它们标 FAILED。文件设计是真 ``asyncio.run(main())``
+# 单跑（见文件尾），pytest 跑应跳过——给所有 ``test_`` 开头的协程函数打
+# ``__test__ = False``，让 pytest 不收集，保留 standalone 自测能力。
+def _mark_no_pytest(namespace: dict) -> None:
+    for name, obj in list(namespace.items()):
+        if name.startswith("test_") and callable(obj):
+            obj.__test__ = False  # type: ignore[attr-defined]
+
 
 def reset_queues() -> None:
     _task_queues.clear()
@@ -172,3 +182,7 @@ async def main() -> int:
 
 if __name__ == "__main__":
     sys.exit(asyncio.run(main()))
+
+# 模块加载末尾打标——见文件头 _mark_no_pytest 注释。延迟到这里是因为 async
+# 测试函数要全部定义完后才能批量打标。
+_mark_no_pytest(globals())

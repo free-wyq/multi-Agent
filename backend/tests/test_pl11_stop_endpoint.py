@@ -48,6 +48,13 @@ inbox_mod.cancel_task = _fake_cancel_task
 
 # now import api.tasks — it binds registry + cancel_task by name
 import api.tasks as tasks_api  # noqa: E402
+# Path C 后测试隔离加固：api.tasks 在 import 时把 ``cancel_task`` 名字绑定到
+# ``engine.inbox.cancel_task`` 当时的对象上。当 pytest 全量跑时，别的测试可能
+# 已经先 import 了 api.tasks（绑定的是原版 cancel_task），上面那行
+# ``inbox_mod.cancel_task = _fake_cancel_task`` 改的是 module 属性，换不了
+# api.tasks 里已经绑定的引用，导致 ``queued_item`` 走真 cancel_task 返回 None。
+# 直接打到 api.tasks 模块名上，无论本测试何时被收集都生效。
+tasks_api.cancel_task = _fake_cancel_task
 from fastapi import FastAPI  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
@@ -70,7 +77,9 @@ def test_executing() -> None:
     assert body["ok"] is True
     assert body["executing"] is True, body
     assert body["queued"] is False, body
-    assert body["group_id"] == "group_demo_1"
+    # Path C 严格改名（commit e3a7c53）：响应字段 group_id → conversation_id，
+    # 持 group_id 或 conversation_id（群聊/单聊通用）。测试对齐当前契约。
+    assert body["conversation_id"] == "group_demo_1"
     assert body["agent_id"] == "agent_backend_1"
     assert "执行中已中断" in body["message"], body
     print("[check 2] executing task → executing=True, message 含「执行中已中断」  OK")

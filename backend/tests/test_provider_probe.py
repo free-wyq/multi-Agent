@@ -46,6 +46,14 @@ from llm import probe as probe_mod  # noqa: E402
 from llm.probe import test_provider, fetch_models  # noqa: E402
 from store.entities import LlmProviderEntity  # noqa: E402
 
+# pytest 会把模块顶层名字以 ``test_`` 开头的可调用对象当测试用例收集。这里
+# ``test_provider`` 是被测函数（llm.probe.test_provider），不是测试用例——它带
+# ``entity`` 参数，pytest 把它当成需要 fixture 注入的测试，collection 报
+# ``fixture 'entity' not found``。打 ``__test__ = False`` 标记让 pytest 跳过它。
+# 同样适用于 ``fetch_models``（虽然不以 test_ 开头，保险起见也标，零副作用）。
+test_provider.__test__ = False  # type: ignore[attr-defined]
+fetch_models.__test__ = False  # type: ignore[attr-defined]
+
 
 def _make_entity(**kw) -> LlmProviderEntity:
     """Build a transient LlmProviderEntity (no DB) for probe tests."""
