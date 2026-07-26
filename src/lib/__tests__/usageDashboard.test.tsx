@@ -19,7 +19,7 @@
  *    8. execute 路径未计入口径 Alert 出现（「execute」字样）。
  *    9. 空报告（rows=[] + 全 0 totals）→ Empty 兜底，不崩。
  */
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, within, waitFor } from '@testing-library/react'
 
 import UsageDashboard from '../../components/UsageDashboard'
@@ -70,12 +70,12 @@ describe('[任务15b] UsageDashboard · 静态契约', () => {
       calls.push(String(url))
       return Promise.resolve(mockResponse(MODEL_OPTIONS_REPORT))
     }
-    const orig = global.fetch
-    global.fetch = fake as unknown as typeof fetch
+    const orig = globalThis.fetch
+    globalThis.fetch = fake as unknown as typeof fetch
     try {
       await usageApi.report('2026-01-01T00:00:00Z', '2026-02-01T00:00:00Z', 'glm-5.2', 'day')
     } finally {
-      global.fetch = orig
+      globalThis.fetch = orig
     }
     expect(calls).toHaveLength(1)
     const u = calls[0]
@@ -99,7 +99,7 @@ describe('[任务15b] UsageDashboard · 行为契约', () => {
 
   beforeEach(() => {
     fetchCalls = []
-    origFetch = global.fetch
+    origFetch = globalThis.fetch
     const fake: FetchImpl = (url) => {
       const u = String(url)
       fetchCalls.push(u)
@@ -111,11 +111,11 @@ describe('[任务15b] UsageDashboard · 行为契约', () => {
         : MODEL_OPTIONS_REPORT
       return Promise.resolve(mockResponse(body))
     }
-    global.fetch = fake as unknown as typeof fetch
+    globalThis.fetch = fake as unknown as typeof fetch
   })
 
   afterEach(() => {
-    global.fetch = origFetch
+    globalThis.fetch = origFetch
   })
 
   it('B4: mount 自动发请求拉聚合 + 模型选项', async () => {
@@ -183,7 +183,7 @@ describe('[任务15b] UsageDashboard · 行为契约', () => {
       totals: { tokens: 0, elapsed_ms: 0, reasoning_tokens: 0, messages: 0 },
       rows: [],
     }
-    global.fetch = ((() => Promise.resolve(mockResponse(empty))) as unknown) as typeof fetch
+    globalThis.fetch = ((() => Promise.resolve(mockResponse(empty))) as unknown) as typeof fetch
     render(<UsageDashboard />)
     await waitFor(() => {
       expect(screen.getByText(/无用量数据|加载中/)).toBeInTheDocument()

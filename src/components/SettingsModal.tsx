@@ -13,10 +13,12 @@
  *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
  *  - 外部系统：智能体数据导出（文件下载 / Webhook 推送 / 数据库同步），占位卡片待后端端点。
  *  - 即时消息：接收外部 IM（微信/钉钉/飞书）消息转发给智能体，占位卡片待接入。
- *  - 用户信息：游客态占位，待接登录。
+ *  - 用户信息：Token 用量仪表盘（UsageDashboard，任务15b/15c）——聚合 chat/ask 路径回复的
+ *    tokens/推理 token/耗时/消息数，支持区间+模型+维度（model/day/conversation/agent）过滤；
+ *    顶部内联 Alert 标注 execute 路径未计入口径（设计取舍，待任务2后端补全 stats 后自动变全）。
  */
 import { useEffect, useState } from 'react'
-import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Avatar, Slider, Select, Space, Tooltip } from 'antd'
+import { Modal, Button, Spin, Empty, Tag, message, Switch, Popconfirm, Slider, Select, Space, Tooltip } from 'antd'
 import {
   ApiOutlined,
   AppstoreOutlined,
@@ -31,6 +33,7 @@ import {
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
 import ProviderEditor from './ProviderEditor'
+import UsageDashboard from './UsageDashboard'
 import { providerApi, type LlmProvider } from '../services/api'
 import { useSettings } from '../contexts/SettingsContext'
 import { useTts } from '../hooks/useTts'
@@ -327,29 +330,13 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
             </div>
           )}
           {activeKey === 'user' && (
-            <div style={{ maxWidth: 480 }}>
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 16,
-                  padding: '20px 0',
-                  borderBottom: '1px solid #f0f0f0',
-                }}
-              >
-                <Avatar size={64} icon={<UserOutlined />} />
-                <div>
-                  <div style={{ fontSize: 18, fontWeight: 600 }}>游客</div>
-                  <div style={{ fontSize: 13, color: '#999', marginTop: 4 }}>
-                    未登录 · 登录功能开发中
-                  </div>
-                </div>
-              </div>
-              <p style={{ fontSize: 13, color: '#666', marginTop: 20, lineHeight: 1.8 }}>
-                后续将支持账号登录，登录后可同步智能体配置、对话历史与技能到云端。
-                当前为本地单机模式，所有数据保存在本机。
-              </p>
-            </div>
+            // 「用户信息」占位替换为 Token 用量仪表盘（任务15c）。
+            // UsageDashboard 自带过滤器（DatePicker.RangePicker + 模型 Select + 维度 Segmented）、
+            // KPI 行、明细 Table + Progress 占比列，并在顶部内联标注 execute 路径未计入口径
+            // （「execute 任务路径的模板公告与工具调用回合未携带流式统计，不计入本仪表盘」），
+            // 故此处不再重复补口径 Alert。根容器 height:100%+overflowY:auto，塞进 70vh 右侧内容区
+            // 自适应，与 McpPage/SkillPage 嵌入同款（外层 SettingsModal body overflow auto 兜底）。
+            <UsageDashboard />
           )}
           {activeKey === 'model' && (
             <>
