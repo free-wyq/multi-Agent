@@ -521,10 +521,14 @@ export default function AgentPage() {
               >
                 {/* 顶部一行:emoji + 名称/角色 + 状态点 —— 完全复用模板广场的 class */}
                 <div className="agent-template-card-top">
-                  <span className="agent-template-emoji" aria-hidden>{theme.emoji}</span>
+                  <span className="agent-template-emoji" aria-hidden>{agent.icon_emoji || theme.emoji}</span>
                   <div className="agent-template-meta">
                     <h4 className="agent-template-name" title={agent.name}>{agent.name}</h4>
-                    <span className="agent-template-role">{agent.role}</span>
+                    {/* AG-08: 角色旁 slug 副标题小字；留空不占位避免空隙 */}
+                    <span className="agent-template-role">
+                      {agent.role}
+                      {agent.slug ? <span className="agent-template-slug"> · {agent.slug}</span> : null}
+                    </span>
                   </div>
                   <Tooltip title={statusInfo.label}>
                     <span className={`agent-card-status-dot agent-card-status-dot--${status}`}>

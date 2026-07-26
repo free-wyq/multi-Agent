@@ -371,6 +371,14 @@
   font-family: 'SF Mono', 'Menlo', monospace;
 }
 
+/* AG-08: 角色旁 slug 副标题小字，比角色更淡，等宽保持 URL 安全 id 观感 */
+.agent-template-slug {
+  margin-left: 2px;
+  font-size: 11px;
+  color: #c0c4cc;
+  font-family: 'SF Mono', 'Menlo', monospace;
+}
+
 .agent-template-cat-tag {
   margin: 0 !important;
   border-radius: 6px !important;
