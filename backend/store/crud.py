@@ -131,6 +131,10 @@ async def create_agent(payload: Any) -> AgentDefinition:
         model="",
         max_turns=0,
         description=payload.description,
+        # PRD AG-08: pass through slug/icon_emoji from payload → entity columns.
+        # None falls through to NULL (columns are nullable, migration bare VARCHAR).
+        slug=payload.slug,
+        icon_emoji=payload.icon_emoji,
         created_at=ts,
         updated_at=ts,
     )
