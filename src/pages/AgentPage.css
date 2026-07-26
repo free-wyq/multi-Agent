@@ -111,25 +111,46 @@
   gap: 20px;
 }
 
-/* ── 智能体卡片:复刻模板广场 .agent-template-card 扁平结构,叠加角色色 tint ── */
-.agent-card.agent-card--tpl {
-  border: 1px solid #eef2ff;
-  border-radius: 12px;
-  padding: 16px;
-  /* 兜底浅蓝白渐变(无 color-mix) */
-  background: linear-gradient(180deg, #fafbff 0%, #ffffff 100%);
-  /* color-mix:极浅角色色渐变(5%)——保留 [[agent-page-redesign]] 角色色辨识,不丢 */
+/* ── 智能体卡片（AntD Card，[[use-open-source-not-handrolled]]）── */
+/* 角色色 tint：极浅角色色渐变(5%)——保留 [[agent-page-redesign]] 角色色辨识 */
+.agent-card--antd .ant-card-body {
   background: linear-gradient(180deg, color-mix(in srgb, var(--agent-color) 5%, #ffffff) 0%, #ffffff 100%);
-  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
-  display: flex;
-  flex-direction: column;
 }
 
-.agent-card.agent-card--tpl:hover {
-  transform: translateY(-2px);
-  /* 角色色系阴影(14% alpha),与模板广场 indigo 12% 同强度 */
-  box-shadow: 0 8px 20px color-mix(in srgb, var(--agent-color) 14%, transparent);
+/* 角色色边框 + hover 阴影（Card hoverable 自带上浮，叠加角色色阴影） */
+.agent-card--antd.ant-card {
+  border-color: #eef2ff;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.agent-card--antd.ant-card-hoverable:hover {
   border-color: color-mix(in srgb, var(--agent-color) 30%, #c7d2fe);
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--agent-color) 14%, transparent);
+}
+
+/* cover：渐变 banner + emoji 居中浮在 banner 上 */
+.agent-card-cover {
+  position: relative;
+  height: 56px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+}
+
+.agent-card-cover-banner {
+  position: absolute;
+  inset: 0;
+  opacity: 0.92;
+}
+
+.agent-card-cover .agent-template-emoji {
+  position: relative;
+  z-index: 1;
+  font-size: 30px;
+  line-height: 1;
+  filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.25));
 }
 
 /* 状态点挪到顶部行内(替代模板 cat-tag 位置):去掉绝对定位/边框,变小圆点 */
@@ -142,8 +163,8 @@
   flex-shrink: 0;
 }
 
-/* 工作中:状态点脉冲(banner 没了,改挂状态点) */
-.agent-card--working .agent-template-card-top .agent-card-status-dot {
+/* 工作中:cover banner 脉冲（原 banner-pulse 复用） */
+.agent-card--working .agent-card-cover-banner {
   animation: banner-pulse 2s ease-in-out infinite;
 }
 
@@ -177,19 +198,6 @@
 .agent-card-desc--empty {
   color: #c0c0c0;
   font-style: italic;
-}
-
-/* 底部操作行:两等宽按钮,顶到卡片底部 */
-.agent-card-actions-row {
-  display: flex;
-  gap: 8px;
-  margin-top: auto;
-  padding-top: 12px;
-}
-
-.agent-card-actions-row .ant-btn {
-  border-radius: 8px !important;
-  font-weight: 500;
 }
 
 .agent-skill-tag {

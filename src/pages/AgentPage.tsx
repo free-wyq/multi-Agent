@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import {
   Button,
+  Card,
   Modal,
   Form,
   Input,
@@ -514,14 +515,40 @@ export default function AgentPage() {
             )
 
             return (
-              <div
+              <Card
                 key={agent.id}
-                className={`agent-card agent-card--tpl ${status === 'executing' ? 'agent-card--working' : ''}`}
+                hoverable
+                variant="outlined"
+                className={`agent-card--antd ${status === 'executing' ? 'agent-card--working' : ''}`}
                 style={{ '--agent-color': theme.color, '--agent-gradient': theme.gradient } as CSSProperties}
+                styles={{ body: { padding: 16 } }}
+                cover={
+                  <div className="agent-card-cover">
+                    <div className="agent-card-cover-banner" style={{ background: theme.gradient }} />
+                    <span className="agent-template-emoji" aria-hidden>{agent.icon_emoji || theme.emoji}</span>
+                  </div>
+                }
+                actions={[
+                  <Tooltip title="编辑" key="edit">
+                    <Button type="text" icon={<EditOutlined />} onClick={() => openEdit(agent)}>编辑</Button>
+                  </Tooltip>,
+                  <Popconfirm
+                    key="delete"
+                    title="确认删除该智能体?"
+                    description="删除后不可恢复"
+                    onConfirm={() => handleDelete(agent.id)}
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                  >
+                    <Tooltip title="删除">
+                      <Button type="text" danger icon={<DeleteOutlined />}>删除</Button>
+                    </Tooltip>
+                  </Popconfirm>,
+                ]}
               >
-                {/* 顶部一行:emoji + 名称/角色 + 状态点 —— 完全复用模板广场的 class */}
+                {/* 名称行 + 状态点 */}
                 <div className="agent-template-card-top">
-                  <span className="agent-template-emoji" aria-hidden>{agent.icon_emoji || theme.emoji}</span>
                   <div className="agent-template-meta">
                     <h4 className="agent-template-name" title={agent.name}>{agent.name}</h4>
                     {/* AG-08: 角色旁 slug 副标题小字；留空不占位避免空隙 */}
@@ -571,31 +598,7 @@ export default function AgentPage() {
                     ))}
                   </div>
                 )}
-
-                {/* 底部操作行:替代 AntD Card 的 actions —— 编辑 + 删除 两个等宽按钮 */}
-                <div className="agent-card-actions-row">
-                  <Button
-                    block
-                    size="small"
-                    icon={<EditOutlined />}
-                    onClick={() => openEdit(agent)}
-                  >
-                    编辑
-                  </Button>
-                  <Popconfirm
-                    title="确认删除该智能体?"
-                    description="删除后不可恢复"
-                    onConfirm={() => handleDelete(agent.id)}
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Button block size="small" danger icon={<DeleteOutlined />}>
-                      删除
-                    </Button>
-                  </Popconfirm>
-                </div>
-              </div>
+              </Card>
             )
           })}
 
