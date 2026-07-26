@@ -163,6 +163,11 @@ async def hire_template(template_id: str, body: HireTemplateBody) -> AgentDefini
         skills=list(template.skills),
         extra_skills=list(template.extra_skills),
         description=template.description,
+        # PRD AG-08: inherit template metadata so the hired agent carries the
+        # template's english slug (template_id minus "tpl:" prefix) and emoji
+        # avatar icon — keeps template↔agent identity aligned.
+        slug=template.template_id.removeprefix("tpl:"),
+        icon_emoji=template.icon_emoji,
     )
     agent = await crud.create_agent(payload)
     logger.info(
