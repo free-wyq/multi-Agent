@@ -57,7 +57,10 @@
   }
 }
 
-/* ── 工具调用摘要区（气泡内顶部） ── */
+/* ── 工具调用折叠区（气泡内顶部） ──
+ * 整组用 AntD Collapse 折叠（标题行「🔧 工具调用 (N)」默认收起），展开后内部用 AntD Timeline
+ * 呈现树形缩进明细（├─/↳ dot + 工具名 + 耗时 + 详情 Popover 触发）。Timeline 自带竖向缩进链
+ * 视觉对齐用户草图的「├─ run_command #1」树形列表——步骤语义竖排 OK，关键是默认折叠不撑高气泡。 */
 .chat-tool-block {
   margin-bottom: 6px;
 }
@@ -72,7 +75,31 @@
   border-top-color: rgba(255, 255, 255, 0.18);
 }
 
-/* 单条工具摘要行 label */
+/* Timeline 树形明细：收紧左 padding（默认 20px 太靠左，缩进感过强），让明细贴标题左侧对齐。 */
+.chat-tool-timeline {
+  padding-left: 6px;
+  margin-top: 4px;
+}
+
+/* Timeline 自定义 dot：├─（调用中）/ ↳（已返回），对齐用户草图树形缩进语义。 */
+.chat-tool-timeline-dot {
+  font-size: 12px;
+  color: #8c8c8c;
+  font-family: 'monospace';
+  line-height: 1;
+}
+
+/* Timeline item 内容行：横向紧凑铺开（图标 + 工具名 + 耗时 + 详情触发 + 参数预览），不竖排堆叠。 */
+.chat-tool-timeline-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  line-height: 1.6;
+}
+
+/* 单条工具摘要行 label（保留旧 class 供 args/elapsed 复用，但 Collapse 展开态改为 Timeline 行） */
 .chat-tool-row-label {
   display: flex;
   align-items: center;
@@ -99,6 +126,26 @@
 .chat-tool-row-elapsed {
   opacity: 0.55;
   flex-shrink: 0;
+}
+
+/* 详情触发标签：点 chip 弹 Popover 看 args/output payload，替代旧的手写展开 pre。
+ * 视觉是可点链接风（蓝色小字），与 Timeline 行其他灰字区分，提示「这里可点」。 */
+.chat-tool-detail-trigger {
+  color: #1677ff;
+  cursor: pointer;
+  font-size: 11px;
+  padding: 0 4px;
+  flex-shrink: 0;
+}
+
+.chat-tool-detail-trigger:hover {
+  color: #4096ff;
+  text-decoration: underline;
+}
+
+/* Popover 内 payload pre：与原 payload 视觉一致（深色 code 块）。 */
+.chat-tool-payload-popover .chat-tool-payload {
+  margin: 0;
 }
 
 /* 工具 payload 详情块（可折叠展开后） */
