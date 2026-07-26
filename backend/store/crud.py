@@ -89,6 +89,11 @@ def _agent_to_model(a: AgentEntity) -> AgentDefinition:
             "model": a.model,
             "max_turns": a.max_turns,
             "description": a.description,
+            # PRD AG-08: serialize slug/icon_emoji from entity columns → model
+            # fields. Legacy rows have NULL here → None (model default), so
+            # GET /agents stays backward-compatible.
+            "slug": a.slug,
+            "icon_emoji": a.icon_emoji,
             "metadata_": a.metadata_,
             "created_at": a.created_at,
             "updated_at": a.updated_at,
