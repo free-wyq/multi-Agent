@@ -130,6 +130,12 @@ class WorkerState(TypedDict, total=False):
     # execute 路径回复是模板化 announce，不匹配 brain token，不带 stats（与协调者
     # dispatch 排除同理）。None=无统计（错误兜底/execute）。
     _stream_stats: dict | None
+    # 本 turn 的流式归并 key（brain 生成，execute 复用）。node_brain_decide 在
+    # _stream_brain_decision 里生成 reply_id（uuid4 hex），写进 state 让 node_execute
+    # 接住、透传给 push_task 的 data，execute 路径（_run_worker_task）取出作 ReAct
+    # 流式 token/tool/think 事件的归并 key——brain 与 execute 同 key，前端一个气泡
+    # 全收（思考过程 + 执行步骤 + 最终答案）。vh63 单聊一个 turn 一个气泡。
+    reply_id: str
 
 
 class GroupState(TypedDict, total=False):

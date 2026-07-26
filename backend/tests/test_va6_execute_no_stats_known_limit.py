@@ -66,25 +66,29 @@ def assert_contract() -> list[str]:
     agent_loop = AGENT_LOOP.read_text(encoding="utf-8")
 
     # ── A. execute 路径 announce 无 stats ──
-    # [1] registry._reply 恒 data=None + docstring 标注已知限制
-    #     B10 抽 persist_agent_reply 后，_reply 改调 persist_agent_reply(..., None, ...)
-    #     传 None 锁「恒 data=None」（data 是第 4 参）。B22 加 task_id 形参（第 5 参），
-    #     _reply 调 persist_agent_reply(..., None, task_id) —— data 仍恒 None，核心契约
-    #     「_reply 不传 stats」不变。断言：persist_agent_reply 调用第 4 参为 None（data=None）。
+    # [1] registry._reply docstring 标注已知限制 + 改造路径（A6 评估结论锁存）。
+    # vh64：原「_reply 恒 data=None」契约在 vh63 已破——成功路径透传 {"reply_id": ...}
+    # 让流式气泡退场（registry._run_worker_task 的 reply_data）。新契约：_reply 签名含
+    # data 形参 + docstring 仍标注「已知限制·保守不改」+ 改造三步路径。原「恒 None」
+    # 断言作废（vh63 已有意破，是 reply_id 透传，非 stats——execute announce 仍无
+    # model/elapsed_ms/tokens stats，A6 评估结论「execute 路径 announce 不带 stats」不变）。
+    # 注意：_reply 签名跨多行（_fn_body 抽出的 body 不含签名头），故直接在 registry
+    # 全文里搜签名（而非 body 里搜），body 里搜调用 + docstring。
     reply_body = _fn_body(registry, "_reply")
     if not reply_body:
         errs.append("[1] registry._reply 函数体未找到")
     else:
-        inline_data_none = '"data": None' in reply_body
-        # B22 后调用形如 persist_agent_reply(self.group_id, self.agent_id, content, None, task_id)
-        # 第 4 参 None = data 恒 None；第 5 参 task_id = B22 透传。断言 None 在调用里（data=None）。
-        delegates_none = "persist_agent_reply" in reply_body and re.search(
-            r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", reply_body, re.S
-        ) is not None
-        if not (inline_data_none or delegates_none):
-            errs.append("[1] registry._reply 未恒 data=None（announce 不该带 stats）")
+        # _reply 签名含 data: dict | None = None（vh63 透传 reply_id 用，非 stats）。
+        # 签名跨多行，搜 registry 全文（_fn_body 只抽 body 不含签名头）。
+        if "data: dict[str, Any] | None = None" not in registry and "data: dict | None = None" not in registry:
+            errs.append("[1] registry._reply 签名缺 data: dict | None = None（vh63 reply_id 透传形参未加）")
         else:
-            print("[1] OK  registry._reply 恒 data=None（execute announce 无 stats，B22 调 persist_agent_reply(...None, task_id)）")
+            print("[1] OK  registry._reply 签名含 data: dict | None = None（vh63 透传 reply_id，非 stats）")
+        # 调 persist_agent_reply(..., data, task_id)（data 是变量，第 5 参 task_id 透传）
+        if not re.search(r"persist_agent_reply\([^)]*,\s*data\s*,\s*task_id\s*\)", reply_body, re.S):
+            errs.append("[1] registry._reply 未调 persist_agent_reply(..., data, task_id)（data 透传 + task_id 透传断）")
+        else:
+            print("[1] OK  registry._reply → persist_agent_reply(..., data, task_id)（data 透传 + task_id 透传）")
         if "已知限制" not in reply_body or "保守不改" not in reply_body:
             errs.append("[1] _reply docstring 未标注「已知限制/保守不改」（A6 评估结论未锁）")
         else:

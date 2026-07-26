@@ -39,16 +39,31 @@ const { Text } = Typography
  * 可渲染成聊天气泡的 BusEvent/Message type 白名单。
  *
  * 为什么需要白名单：WS 事件流把所有 content truthy 的事件都灌进 logs，但只有
- * 「消息语义」的事件（agent_reply 智能体回复 / user_input 用户消息 / task_log
- * 任务日志 / slash_card slash 命令卡片）才该出现在聊天气泡流里。其余是 trace
- * 事件——coordinator_think 协调者思考、task_token 流式 token、task_think 工作思考、
- * task_tool 工具调用、agent_status 状态迁移、coordinator_plan 计划——它们有自己的
- * 展示区（LeaderPanel 思考链 / 流式气泡 / 气泡内折叠块 / 计划卡片），不该作为独立
- * 气泡混进消息气泡流。
+ * 「消息语义」的事件（agent_reply 智能体回复 / user_input 用户消息 / slash_card
+ * slash 命令卡片）才该出现在聊天气泡流里。其余是 trace 事件——task_log 任务日志 /
+ * coordinator_think 协调者思考 / task_token 流式 token / task_think 工作思考 /
+ * task_tool 工具调用 / agent_status 状态迁移 / coordinator_plan 计划——它们有自己的
+ * 展示区（LogPanel 任务日志 / LeaderPanel 思考链 / 流式气泡 / 气泡内折叠块 / 计划卡片），
+ * 不该作为独立气泡混进消息气泡流。
  *
  * 特别是 coordinator_think：它携带协调者完整回复文本，若也桥接成气泡，会与随后
  * node_chat 持久化的 agent_reply 消息（id 不同，去重命中不了）同时渲染 → 「协调者
  * 回复两次」缺陷。白名单从源头排除这类重复。
+ *
+ * task_log 不在白名单（vh64 chat-bubble redundancy fix）：
+ *   - registry._publish_log 发的执行 bookkeeping 行（▶ 开始执行任务 / 📦 产物已记录 /
+ *     ⏹ 任务已取消 / ⏱ 任务超时降级 / ❌ 找不到智能体定义）和 agent_loop on_log 的
+ *     ReAct loop 标记（[开始] 智能体 ... / [停止] / [错误] / [完成]）是执行过程 trace，
+ *     与「该 turn 的最终答案」不重复——它们已在 LogPanel（按 taskId 过滤）+ WorkerTrace
+ *     显示，不该再独立成气泡（用户原话：单聊 execute turn 一个气泡全收，不要 6 个噪音气泡）。
+ *   - 收尾 announce（任务完成🎉 / 执行出错了 / ⏹ 任务已停止 / ⏱ 超时）仍走
+ *     ``persist_agent_reply``（agent_reply 类型），不受 task_log 出白名单影响——
+ *     成功路径的「任务完成 🎉」收尾仍是一个 agent_reply 气泡，承载该 turn 的最终答案。
+ *   - 群聊无回归：群聊 execute 路径同样的 task_log 行原本就只进 LogPanel/WorkerTrace
+ *     （GroupPage 不读 chatMessages 桥接 effect），单聊只是对齐群聊行为。
+ *   - 群聊 task_complete 收尾事件（events 流 kind='complete'/'failed'）驱动 finalizedBubbles
+ *     定稿气泡退场，与 task_log 是否成气泡无关——退场判定按 task_id 精确匹配
+ *     （repliedTaskIds.has(e.taskId)），task_log 不参与。
  *
  * task_think 不在白名单（非独立气泡）：worker 在 ReAct 循环里流出的中间推理
  * （on_chat_model_end 的 think phase，registry.on_log → emit_task_think，data
@@ -62,7 +77,6 @@ const { Text } = Typography
 const CHAT_MESSAGE_TYPES = new Set([
   'agent_reply',
   'user_input',
-  'task_log',
   'slash_card',
 ])
 
@@ -581,21 +595,17 @@ export default function ChatPanel({
   // 由随后落地的持久化 agent_reply 接管（同 worker streaming→finalized 模式）。
   // reasoning 取 coordReasoning[reply_id]——推理模型在可见 content 前流出的内部思维链，
   // 传给 ChatMessageBubble 渲染默认折叠的「思考过程」区，用户可自行展开/收起。
-  const coordinatorStreamingBubbles = chatGroupId
-    ? Object.entries(coordStreaming).map(([replyId, entry]) => ({
-        replyId,
-        content: entry.content,
-        senderId: entry.senderId || group?.coordinator_id || 'coordinator',
-        reasoning: coordReasoning[replyId] || '',
-        stats: coordStats[replyId],
-      }))
-    : []
-
+  // vh63：execute ReAct 的工具调用 + 中间思考也按 reply_id 归并到同一气泡
+  // （后端 _run_worker_task on_log 用 turn_reply_id=brain reply_id 作 task_id 槽），
+  // 故这里取 toolEventsByTask[replyId]/thinkEventsByTask[replyId] 挂到气泡上——
+  // 一个 turn 一个气泡：思考过程 + 执行步骤 + 最终答案全收。
   // ST-03：task_tool 事件接入聊天气泡——按 task 聚合工具摘要行。
   // events 是全局 TraceEvent 流（useBusEvent cap 500），按 taskId 分组 kind==='tool'
   // 事件；流式气泡按其 current_task_id 取对应工具行，渲染在气泡顶部（ChatMessageBubble
   // toolEvents）。task 与执行 worker 1:1，按 taskId 过滤即该 agent 当前任务的全部工具调用。
   // useMemo 稳住引用：task_tool 远少于 task_token，但分组仍 memo 避免每帧重算波及子组件。
+  // vh63：声明顺序在 coordinatorStreamingBubbles 之前——后者按 reply_id 取本表挂 ReAct 工具行
+  // 到单聊一个 turn 一个气泡，const TDZ 要求先声明后引用（否则 ReferenceError）。
   const toolEventsByTask = useMemo(() => {
     const m: Record<string, TraceEvent[]> = {}
     for (const e of events) {
@@ -621,6 +631,18 @@ export default function ChatPanel({
     }
     return m
   }, [events])
+
+  const coordinatorStreamingBubbles = chatGroupId
+    ? Object.entries(coordStreaming).map(([replyId, entry]) => ({
+        replyId,
+        content: entry.content,
+        senderId: entry.senderId || group?.coordinator_id || 'coordinator',
+        reasoning: coordReasoning[replyId] || '',
+        stats: coordStats[replyId],
+        toolEvents: toolEventsByTask[replyId] || [],
+        thinkEvents: thinkEventsByTask[replyId] || [],
+      }))
+    : []
 
   // ST-04：task_complete/failed 时定稿流式气泡——用持久化消息替换缓冲。
   // events 中 kind 'complete'/'failed' 标志 task 收尾（携带 result[:500]）。对每个收尾
@@ -1342,11 +1364,22 @@ export default function ChatPanel({
           // worker 单聊/脑回路 task_token→worker agent_id），不再硬编码「群主(协调者)」。
           // coordinatorId 气泡（id===group.coordinator_id 或 fallback 'coordinator'）显「群主(协调者)」，
           // 其他 id 走 SenderName 查 agents 取 agent 名——worker 推理流式由此冠到正确 worker 头像下。
+          //
+          // 单聊例外（Path C bug）：单聊 ConversationEntity 的 coordinator_id 镜像 agent_id
+          // （即唯一 agent 自兼协调者），若仍按「senderId===coordinator_id → 群主(协调者)」判，
+          // 该 agent 的脑回路/execute 流式会被误冠成「群主(协调者)」紫色头像，与同 agent 的
+          // task_token/log 流（显本名）拆成两个气泡。单聊里只有一个 agent，不存在「协调者 vs
+          // 成员」的区分——一律按 senderId 查 agents 取本名。Conversation 有 agent_id 字段、
+          // Group 没有，据此区分单聊/群聊。
           const senderId = b.senderId
-          const senderName =
-            senderId === (group?.coordinator_id ?? 'coordinator') || senderId === 'coordinator'
-              ? '群主(协调者)'
-              : (agents.find((a) => a.id === senderId)?.name ?? senderId.slice(0, 8) + '...')
+          const isSingleChat = !!(group && 'agent_id' in group)
+          const isCoordinatorBubble =
+            !isSingleChat &&
+            (senderId === (group?.coordinator_id ?? 'coordinator') ||
+              senderId === 'coordinator')
+          const senderName = isCoordinatorBubble
+            ? '群主(协调者)'
+            : (agents.find((a) => a.id === senderId)?.name ?? senderId.slice(0, 8) + '...')
           return (
             <ChatMessageBubble
               key={`coord-streaming-${b.replyId}`}
@@ -1371,6 +1404,8 @@ export default function ChatPanel({
                   {` · ${phaseLabel}`}
                 </>
               }
+              toolEvents={b.toolEvents}
+              thinkEvents={b.thinkEvents}
             />
           )
         })}

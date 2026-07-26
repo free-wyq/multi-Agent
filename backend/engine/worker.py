@@ -369,7 +369,13 @@ async def node_brain_decide(state: WorkerState) -> dict:
             "reasoning": "llm_error",
         }
         stats = None
-    return {"decision": decision, "_stream_stats": stats}
+    # reply_id 透传到 state：node_execute 接住后塞进 push_task 的 data，
+    # execute 路径（_run_worker_task）取出作 ReAct 流式 token/tool/think 事件归并 key
+    # ——brain 与 execute 同 key，前端一个气泡全收（vh63 单聊一个 turn 一个气泡）。
+    # 异常路径 reply_id 仍由 _stream_brain_decision 返回（七元组首位），brain failed
+    # 走 chat 兜底不会进 execute，但 reply_id 照传（chat 路径落盘到 agent_reply.data
+    # 仍用于退场流式气泡），故不在此兜底空值。
+    return {"decision": decision, "_stream_stats": stats, "reply_id": reply_id}
 
 
 async def node_chat(state: WorkerState) -> dict:
@@ -378,19 +384,29 @@ async def node_chat(state: WorkerState) -> dict:
 
 
 async def node_execute(state: WorkerState) -> dict:
-    """Reply with a preview and push a task to self (Rust handle_notify 432-440).
+    """Push a task to self to run the agentic loop (Rust handle_notify 432-440).
 
     The pushed task wakes the engine's _handle_task -> _run_worker_task, which
-    in M3 calls the mock CLI executor.
+    runs ``run_agent_loop`` (create_react_agent ReAct loop).
 
-    回复是模板化 announce（``收到，我来 {preview}...``），非 brain 流式文本，
-    token 数不匹配 → 不带 stats（与协调者 dispatch announce 排除同理）。真正的
-    execute 执行统计在 _run_worker_task / create_react_agent 那条线（task_log）。
+    vh63：去掉「收到，我来 {preview}...」模板预告——用户拍一个 turn 一个气泡，
+    预告气泡是独立噪音。execute 入口标记由 ``_handle_task`` 的 ``_publish_log``
+    发的 ``▶ [name] 开始执行任务`` 承担（registry.py:218），不再单独发预告回复。
+
+    reply_id 透传：node_brain_decide 生成的 reply_id（本 turn 流式归并 key）塞进
+    ``push_task`` 的 data，execute 路径（``_run_worker_task``）取出作 ReAct 流式
+    token/tool/think 事件的归并 key——brain 与 execute 同 key，前端一个气泡全收
+    （思考过程 + 执行步骤 + 最终答案）。异常路径 reply_id 为空时兜底新鲜 uuid。
     """
     content = state["decision"]["content"]
-    preview = content[:30]
-    await _unified_reply(state["group_id"], state["agent_id"], f"收到，我来 {preview}...")
-    await push_task(state["group_id"], state["agent_id"], state["agent_id"], content, None)
+    reply_id = state.get("reply_id") or uuid.uuid4().hex
+    await push_task(
+        state["group_id"],
+        state["agent_id"],
+        state["agent_id"],
+        content,
+        {"reply_id": reply_id},
+    )
     return {}
 
 

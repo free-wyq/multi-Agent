@@ -140,7 +140,11 @@ def assert_contract() -> list[str]:
 
     # ── B. 后端 registry _reply 接 task_id 透传 ──
     # [3] _reply 签名含 task_id: str | None = None
-    if not re.search(r"def _reply\(\s*self,\s*content:\s*str,\s*task_id:\s*str\s*\|\s*None\s*=\s*None\s*\)", registry):
+    # vh64：_reply 签名加了 data: dict | None = None（vh63 透传 reply_id 用），
+    # 签名形如 ``_reply(self, content, task_id=None, data=None)``（task_id 在 data 前）。
+    # 接受两种顺序：原 ``_reply(self, content, task_id=None)`` 与 vh63 加 data 后的
+    # ``_reply(self, content, task_id=None, data=None)``。核心契约「task_id 形参存在」不变。
+    if not re.search(r"def _reply\(\s*self,\s*content:\s*str,\s*task_id:\s*str\s*\|\s*None\s*=\s*None", registry):
         errs.append("[B3] registry _reply 签名缺 task_id: str | None = None（B22 形参未加）")
     else:
         print("[B3] OK  registry _reply 签名含 task_id: str | None = None（B22 形参）")
@@ -148,17 +152,24 @@ def assert_contract() -> list[str]:
     if not r_body:
         errs.append("[setup] registry _reply 函数体未找到")
     else:
-        # [4] 调 persist_agent_reply(..., None, task_id)（data 恒 None 第 4 参，task_id 第 5 参）
-        if not re.search(r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_body, re.S):
-            errs.append("[B4] registry _reply 未调 persist_agent_reply(..., None, task_id)（data 恒 None + B22 task_id 透传）")
+        # [4] 调 persist_agent_reply(..., data, task_id)（第 4 参 data，task_id 第 5 参透传）
+        # vh64：data 不再恒 None——vh63 成功路径透传 {"reply_id": ...} 让流式气泡退场。
+        # 失败/取消/超时路径仍传 None（无 reply_id 要清流式）。核心契约「task_id 透传」不变。
+        # 接受两种：原 persist_agent_reply(..., None, task_id)（data 恒 None）或 vh63 后
+        # persist_agent_reply(..., data, task_id)（data 是变量）。断言第 5 参是 task_id 即可。
+        if not re.search(r"persist_agent_reply\([^)]*,\s*(?:None|data)\s*,\s*task_id\s*\)", r_body, re.S):
+            errs.append("[B4] registry _reply 未调 persist_agent_reply(..., data/None, task_id)（task_id 透传断）")
         else:
-            print("[B4] OK  registry _reply → persist_agent_reply(..., None, task_id)（data 恒 None + B22 透传 task_id）")
+            print("[B4] OK  registry _reply → persist_agent_reply(..., data/None, task_id)（task_id 透传）")
     # [5] 3 个调用方透传 task_id
     # _run_worker_task 成功/失败收尾
-    if not re.search(r'self\._reply\(\s*reply\s*,\s*task_id\s*\)', registry):
-        errs.append("[B5a] _run_worker_task 未调 self._reply(reply, task_id)（成功/失败收尾未透传 task_id）")
+    # vh64：成功路径调 self._reply(reply, task_id, data=reply_data)（多了 data 参数），
+    # 失败路径仍 self._reply(reply, task_id)（无 data）。两种都接受，核心契约「task_id
+    # 透传」不变。正则放宽：第二参 task_id 后允许可选 data=...。
+    if not re.search(r'self\._reply\(\s*reply\s*,\s*task_id(?:\s*,\s*data=[^)]*)?\s*\)', registry):
+        errs.append("[B5a] _run_worker_task 未调 self._reply(reply, task_id[, data=...])（成功/失败收尾未透传 task_id）")
     else:
-        print("[B5a] OK  _run_worker_task → self._reply(reply, task_id)（成功/失败收尾透传 task_id）")
+        print("[B5a] OK  _run_worker_task → self._reply(reply, task_id[, data=...])（成功/失败收尾透传 task_id）")
     # _on_task_cancelled 取消收尾
     if not re.search(r'self\._reply\(\s*"⏹ 任务已停止"\s*,\s*task_id\s*\)', registry):
         errs.append('[B5b] _on_task_cancelled 未调 self._reply("⏹ 任务已停止", task_id)（取消收尾未透传 task_id）')
@@ -216,11 +227,15 @@ def assert_contract() -> list[str]:
         print("[D10] OK  persist_agent_reply 默认 task_id=None（保全 graph _unified_reply 不传 task_id 的调用方）")
     else:
         errs.append("[D10] persist_agent_reply 缺默认 task_id=None（既有调用方会断）")
-    # [11] registry _reply 仍恒 data=None（第 4 参 None）
-    if r_body and re.search(r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_body, re.S):
-        print("[D11] OK  registry _reply 仍恒 data=None（第 4 参 None，execute announce 无 stats 契约不破）")
+    # [11] registry _reply 透传 data（vh63 后 data 不再恒 None，但 task_id 仍透传）
+    # vh64：原 D11 「_reply 仍恒 data=None」契约在 vh63 已破——成功路径透传
+    # {"reply_id": ...} 让流式气泡退场。新契约：_reply 调 persist_agent_reply 的第 5 参
+    # 是 task_id（透传），第 4 参 data 是变量（成功路径非 None，失败/取消/超时 None）。
+    # 核心契约「task_id 透传」不变，「data 恒 None」契约作废（vh63 已破，是有意的）。
+    if r_body and re.search(r"persist_agent_reply\([^)]*,\s*(?:None|data)\s*,\s*task_id\s*\)", r_body, re.S):
+        print("[D11] OK  registry _reply 调 persist_agent_reply(..., data/None, task_id)（task_id 透传；data 在 vh63 后可非 None）")
     else:
-        errs.append("[D11] registry _reply data 不再恒 None（execute announce 无 stats 契约破）")
+        errs.append("[D11] registry _reply 未调 persist_agent_reply(..., data/None, task_id)（task_id 透传断）")
     # [12] finalizedBubbles 循环骨架不动（kind complete/failed + taskId 去重 + streaming 未清）
     if fb_body:
         fb_nc2 = _strip_ts_comments(fb_body) if not fb_body else fb_body
@@ -239,28 +254,34 @@ def assert_contract() -> list[str]:
         errs.append("[E13] vh7 [A2] 未改为 \"task_id\": task_id 断言（B22 透传未同步测）")
     else:
         print('[E13] OK  vh7 [A2] 改为 "task_id": task_id 断言（守卫下沉同步）')
-    # [14] vh7 [D11] 改为 persist_agent_reply(..., None, task_id)
-    if "None,\\s*task_id" not in vh7 and "None, task_id" not in vh7:
-        errs.append("[E14] vh7 [D11] 未改为 persist_agent_reply(..., None, task_id) 断言（B22 接线未同步测）")
+    # [14] vh7 [D11] 改为 persist_agent_reply(..., data/None, task_id)
+    # vh64：原断言 ``persist_agent_reply(..., None, task_id)`` 在 vh63 已破（data 是变量，
+    # 成功路径非 None）。接受两种：原 ``(..., None, task_id)`` 或 vh63 后 ``(..., data, task_id)``。
+    if "None,\\s*task_id" not in vh7 and "None, task_id" not in vh7 and "data, task_id" not in vh7 and "data,\\s*task_id" not in vh7:
+        errs.append("[E14] vh7 [D11] 未改为 persist_agent_reply(..., data/None, task_id) 断言（B22 接线未同步测）")
     else:
-        print("[E14] OK  vh7 [D11] 改为 persist_agent_reply(..., None, task_id) 断言（守卫下沉同步）")
-    # [15] va6 [1] 改为 persist_agent_reply(..., None, task_id)
+        print("[E14] OK  vh7 [D11] 改为 persist_agent_reply(..., data/None, task_id) 断言（守卫下沉同步）")
+    # [15] va6 [1] 改为 persist_agent_reply(..., data/None, task_id)
+    # vh64：原断言 ``persist_agent_reply(..., None, task_id)`` 在 vh63 已破（data 是变量）。
+    # 接受两种：原 ``(..., None, task_id)`` 或 vh63 后 ``(..., data, task_id)``。
     va6 = (REPO / "backend" / "tests" / "test_va6_execute_no_stats_known_limit.py").read_text(encoding="utf-8")
-    if "None,\\s*task_id" not in va6 and "None, task_id" not in va6:
-        errs.append("[E15] va6 [1] 未改为 persist_agent_reply(..., None, task_id) 断言（B22 接线未同步测）")
+    if "None,\\s*task_id" not in va6 and "None, task_id" not in va6 and "data, task_id" not in va6 and "data,\\s*task_id" not in va6:
+        errs.append("[E15] va6 [1] 未改为 persist_agent_reply(..., data/None, task_id) 断言（B22 接线未同步测）")
     else:
-        print("[E15] OK  va6 [1] 改为 persist_agent_reply(..., None, task_id) 断言（守卫下沉同步）")
+        print("[E15] OK  va6 [1] 改为 persist_agent_reply(..., data/None, task_id) 断言（守卫下沉同步）")
     # [16] vh11 [D11] 改为 "task_id": task_id
     vh11 = (REPO / "backend" / "tests" / "test_vh11_announce_no_stats.py").read_text(encoding="utf-8")
     if '"task_id": task_id' not in vh11:
         errs.append('[E16] vh11 [D11] 未改为 "task_id": task_id 断言（B22 透传未同步测）')
     else:
         print('[E16] OK  vh11 [D11] 改为 "task_id": task_id 断言（守卫下沉同步）')
-    # [17] vh11 [E15] 改为 persist_agent_reply(..., None, task_id)
-    if "None,\\s*task_id" not in vh11 and "None, task_id" not in vh11:
-        errs.append("[E17] vh11 [E15] 未改为 persist_agent_reply(..., None, task_id) 断言（B22 接线未同步测）")
+    # [17] vh11 [E15] 改为 persist_agent_reply(..., data/None, task_id)
+    # vh64：原断言 ``persist_agent_reply(..., None, task_id)`` 在 vh63 已破（data 是变量）。
+    # 接受两种：原 ``(..., None, task_id)`` 或 vh63 后 ``(..., data, task_id)``。
+    if "None,\\s*task_id" not in vh11 and "None, task_id" not in vh11 and "data, task_id" not in vh11 and "data,\\s*task_id" not in vh11:
+        errs.append("[E17] vh11 [E15] 未改为 persist_agent_reply(..., data/None, task_id) 断言（B22 接线未同步测）")
     else:
-        print("[E17] OK  vh11 [E15] 改为 persist_agent_reply(..., None, task_id) 断言（守卫下沉同步）")
+        print("[E17] OK  vh11 [E15] 改为 persist_agent_reply(..., data/None, task_id) 断言（守卫下沉同步）")
 
     return errs
 

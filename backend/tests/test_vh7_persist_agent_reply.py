@@ -195,17 +195,18 @@ def assert_contract() -> list[str]:
     if not r_reply:
         errs.append("[D11] registry _reply 函数体未找到")
     else:
-        # [11] 调 persist_agent_reply(..., None, task_id)（恒 data=None，B22 透传 task_id）
-        # B22：_reply 加 task_id 参数透传到 persist_agent_reply 第 5 参。data 仍恒 None
-        # （第 4 参，execute announce 不带 stats）。断言：persist_agent_reply 调用含 None
-        # （data=None）+ task_id 参数名（B22 接线）。
-        delegates_none = "persist_agent_reply" in r_reply and re.search(
-            r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_reply, re.S
+        # [11] 调 persist_agent_reply(..., data, task_id)（vh63 后 data 可非 None，B22 透传 task_id）
+        # vh64：原 D11 「恒 data=None」契约在 vh63 已破——成功路径透传 {"reply_id": ...}
+        # 让流式气泡退场。新契约：persist_agent_reply 调用第 4 参 data 是变量（成功路径
+        # 非 None，失败/取消/超时 None），第 5 参 task_id 透传。核心契约「task_id 透传」
+        # 不变，「data 恒 None」作废（vh63 已有意破，是 reply_id 透传，非 stats）。
+        delegates = "persist_agent_reply" in r_reply and re.search(
+            r"persist_agent_reply\([^)]*,\s*(?:None|data)\s*,\s*task_id\s*\)", r_reply, re.S
         ) is not None
-        if not delegates_none:
-            errs.append("[D11] registry _reply 未调 persist_agent_reply(..., None, task_id)（恒 data=None + B22 透传 task_id）")
+        if not delegates:
+            errs.append("[D11] registry _reply 未调 persist_agent_reply(..., data/None, task_id)（task_id 透传断）")
         else:
-            print("[D11] OK  registry _reply → persist_agent_reply(..., None, task_id)（恒 data=None + B22 透传 task_id）")
+            print("[D11] OK  registry _reply → persist_agent_reply(..., data/None, task_id)（task_id 透传；data 在 vh63 后可非 None）")
         # [12] 不再内联 crud.create_message agent_reply dict
         if '"type": "agent_reply"' in r_reply:
             errs.append("[D12] registry _reply 仍内联 agent_reply dict（B10 未去重）")

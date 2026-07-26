@@ -100,7 +100,15 @@ def assert_contract() -> list[str]:
 
     # ── C. 渲染层用 senderId（非硬编码）──────────────────────────
     # C5 coordinatorStreamingBubbles map 条目含 senderId
-    bubbles_block = _extract_block(panel, "coordinatorStreamingBubbles")
+    # vh63：toolEventsByTask/thinkEventsByTask 声明挪到 coordinatorStreamingBubbles 之前
+    # （后者引用前者挂 ReAct 工具行到流式气泡），ChatPanel.tsx 注释里出现了
+    # 「coordinatorStreamingBubbles」字串，_extract_block 取首现位置会落在注释而非声明。
+    # 改用正则找 ``const coordinatorStreamingBubbles =`` 声明，再取其后 1200 字符作 block，
+    # 避开注释干扰。核心契约「map 条目含 senderId」不变。
+    bubbles_block = ""
+    m_b = re.search(r"const\s+coordinatorStreamingBubbles\s*=", panel)
+    if m_b:
+        bubbles_block = panel[m_b.start() : m_b.start() + 1200]
     if "senderId" not in bubbles_block:
         errs.append("[C5] coordinatorStreamingBubbles map 条目未含 senderId（仅 content）")
     else:
@@ -126,11 +134,20 @@ def assert_contract() -> list[str]:
         print("[C7] OK  ChatAvatar id={senderId}（来自 b.senderId，非硬编码 coordinator id）")
 
     # C8 senderName 解析用 b.senderId（查 agents，coordinator_id 回退「群主(协调者)」）
-    has_name_from_sender = re.search(r"senderName\s*=\s*senderId\s*===", render_block) is not None
-    if not (has_name_from_sender and "agents.find" in render_block):
+    # vh63：单聊 ConversationEntity 的 coordinator_id 镜像 agent_id，原
+    # ``senderName = senderId === coordinator_id ? '群主(协调者)' : agents.find(...)``
+    # 在单聊会把 agent 自身的流式冠成「群主(协调者)」紫色头像（与同 agent 的 task_token
+    # 流拆成两个气泡）。改用 isCoordinatorBubble（!isSingleChat && senderId matches）
+    # 判协调者气泡，单聊一律走 agents.find 取本名。核心契约「senderName 用 b.senderId
+    # 查 agents」不变，只是判定更精细（加单聊例外）。接受两种形态：原直等式 或 vh63 后
+    # isCoordinatorBubble 三元。
+    has_name_from_sender_v1 = re.search(r"senderName\s*=\s*senderId\s*===", render_block) is not None
+    has_name_from_sender_v2 = re.search(r"senderName\s*=\s*isCoordinatorBubble", render_block) is not None
+    has_agents_find = "agents.find" in render_block
+    if not ((has_name_from_sender_v1 or has_name_from_sender_v2) and has_agents_find):
         errs.append("[C8] senderName 解析未用 b.senderId（仍硬编码「群主(协调者)」）")
     else:
-        print("[C8] OK  senderName 用 b.senderId 查 agents（coordinator_id 回退「群主(协调者)」）")
+        print("[C8] OK  senderName 用 b.senderId 查 agents（coordinator_id 回退「群主(协调者)」；vh63 加单聊例外）")
 
     # ── D. 不回归（保 vb3 契约）──────────────────────────────────
     # D9 task_token 仍按 task_ 前缀分流

@@ -153,10 +153,15 @@ def assert_contract() -> list[str]:
             print("[5] OK  LLM 异常 → stats = None（chat 兜底回复无 stats，不渲染假状态行）")
 
     # ── [6] return {"decision": decision, "_stream_stats": stats} ──
-    if 'return {"decision": decision, "_stream_stats": stats}' not in worker:
-        errs.append('[6] node_brain_decide 未 return {"decision": decision, "_stream_stats": stats}')
+    # vh63：node_brain_decide return 加了 "reply_id": reply_id（vh63 单聊一个 turn 一个气泡，
+    # brain reply_id 透传到 execute 路径作 ReAct 流式归并 key）。原契约「return 含
+    # decision + _stream_stats 两 key」不变，新增 reply_id 是加性扩展。接受两种：
+    # 原 ``return {"decision": decision, "_stream_stats": stats}`` 或 vh63 后
+    # ``return {"decision": decision, "_stream_stats": stats, "reply_id": reply_id}``。
+    if 'return {"decision": decision, "_stream_stats": stats}' not in worker and 'return {"decision": decision, "_stream_stats": stats, "reply_id": reply_id}' not in worker:
+        errs.append('[6] node_brain_decide 未 return {"decision": decision, "_stream_stats": stats[, "reply_id": reply_id]}（stats 透传断）')
     else:
-        print('[6] OK  return {"decision": decision, "_stream_stats": stats} —— stats 透传图状态')
+        print('[6] OK  return {"decision": decision, "_stream_stats": stats[, "reply_id": reply_id]} —— stats 透传图状态（vh63 加 reply_id）')
 
     # ── [7] route_brain: decision.action 默认 chat ──
     m_route = re.search(

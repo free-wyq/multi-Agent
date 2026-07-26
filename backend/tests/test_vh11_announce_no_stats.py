@@ -242,16 +242,19 @@ def assert_contract() -> list[str]:
         errs.append("[E14] node_llm_decide chat/ask/continue 盖 _stream_stats 契约破（A8/vg2 回归）")
     else:
         print("[E14] OK  node_llm_decide 仍只在 chat/ask/continue 盖 _stream_stats（dispatch 不盖，A8/vg2 不破）")
-    # [15] registry._reply 仍 persist_agent_reply(..., None, task_id)（execute announce 无 stats）
-    # B22：_reply 调用形如 persist_agent_reply(self.group_id, self.agent_id, content, None, task_id)
-    # 第 4 参 None = data 恒 None（execute announce 无 stats 不变）；第 5 参 task_id = B22 透传。
-    # 断言 None 在 persist_agent_reply 调用里（data=None，核心契约「announce 无 stats」不变）。
+    # [15] registry._reply 调 persist_agent_reply(..., data, task_id)（vh63 后 data 可非 None）
+    # vh64：原 E15 「_reply 仍 persist_agent_reply(..., None, task_id)（data 恒 None）」契约
+    # 在 vh63 已破——成功路径透传 {"reply_id": ...} 让流式气泡退场。新契约：_reply 调
+    # persist_agent_reply 的第 5 参是 task_id（透传），第 4 参 data 是变量（成功路径
+    # 非 None，失败/取消/超时 None）。核心契约「task_id 透传」不变，「data 恒 None」
+    # 契约作废（vh63 已有意破，是 reply_id 透传，非 stats——execute announce 仍无
+    # model/elapsed_ms/tokens stats，A6 评估结论不变）。
     reg = (REPO / "backend" / "engine" / "registry.py").read_text(encoding="utf-8")
     r_reply = _fn_body(reg, "_reply", indent_opts=("    ",))
-    if not r_reply or not re.search(r"persist_agent_reply\([^)]*,\s*None\s*,\s*task_id\s*\)", r_reply, re.S):
-        errs.append("[E15] registry._reply 未 persist_agent_reply(..., None, task_id)（execute announce 无 stats + B22 task_id 链断）")
+    if not r_reply or not re.search(r"persist_agent_reply\([^)]*,\s*(?:None|data)\s*,\s*task_id\s*\)", r_reply, re.S):
+        errs.append("[E15] registry._reply 未调 persist_agent_reply(..., data/None, task_id)（task_id 透传断）")
     else:
-        print("[E15] OK  registry._reply 仍 persist_agent_reply(..., None, task_id)（data 恒 None 无 stats + B22 透传 task_id）")
+        print("[E15] OK  registry._reply → persist_agent_reply(..., data/None, task_id)（task_id 透传；data 在 vh63 后可非 None）")
 
     # ── F. 无回归（dispatch_ready_steps 调用链不破）──
     # [16] _dispatch_one 仍 -> None + push_task + emit_task_dispatched

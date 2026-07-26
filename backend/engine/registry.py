@@ -339,13 +339,20 @@ class AgentEngine:
         agent_id = self.agent_id
         task_id = task["id"]
         task_content = task.get("content") or ""
+        # vh63：execute 复用 brain 的 reply_id 作整个 turn 的流式归并 key。
+        # node_execute 把 brain 生成的 reply_id 塞进 push_task 的 data 透传过来，
+        # 这里取出作 ReAct 流式 token/tool/think 事件的归并 key——brain 与 execute
+        # 同 key，前端 coordStreaming[reply_id] + toolEventsByTask[reply_id] +
+        # thinkEventsByTask[reply_id] 一个气泡全收。群聊派工路径无 reply_id（data
+        # 是 dispatch_task_id），兜底 task_id（tq_xxx）保持原行为。
+        turn_reply_id = (task.get("data") or {}).get("reply_id") or task_id
 
         async def on_log(kind: str, content: str, data: dict | None = None) -> None:
             if kind in ("tool_start", "tool_end"):
                 phase = "start" if kind == "tool_start" else "end"
                 await emit_task_tool(
                     group_id,
-                    task_id,
+                    turn_reply_id,
                     agent_id,
                     phase,
                     (data or {}).get("name", ""),
@@ -356,7 +363,7 @@ class AgentEngine:
                 # PL-08: per-token streaming delta → task_token WS event
                 await emit_task_token(
                     group_id,
-                    task_id,
+                    turn_reply_id,
                     agent_id,
                     (data or {}).get("phase", "streaming"),
                     content,
@@ -364,19 +371,20 @@ class AgentEngine:
             elif kind in ("think", "answer"):
                 await emit_task_think(
                     group_id,
-                    task_id,
+                    turn_reply_id,
                     agent_id,
                     "thinking" if kind == "think" else "final",
                     content,
                 )
             else:
-                await emit_task_log(group_id, task_id, agent_id, content)
+                await emit_task_log(group_id, turn_reply_id, agent_id, content)
 
         result = await execute_agent_task(
             group_id, agent_dict, task_content, task_id, on_log
         )
 
         snippet = (result.get("output") or "")[:200]
+        full_output = result.get("output") or ""
         success = bool(result.get("success"))
         exit_code = result.get("exit_code")
 
@@ -435,15 +443,28 @@ class AgentEngine:
         )
 
         if success:
+            # vh64 chat-bubble redundancy fix：成功路径 announce 用 ReAct 全文，
+            # 不再截断到 200 字符。原 ``任务完成 🎉\n{snippet[:200]}`` 把 ReAct
+            # 最终答案斩到 200 字符，与流式气泡的全文不同源——流式期用户看见全文、
+            # 落地后变 200 字截断 bubble，是「落地变短」缺陷根因（user transcript
+            # message 4 的 truncated 内容）。改用 full_output（result.output[:2000]
+            # 已在 run_agent_loop 限长，安全）作 announce 内容，让 announce 持久化
+            # 回复 = 流式期展示的最终答案，一个气泡收。
+            # 「任务完成 🎉」前缀保留——它是收尾语义标识（区别于 chat 路径的纯回复），
+            # 前缀下接全文即该 turn 的最终答案气泡。空 output（异常兜底）仍走「任务完成 🎉」单行。
             reply = (
                 "任务完成 🎉"
-                if not snippet
-                else f"任务完成 🎉\n{snippet}"
+                if not full_output
+                else f"任务完成 🎉\n{full_output}"
             )
         else:
             reply = f"执行出错了: {result.get('output') or ''}"
         # B22：透传 task_id，让前端 finalizedBubbles 按 task_id 精确退场（非 sender+时间戳）。
-        await self._reply(reply, task_id)
+        # vh63：成功路径透传 reply_id 到 agent_reply.data，让前端据持久化回复落地
+        # 清掉 coordStreaming[reply_id] 流式气泡（brain+execute 合并的单一气泡退场）。
+        # 失败路径不透传（reply_id 仍可能为 task_id 兜底，失败气泡不强退流式）。
+        reply_data = {"reply_id": turn_reply_id} if success and turn_reply_id != task_id else None
+        await self._reply(reply, task_id, data=reply_data)
 
         # execute report-back → the per-group GroupRuntime (task-19④).
         #
@@ -833,7 +854,12 @@ class AgentEngine:
 
     # ── unified reply / publish (Rust engine.reply / publish_log) ────
 
-    async def _reply(self, content: str, task_id: str | None = None) -> None:
+    async def _reply(
+        self,
+        content: str,
+        task_id: str | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> None:
         """Persist an agent_reply message + emit + mention route (Rust engine.reply).
 
         Persistence + emit delegated to ``persist_agent_reply`` (engine.reply, B10)
@@ -872,7 +898,7 @@ class AgentEngine:
         execute 路径只服务真工程任务（写代码/改配置/运行命令/调工具），其 announce
         不带 stats 是设计取舍而非 bug。若未来要修，见上述三步改造路径。
         """
-        await persist_agent_reply(self.group_id, self.agent_id, content, None, task_id)
+        await persist_agent_reply(self.group_id, self.agent_id, content, data, task_id)
         # 防循环用群级共享 dict（见 mention._get_recent_routes）——原 self._recent_routes
         # 是 per-engine，反向清键打不中对方 dict 导致接龙 4 轮断。传 None 让 route_mentions
         # 自动取群级共享视图。
