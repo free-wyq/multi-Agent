@@ -350,3 +350,32 @@
   max-height: 200px;
   overflow-y: auto;
 }
+
+/* ── 需求2-前端 气泡内操作栏（footer 槽位：复制 + 重新生成）──
+ * [需求2] mockup 第 3 层：气泡内底部交互按钮组。复用 BubbleCopyButton（hover 浮窗同款复制）
+ * + 「重新生成」AntD Button（type=text + ReloadOutlined）。与 hover 浮动操作组
+ * （.bubble-action-group，hover 显隐）互补——footer 操作栏常驻可见，给完成态气泡提供
+ * 稳定的「复制 / 重生成」入口（hover 组在触屏 / 鼠标移出后消失，footer 组始终在）。
+ * 视觉与 .chat-artifact-block 对称（同为 footer 内功能区，上分隔线区隔正文）。 */
+.chat-action-bar {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid rgba(0, 0, 0, 0.06);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.chat-bubble--self .chat-action-bar {
+  border-top-color: rgba(255, 255, 255, 0.18);
+}
+
+/* 「重新生成」按钮——与 BubbleCopyButton 同尺寸同 type=text，视觉成组 */
+.chat-action-regenerate.bubble-action-btn,
+.chat-action-regenerate {
+  color: #8c8c8c;
+}
+
+.chat-action-regenerate:hover {
+  color: #1677ff;
+}

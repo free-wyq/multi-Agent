@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Bubble, ThoughtChain } from '@ant-design/x'
 import { Collapse, Tooltip, Button, message, Timeline, Popover, Card, Descriptions, List, Table, Empty } from 'antd'
-import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedListOutlined, ProfileOutlined } from '@ant-design/icons'
+import { ToolOutlined, BulbOutlined, DownloadOutlined, TableOutlined, UnorderedListOutlined, ProfileOutlined, ReloadOutlined } from '@ant-design/icons'
 import type { TraceEvent } from '../services/api'
 import { groupApi } from '../services/api'
 import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
+import BubbleCopyButton from './BubbleCopyButton'
 import './ChatMessageBubble.css'
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -332,6 +333,11 @@ interface ChatMessageBubbleProps {
   /** 气泡右上角的操作按钮组（复制/朗读等）。父组件传 .bubble-action-group 内的按钮，
    *  hover 时显隐。绝对定位锚点由 .chat-bubble-wrap 提供（position:relative）。不传则不渲染。 */
   actionGroup?: React.ReactNode
+  /** 需求2-前端：操作栏「重新生成」回调。父组件（ChatPanel）注入——需后端「按 reply_id 重跑」
+   *  端点（[需求2-后端] 待评估，当前无）支持后才能给出有效回调。未传（undefined）→ 操作栏不渲染
+   *  「重新生成」按钮（仅显示复制），避免点击无响应的空按钮。传则渲染 AntD Button（type=text +
+   *  ReloadOutlined），点击调用。语义：重新触发该气泡对应回复的生成流程。 */
+  onRegenerate?: () => void
 }
 
 /** 单条 task_tool 事件 → 摘要行数据。 */
@@ -409,6 +415,7 @@ export default function ChatMessageBubble({
   renderContent,
   statusLine,
   actionGroup,
+  onRegenerate,
 }: ChatMessageBubbleProps) {
   // 工具调用整组折叠（外层 Collapse「工具调用 (N)」）——展开策略：
   //  · 流式中（isStreaming=true）默认收起（过程信息按需查看，不撑高气泡）；
@@ -888,35 +895,66 @@ export default function ChatMessageBubble({
                scan_workspace_artifacts manifest）经 ChatPanel.finalizedBubbles 提取 → artifactFiles
                prop 传入。每文件一张小卡：按扩展名图标 + 文件名（截断 + tooltip 全 path）+ 大小 +
                下载按钮。位置在正文之下（产物是任务收尾后产出）；失败/取消/超时任务无 artifact（后端不
-               透传），失败气泡自然无下载卡（语义正确——失败不留可用产物）。 */
-            hasArtifacts ? (
-              <div className="chat-artifact-block">
-                {artifactFiles.map((f) => {
-                  const key = f.path || f.name
-                  const isLoading = downloading === key
-                  const disabled = !groupId || (downloading !== null && downloading !== key)
-                  return (
-                    <div key={key} className="chat-artifact-card">
-                      {fileIconFor(f.name, { fontSize: 14, flexShrink: 0 })}
-                      <Tooltip title={f.path || f.name}>
-                        <span className="chat-artifact-name">{f.name}</span>
-                      </Tooltip>
-                      {f.size > 0 && <span className="chat-artifact-size">{humanSize(f.size)}</span>}
-                      <Tooltip title={!groupId ? '未选群组，无法下载' : ''}>
-                        <Button
-                          className="chat-artifact-download"
-                          type="link"
-                          size="small"
-                          icon={<DownloadOutlined />}
-                          loading={isLoading}
-                          disabled={disabled}
-                          onClick={() => handleArtifactDownload(f)}
-                        />
-                      </Tooltip>
-                    </div>
-                  )
-                })}
-              </div>
+               透传），失败气泡自然无下载卡（语义正确——失败不留可用产物）。
+
+               需求2-前端（操作栏）：当 onRegenerate 传入或 content 非空（可复制）时，footer 同时
+               承载操作栏（复制 + 重新生成）。复制复用 BubbleCopyButton（与 ChatPanel hover 操作组
+               同款）；「重新生成」仅当父组件注入 onRegenerate 时渲染（后端 regenerate 端点未就绪前
+               父组件不传，按钮自然不出现——不会留空响应占位）。
+               流式生成中（isStreaming=true）不显示操作栏——内容还在变，复制/重生成都无意义；
+               仅完成态（isStreaming=false）且非用户气泡（isUser=false，用户自己的消息不需重生成）
+               才显示。产物下载卡与操作栏可共存（先产物后操作栏，竖排）。 */
+            hasArtifacts || (!isStreaming && !isUser && (onRegenerate || content)) ? (
+              <>
+                {hasArtifacts && (
+                  <div className="chat-artifact-block">
+                    {artifactFiles.map((f) => {
+                      const key = f.path || f.name
+                      const isLoading = downloading === key
+                      const disabled = !groupId || (downloading !== null && downloading !== key)
+                      return (
+                        <div key={key} className="chat-artifact-card">
+                          {fileIconFor(f.name, { fontSize: 14, flexShrink: 0 })}
+                          <Tooltip title={f.path || f.name}>
+                            <span className="chat-artifact-name">{f.name}</span>
+                          </Tooltip>
+                          {f.size > 0 && <span className="chat-artifact-size">{humanSize(f.size)}</span>}
+                          <Tooltip title={!groupId ? '未选群组，无法下载' : ''}>
+                            <Button
+                              className="chat-artifact-download"
+                              type="link"
+                              size="small"
+                              icon={<DownloadOutlined />}
+                              loading={isLoading}
+                              disabled={disabled}
+                              onClick={() => handleArtifactDownload(f)}
+                            />
+                          </Tooltip>
+                        </div>
+                      )
+                    })}
+                  </div>
+                )}
+                {!isStreaming && !isUser && (onRegenerate || content) && (
+                  <div className="chat-action-bar">
+                    <BubbleCopyButton content={content} />
+                    {/* 「重新生成」：onRegenerate 传入（后端 regenerate 端点就绪后 ChatPanel 注入）→
+                        可点；未传入 → disabled + tooltip 标记「开发中」（regenerate 留 TODO，
+                        [需求2-后端] line 24 待实现「按 reply_id 重跑」端点）。始终渲染按钮本体——
+                        满足「新增重新生成 Button」契约，禁用态明确传达「暂未支持」而非留空占位。 */}
+                    <Tooltip title={onRegenerate ? '重新生成' : '重新生成（开发中）'}>
+                      <Button
+                        type="text"
+                        size="small"
+                        className="chat-action-regenerate"
+                        icon={<ReloadOutlined />}
+                        disabled={!onRegenerate}
+                        onClick={onRegenerate}
+                      />
+                    </Tooltip>
+                  </div>
+                )}
+              </>
             ) : undefined
           }
         />
