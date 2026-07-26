@@ -1502,8 +1502,36 @@ async def node_handle_reply_group(state: GroupState) -> Command:
             break
 
     if matched_idx is None:
-        # no matching dispatched step -> fall back to LLM decision (same as
-        # resident route_after_handle_reply's default → llm_decide).
+        # no matching dispatched step for this task_id. This is the bug 缺陷4 root:
+        # a report-back whose task_id misses the plan (e.g. the LAST step's
+        # report-back arrives after the step was already marked completed by an
+        # earlier turn / a duplicate report / a stale or mismatched task_id) used
+        # to fall through to ``llm_decide`` — a full coordinator LLM re-decision
+        # whose streamed ``content`` lands as a NEW agent_reply bubble on top of
+        # the worker's own announce (the 「同段决策文本二次推送」 symptom). Worse,
+        # on a single-step plan that just finished, llm_decide re-derives a
+        # chat reply duplicating the worker's result.
+        #
+        # 缺陷4 fix (option 1 — straight to summarize_group, deterministic +
+        # stream-safe): if all steps are already completed/failed (the plan is
+        # done), goto ``summarize_group`` directly and skip ``llm_decide``
+        # entirely. This both (a) avoids the redundant streamed LLM bubble and
+        # (b) honors the all-done contract — there is nothing left to decide.
+        # Only when the plan is genuinely incomplete (a real stray report on an
+        # in-flight plan) do we keep the original ``llm_decide`` fallback (the
+        # Leader LLM is the right owner of an unexpected mid-flight report).
+        if plan and all(s.get("status") in ("completed", "failed") for s in plan):
+            return _Command(
+                goto="summarize_group",
+                update={
+                    "dispatch_plan": plan,
+                    "action_taken": "summarize",
+                },
+            )
+        # plan not all-done + no matching step → genuine stray report mid-flight.
+        # Keep the original llm_decide fallback (resident route_after_handle_reply
+        # default) so the Leader can make sense of an unexpected report it can't
+        # match to a step. Rare on the happy path; preserved for safety.
         return _Command(goto="llm_decide", update={"dispatch_plan": plan})
 
     plan[matched_idx]["status"] = "completed" if success else "failed"
