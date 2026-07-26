@@ -30,10 +30,12 @@ import {
   ExportOutlined,
   MessageOutlined,
   SoundOutlined,
+  CalendarOutlined,
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
 import MemoryPage from '../pages/MemoryPage'
+import SchedulePage from '../pages/SchedulePage'
 import ProviderEditor from './ProviderEditor'
 import UsageDashboard from './UsageDashboard'
 import { providerApi, type LlmProvider } from '../services/api'
@@ -49,7 +51,7 @@ interface SettingsModalProps {
 }
 
 /** 左侧导航项 key：联合类型供 activeKey/initialKey 共用（导出供 Layout 引用）。 */
-export type NavKey = 'mcp' | 'skills' | 'memory' | 'model' | 'user' | 'external' | 'im' | 'tts'
+export type NavKey = 'mcp' | 'skills' | 'memory' | 'schedule' | 'model' | 'user' | 'external' | 'im' | 'tts'
 
 /** 左侧导航项定义：key 唯一标识，用于 activeKey 条件渲染右侧内容。 */
 interface NavItem {
@@ -62,6 +64,7 @@ const NAV_ITEMS: NavItem[] = [
   { key: 'mcp', label: 'MCP', icon: <ApiOutlined /> },
   { key: 'skills', label: '技能', icon: <AppstoreOutlined /> },
   { key: 'memory', label: '记忆', icon: <DatabaseOutlined /> },
+  { key: 'schedule', label: '定时任务', icon: <CalendarOutlined /> },
   { key: 'model', label: '模型服务商', icon: <CloudServerOutlined /> },
   { key: 'tts', label: '语音朗读', icon: <SoundOutlined /> },
   { key: 'external', label: '外部系统', icon: <ExportOutlined /> },
@@ -256,6 +259,7 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
           {activeKey === 'mcp' && <McpPage />}
           {activeKey === 'skills' && <SkillPage />}
           {activeKey === 'memory' && <MemoryPage />}
+          {activeKey === 'schedule' && <SchedulePage />}
           {activeKey === 'tts' && <TtsSettingsPanel />}
           {activeKey === 'external' && (
             <div style={{ maxWidth: 560 }}>
