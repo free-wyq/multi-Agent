@@ -214,8 +214,6 @@ class AgentEngine:
         await emit_agent_status(
             self.group_id, self.agent_id, self.name, "executing", task["id"]
         )
-        preview = (task.get("content") or "")[:50]
-        await self._publish_log(task["id"], f"▶ [{self.name}] 开始执行任务: {preview}...")
 
         # PL-11: run the execution body as a child asyncio.Task so a cancel
         # request can interrupt it. ``self._worker_task`` holds the handle so
