@@ -15,6 +15,8 @@ import {
   Drawer,
   Avatar,
   Divider,
+  Tabs,
+  Tooltip,
 } from 'antd'
 import {
   PlusOutlined,
@@ -24,20 +26,21 @@ import {
   EditOutlined,
   PushpinOutlined,
   FileOutlined,
-  FolderOpenOutlined,
-  DownOutlined,
-  RightOutlined,
   BulbOutlined,
+  DownloadOutlined,
 } from '@ant-design/icons'
 import {
   groupApi,
   messageApi,
+  taskApi,
   type AgentDefinition,
   type Group,
   type GroupMember,
   type GroupFile,
+  type Task,
 } from '../services/api'
 import { useBusEventContext } from '../contexts/BusEventContext'
+import { saveBlob, humanSize, fileIconFor } from '../lib/fileIcon'
 import MemberCapabilityOverview from './MemberCapabilityOverview'
 import './GroupInfoDrawer.css'
 
@@ -48,12 +51,39 @@ function getMemberDisplayName(member: GroupMember): string {
   return member.alias || member.agent_name
 }
 
-/** 格式化文件大小（从 GroupPage 抽出，逻辑不变）。 */
-function formatFileSize(size: number): string {
-  if (size < 1024) return `${size} B`
-  if (size < 1024 * 1024) return `${(size / 1024).toFixed(1)} KB`
-  if (size < 1024 * 1024 * 1024) return `${(size / (1024 * 1024)).toFixed(2)} MB`
-  return `${(size / (1024 * 1024 * 1024)).toFixed(2)} GB`
+/** 任务14b：从文件名反查来源 task（best-effort basename 匹配）。
+ *
+ * ``list_files`` 返回的 ``GroupFile.name`` 是工作区**顶层**文件 basename（crud.list_files
+ * 只 ``ws.iterdir()`` 取顶层 is_file）。任务的产物路径 ``Task.artifact_path`` 与 manifest
+ * ``artifact.files[].path`` 是工作区相对 POSIX 路径（可能含子目录，见
+ * ``scan_workspace_artifacts``）。两者按 basename 对齐：file.name === path 的最后一段。
+ * 命中即返该 task（取最新 completed 优先）；未命中返 null（文件可能由 coordinator 直写或
+ * 旧数据无 task 记录）。
+ */
+export function findSourceTask(fileName: string, tasks: Task[]): Task | null {
+  // completed 优先、再按 completed_at 倒序，取最近一个产出该文件的 task
+  const sorted = [...tasks].sort((a, b) => {
+    const ta = a.completed_at || a.created_at
+    const tb = b.completed_at || b.created_at
+    return tb.localeCompare(ta)
+  })
+  for (const t of sorted) {
+    // 主产物路径 basename 匹配
+    if (t.artifact_path) {
+      const segs = t.artifact_path.split('/')
+      if (segs[segs.length - 1] === fileName) return t
+    }
+    // manifest files 匹配
+    const manifest = t.artifact as { files?: { path?: string; name?: string }[] } | null
+    if (manifest?.files) {
+      for (const f of manifest.files) {
+        const p = f.path || f.name || ''
+        const segs = p.split('/')
+        if (segs[segs.length - 1] === fileName) return t
+      }
+    }
+  }
+  return null
 }
 
 /** Drawer 内成员条目（含 isCoordinator 标记，群主也入列展示能力）。
@@ -132,7 +162,10 @@ export default function GroupInfoDrawer({
   // ── 群共享文件 ──
   const [groupFiles, setGroupFiles] = useState<GroupFile[]>([])
   const [filesLoading, setFilesLoading] = useState(false)
-  const [filesExpanded, setFilesExpanded] = useState(true)
+  // 任务14b：下载中文件名（串行下载，与 TaskPage/ChatMessageBubble 同款单下载互斥）
+  const [downloading, setDownloading] = useState<string | null>(null)
+  // 任务14b：抽屉顶部 Tab 激活 key（「详情」/「文件」），默认详情。文件 Tab 承载群产物管理。
+  const [activeTab, setActiveTab] = useState<'detail' | 'files'>('detail')
 
   // L2-02：skillNameMap/mcpNameMap 加载逻辑移入 MemberCapabilityOverview 组件内聚，
   // 本组件不再持有——能力盘的映射与展示是同一关注点，独立组件自给自足更内聚。
@@ -150,6 +183,40 @@ export default function GroupInfoDrawer({
       .catch(() => setGroupFiles([]))
       .finally(() => setFilesLoading(false))
   }, [open, groupId])
+
+  // 任务14b：拉群任务用于「文件」Tab 反查来源 task（taskApi.list(groupId)）。群聊场景
+  // taskApi.list 传 group_id（后端 list_tasks 按 conversation_id 过滤，群聊即 group_id
+  // 入 conversation_id 列）。开门才需，与文件列表同生命周期加载。
+  const [groupTasks, setGroupTasks] = useState<Task[]>([])
+  useEffect(() => {
+    if (!open || !groupId) {
+      setGroupTasks([])
+      return
+    }
+    taskApi
+      .list(groupId)
+      .then(setGroupTasks)
+      .catch(() => setGroupTasks([]))
+  }, [open, groupId])
+
+  // 任务14b：单个文件下载——复用 PL-12 groupApi.downloadFile(groupId, name) + saveBlob。
+  // 串行：downloading 非空时其余禁用（与 TaskPage/ChatMessageBubble 一致，避免并发挤占带宽）。
+  const handleFileDownload = async (fileName: string) => {
+    if (!groupId) {
+      message.warning('未选择群组，无法下载')
+      return
+    }
+    setDownloading(fileName)
+    try {
+      const blob = await groupApi.downloadFile(groupId, fileName)
+      saveBlob(blob, fileName)
+      message.success(`已下载 ${fileName}`)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : String(e))
+    } finally {
+      setDownloading(null)
+    }
+  }
 
   // 群主信息
   const coordinatorAgent = group ? agents.find((a) => a.id === group.coordinator_id) : null
@@ -320,7 +387,7 @@ export default function GroupInfoDrawer({
         placement="right"
         open={open}
         onClose={onClose}
-        width={320}
+        width={360}
         styles={{ body: { padding: 0 } }}
       >
         {group && (
@@ -348,289 +415,235 @@ export default function GroupInfoDrawer({
 
             <Divider style={{ margin: '0' }} />
 
-            {/* 群公告 */}
-            <div style={{ padding: '12px 0' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <PushpinOutlined style={{ color: '#faad14' }} />
-                群公告
-              </div>
-              <div style={{ fontSize: 13, color: '#999', background: '#f5f5f5', padding: '8px 12px', borderRadius: 4 }}>
-                暂无公告
-              </div>
-            </div>
+            {/* 任务14b：群信息抽屉顶部 Tabs——「详情」(原所有区块) + 「文件」(群产物管理)。
+                用 antd v6 Tabs items API（与 MonitorPage/SkillPage 一致），顶部 tabBar 适配
+                360 宽抽屉（两 Tab 各 2 字，不挤）。activeTab 受控便于后续事件驱动跳转文件 Tab。 */}
+            <Tabs
+              size="small"
+              activeKey={activeTab}
+              onChange={(k) => setActiveTab(k as 'detail' | 'files')}
+              style={{ marginTop: 4 }}
+              items={[
+                {
+                  key: 'detail',
+                  label: '详情',
+                  children: (
+                    <>
+                      {/* 群公告 */}
+                      <div style={{ padding: '12px 0' }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <PushpinOutlined style={{ color: '#faad14' }} />
+                          群公告
+                        </div>
+                        <div style={{ fontSize: 13, color: '#999', background: '#f5f5f5', padding: '8px 12px', borderRadius: 4 }}>
+                          暂无公告
+                        </div>
+                      </div>
 
-            <Divider style={{ margin: '0' }} />
+                      <Divider style={{ margin: '0' }} />
 
-            {/* MT-03: Leader 指挥策略展示（group.config.leader_strategy）。 */}
-            <div style={{ padding: '12px 0' }}>
-              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
-                <BulbOutlined style={{ color: '#722ed1' }} />
-                Leader 指挥策略
-              </div>
-              <div
-                style={{
-                  fontSize: 13,
-                  color: (group.config?.leader_strategy as string | undefined)
-                    ? '#333'
-                    : '#b0b0b0',
-                  background: (group.config?.leader_strategy as string | undefined)
-                    ? '#f6f0ff'
-                    : '#f5f5f5',
-                  border: (group.config?.leader_strategy as string | undefined)
-                    ? '1px solid #d3adf7'
-                    : '1px solid transparent',
-                  padding: '8px 12px',
-                  borderRadius: 4,
-                  whiteSpace: 'pre-wrap',
-                  wordBreak: 'break-word',
-                }}
-              >
-                {(group.config?.leader_strategy as string | undefined)?.trim() || '未设置指挥策略'}
-              </div>
-              <Button
-                type="link"
-                size="small"
-                style={{ padding: '4px 0', color: '#722ed1' }}
-                onClick={handleEditLeaderStrategy}
-              >
-                修改指挥策略
-              </Button>
-            </div>
+                      {/* MT-03: Leader 指挥策略展示（group.config.leader_strategy）。 */}
+                      <div style={{ padding: '12px 0' }}>
+                        <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 8, display: 'flex', alignItems: 'center', gap: 6 }}>
+                          <BulbOutlined style={{ color: '#722ed1' }} />
+                          Leader 指挥策略
+                        </div>
+                        <div
+                          style={{
+                            fontSize: 13,
+                            color: (group.config?.leader_strategy as string | undefined)
+                              ? '#333'
+                              : '#b0b0b0',
+                            background: (group.config?.leader_strategy as string | undefined)
+                              ? '#f6f0ff'
+                              : '#f5f5f5',
+                            border: (group.config?.leader_strategy as string | undefined)
+                              ? '1px solid #d3adf7'
+                              : '1px solid transparent',
+                            padding: '8px 12px',
+                            borderRadius: 4,
+                            whiteSpace: 'pre-wrap',
+                            wordBreak: 'break-word',
+                          }}
+                        >
+                          {(group.config?.leader_strategy as string | undefined)?.trim() || '未设置指挥策略'}
+                        </div>
+                        <Button
+                          type="link"
+                          size="small"
+                          style={{ padding: '4px 0', color: '#722ed1' }}
+                          onClick={handleEditLeaderStrategy}
+                        >
+                          修改指挥策略
+                        </Button>
+                      </div>
 
-            <Divider style={{ margin: '0' }} />
-
-            {/* 群共享文件 */}
-            <div style={{ padding: '16px 12px', background: '#fafbfd', borderRadius: 8, margin: '12px 0' }}>
-              <div
-                style={{
-                  fontSize: 14, fontWeight: 700, marginBottom: filesExpanded ? 12 : 0,
-                  display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-                  paddingLeft: 10, position: 'relative', cursor: 'pointer',
-                }}
-                onClick={() => setFilesExpanded(!filesExpanded)}
-              >
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{
-                    position: 'absolute', left: 0, top: 2, bottom: 2, width: 3,
-                    borderRadius: 2, background: '#F26522',
-                  }} />
-                  <FolderOpenOutlined style={{ color: '#F26522', fontSize: 16 }} />
-                  <span>群文件</span>
-                  <span style={{ fontSize: 11, color: '#999', fontWeight: 400, marginLeft: 2 }}>
-                    ({groupFiles.length})
-                  </span>
-                </div>
-                <div style={{ color: '#999', fontSize: 12 }}>
-                  {filesExpanded ? <DownOutlined /> : <RightOutlined />}
-                </div>
-              </div>
-
-              {filesExpanded && (
-                <>
-                  {filesLoading ? (
-                    <div style={{ textAlign: 'center', padding: 20 }}>
-                      <Spin size="small" />
-                    </div>
-                  ) : groupFiles.length === 0 ? (
-                    <div style={{
-                      fontSize: 13, color: '#b0b0b0',
-                      border: '1px dashed #d0d7de',
-                      padding: '14px 16px',
-                      borderRadius: 8, textAlign: 'center', display: 'flex',
-                      alignItems: 'center', justifyContent: 'center', gap: 8,
-                    }}>
-                      <FileOutlined style={{ fontSize: 14, color: '#b0b0b0' }} />
-                      群组暂无共享文件
-                    </div>
-                  ) : (
-                    <div style={{
-                      display: 'flex', flexDirection: 'column', gap: 4,
-                      maxHeight: 280, overflowY: 'auto',
-                      paddingRight: 4,
-                    }}>
-                      {groupFiles.map((file: GroupFile) => {
-                        const ext = file.name.split('.').pop()?.toLowerCase() ?? ''
-                        const isCode = ['py', 'js', 'ts', 'tsx', 'css', 'html', 'json', 'yaml', 'sql', 'md'].includes(ext)
-                        const isDoc = ['doc', 'docx', 'pdf', 'txt'].includes(ext)
-                        const iconColor = isCode ? '#10b981' : isDoc ? '#f59e0b' : '#8c8c8c'
-                        return (
-                          <div
-                            key={file.name}
-                            style={{
-                              display: 'flex', alignItems: 'center', gap: 10,
-                              padding: '8px 10px', borderRadius: 6, cursor: 'default',
-                              transition: 'background 0.18s ease',
-                              flexShrink: 0,
-                            }}
-                            onMouseEnter={(e) => {
-                              (e.currentTarget as HTMLDivElement).style.background = '#FFF3ED'
-                            }}
-                            onMouseLeave={(e) => {
-                              (e.currentTarget as HTMLDivElement).style.background = 'transparent'
-                            }}
-                          >
-                            <div style={{
-                              width: 32, height: 32, borderRadius: 6,
-                              background: isCode ? '#d1fae5' : isDoc ? '#fef3c7' : '#f0f0f0',
-                              display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
-                            }}>
-                              <FileOutlined style={{ color: iconColor, fontSize: 15 }} />
-                            </div>
-                            <div style={{ flex: 1, minWidth: 0 }}>
-                              <div style={{
-                                fontSize: 13, fontWeight: 500, color: '#1f2937',
-                                overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                              }}>
-                                {file.name}
-                              </div>
-                              <div style={{ fontSize: 11, color: '#999', marginTop: 1 }}>
-                                {formatFileSize(file.size)} · {new Date(file.modified_at).toLocaleDateString()}
-                              </div>
-                            </div>
-                          </div>
-                        )
-                      })}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-
-            <Divider style={{ margin: '0' }} />
-            <div style={{ padding: '12px 0' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
-                <span style={{ fontSize: 14, fontWeight: 600 }}>
-                  成员 <span style={{ color: '#999', fontWeight: 400, fontSize: 13 }}>( {members.length + 1} )</span>
-                </span>
-                <div style={{ display: 'flex', gap: 4 }}>
-                  {/* MT-06: 批量移除普通成员（保留群主），仅当有可移除成员时显示。 */}
-                  {members.some((m) => m.agent_id !== group?.coordinator_id) && (
-                    <Popconfirm
-                      title="确认移除全部普通成员？群主保留。"
-                      onConfirm={handleRemoveAllMembers}
-                      okText="移除"
-                      okButtonProps={{ danger: true }}
-                      cancelText="取消"
-                    >
-                      <Button type="text" size="small" danger icon={<CloseCircleOutlined />}>
-                        全部移除
-                      </Button>
-                    </Popconfirm>
-                  )}
-                  <Button
-                    type="text"
-                    size="small"
-                    icon={<PlusOutlined />}
-                    onClick={() => {
-                      addMemberForm.resetFields()
-                      setAddMemberOpen(true)
-                    }}
-                  >
-                    添加
-                  </Button>
-                </div>
-              </div>
-
-              {membersLoading ? (
-                <div style={{ textAlign: 'center', padding: 20 }}>
-                  <Spin size="small" />
-                </div>
-              ) : (
-                <List
-                  size="small"
-                  dataSource={drawerMembers}
-                  renderItem={(item: DrawerMemberItem) => (
-                    <List.Item
-                      style={{ padding: '8px 0' }}
-                      actions={
-                        !item.isCoordinator
-                          ? [
+                      <Divider style={{ margin: '0' }} />
+                      <div style={{ padding: '12px 0' }}>
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
+                          <span style={{ fontSize: 14, fontWeight: 600 }}>
+                            成员 <span style={{ color: '#999', fontWeight: 400, fontSize: 13 }}>( {members.length + 1} )</span>
+                          </span>
+                          <div style={{ display: 'flex', gap: 4 }}>
+                            {/* MT-06: 批量移除普通成员（保留群主），仅当有可移除成员时显示。 */}
+                            {members.some((m) => m.agent_id !== group?.coordinator_id) && (
                               <Popconfirm
-                                key="remove"
-                                title="确认移除该成员？"
-                                onConfirm={() => handleRemoveMember(item.id)}
-                                okText="确认"
+                                title="确认移除全部普通成员？群主保留。"
+                                onConfirm={handleRemoveAllMembers}
+                                okText="移除"
+                                okButtonProps={{ danger: true }}
                                 cancelText="取消"
                               >
-                                <Button
-                                  type="text"
-                                  danger
-                                  size="small"
-                                  icon={<CloseCircleOutlined />}
-                                />
-                              </Popconfirm>,
-                            ]
-                          : undefined
-                      }
-                    >
-                      <List.Item.Meta
-                        avatar={
-                          <Avatar
-                            size="small"
-                            icon={item.isCoordinator ? <PushpinOutlined /> : <RobotOutlined />}
-                            style={{ background: item.isCoordinator ? '#722ed1' : '#F26522', fontSize: 12 }}
-                          />
-                        }
-                        title={
-                          <span style={{ fontSize: 13 }}>
-                            {getMemberDisplayName(item)}
-                            {item.isCoordinator && (
-                              <Tag color="purple" style={{ marginLeft: 4, fontSize: 10, lineHeight: '14px', padding: '0 4px' }}>
-                                群主
-                              </Tag>
+                                <Button type="text" size="small" danger icon={<CloseCircleOutlined />}>
+                                  全部移除
+                                </Button>
+                              </Popconfirm>
                             )}
-                          </span>
-                        }
-                        description={
-                          <span style={{ fontSize: 11, color: '#999' }}>{item.agent_role}</span>
-                        }
+                            <Button
+                              type="text"
+                              size="small"
+                              icon={<PlusOutlined />}
+                              onClick={() => {
+                                addMemberForm.resetFields()
+                                setAddMemberOpen(true)
+                              }}
+                            >
+                              添加
+                            </Button>
+                          </div>
+                        </div>
+
+                        {membersLoading ? (
+                          <div style={{ textAlign: 'center', padding: 20 }}>
+                            <Spin size="small" />
+                          </div>
+                        ) : (
+                          <List
+                            size="small"
+                            dataSource={drawerMembers}
+                            renderItem={(item: DrawerMemberItem) => (
+                              <List.Item
+                                style={{ padding: '8px 0' }}
+                                actions={
+                                  !item.isCoordinator
+                                    ? [
+                                        <Popconfirm
+                                          key="remove"
+                                          title="确认移除该成员？"
+                                          onConfirm={() => handleRemoveMember(item.id)}
+                                          okText="确认"
+                                          cancelText="取消"
+                                        >
+                                          <Button
+                                            type="text"
+                                            danger
+                                            size="small"
+                                            icon={<CloseCircleOutlined />}
+                                          />
+                                        </Popconfirm>,
+                                      ]
+                                    : undefined
+                                }
+                              >
+                                <List.Item.Meta
+                                  avatar={
+                                    <Avatar
+                                      size="small"
+                                      icon={item.isCoordinator ? <PushpinOutlined /> : <RobotOutlined />}
+                                      style={{ background: item.isCoordinator ? '#722ed1' : '#F26522', fontSize: 12 }}
+                                    />
+                                  }
+                                  title={
+                                    <span style={{ fontSize: 13 }}>
+                                      {getMemberDisplayName(item)}
+                                      {item.isCoordinator && (
+                                        <Tag color="purple" style={{ marginLeft: 4, fontSize: 10, lineHeight: '14px', padding: '0 4px' }}>
+                                          群主
+                                        </Tag>
+                                      )}
+                                    </span>
+                                  }
+                                  description={
+                                    <span style={{ fontSize: 11, color: '#999' }}>{item.agent_role}</span>
+                                  }
+                                />
+                              </List.Item>
+                            )}
+                          />
+                        )}
+                      </div>
+
+                      {/* MT-05: 成员能力概况聚合展示。skillNameMap/mcpNameMap 由组件内聚加载。 */}
+                      <Divider style={{ margin: '0' }} />
+                      <MemberCapabilityOverview
+                        members={drawerMembers}
+                        agents={agents}
                       />
-                    </List.Item>
-                  )}
-                />
-              )}
-            </div>
 
-            {/* MT-05: 成员能力概况聚合展示。skillNameMap/mcpNameMap 由组件内聚加载。 */}
-            <Divider style={{ margin: '0' }} />
-            <MemberCapabilityOverview
-              members={drawerMembers}
-              agents={agents}
+                      <Divider style={{ margin: '0' }} />
+                      <div style={{ padding: '16px 0' }}>
+                        <Button
+                          block
+                          icon={<EditOutlined />}
+                          onClick={handleOpenGroupSettings}
+                          style={{ marginBottom: 8 }}
+                        >
+                          编辑群信息
+                        </Button>
+                        <Popconfirm
+                          title="确定要清空该群组的聊天记录吗？此操作不可恢复。"
+                          onConfirm={handleClearMessages}
+                          okText="清空"
+                          okButtonProps={{ danger: true }}
+                          cancelText="取消"
+                        >
+                          <Button block style={{ marginBottom: 8 }}>
+                            清空聊天记录
+                          </Button>
+                        </Popconfirm>
+                        <Popconfirm
+                          title="确定要删除该群组吗？此操作不可恢复。"
+                          onConfirm={handleDeleteGroup}
+                          okText="删除"
+                          okButtonProps={{ danger: true }}
+                          cancelText="取消"
+                        >
+                          <Button block danger icon={<DeleteOutlined />}>
+                            删除群组
+                          </Button>
+                        </Popconfirm>
+                      </div>
+                    </>
+                  ),
+                },
+                {
+                  key: 'files',
+                  label: (
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                      文件
+                      {groupFiles.length > 0 && (
+                        <Tag
+                          color="orange"
+                          style={{ marginInlineStart: 2, fontSize: 10, lineHeight: '16px', padding: '0 4px' }}
+                        >
+                          {groupFiles.length}
+                        </Tag>
+                      )}
+                    </span>
+                  ),
+                  children: (
+                    <FilesTabContent
+                      groupId={groupId}
+                      groupFiles={groupFiles}
+                      filesLoading={filesLoading}
+                      groupTasks={groupTasks}
+                      downloading={downloading}
+                      onDownload={handleFileDownload}
+                    />
+                  ),
+                },
+              ]}
             />
-
-            <Divider style={{ margin: '0' }} />
-            <div style={{ padding: '16px 0' }}>
-              <Button
-                block
-                icon={<EditOutlined />}
-                onClick={handleOpenGroupSettings}
-                style={{ marginBottom: 8 }}
-              >
-                编辑群信息
-              </Button>
-              <Popconfirm
-                title="确定要清空该群组的聊天记录吗？此操作不可恢复。"
-                onConfirm={handleClearMessages}
-                okText="清空"
-                okButtonProps={{ danger: true }}
-                cancelText="取消"
-              >
-                <Button block style={{ marginBottom: 8 }}>
-                  清空聊天记录
-                </Button>
-              </Popconfirm>
-              <Popconfirm
-                title="确定要删除该群组吗？此操作不可恢复。"
-                onConfirm={handleDeleteGroup}
-                okText="删除"
-                okButtonProps={{ danger: true }}
-                cancelText="取消"
-              >
-                <Button block danger icon={<DeleteOutlined />}>
-                  删除群组
-                </Button>
-              </Popconfirm>
-            </div>
           </div>
         )}
       </Drawer>
@@ -729,5 +742,144 @@ export default function GroupInfoDrawer({
         </Form>
       </Modal>
     </>
+  )
+}
+
+// ── 任务14b：群文件管理 Tab 内容组件 ──────────────────────────────────────
+
+interface FilesTabContentProps {
+  groupId: string | null
+  groupFiles: GroupFile[]
+  filesLoading: boolean
+  groupTasks: Task[]
+  downloading: string | null
+  onDownload: (fileName: string) => void
+}
+
+/**
+ * 任务14b：「文件」Tab 内容——群聊工作区全部产物（文件名/大小/修改时间/来源 task）+ 下载。
+ *
+ * 数据源：``groupApi.listFiles(groupId)``（复用任务14a 确认的 key 无关 ``crud.list_files``，
+ * 返回工作区顶层文件 name/size/modified_at）。来源 task 由 ``findSourceTask`` best-effort
+ * basename 匹配（Task.artifact_path / artifact.files[].path 取最后段对齐 file.name）。
+ * 下载复用 PL-12 ``groupApi.downloadFile(groupId, name)`` + ``saveBlob``（与 TaskPage/
+ * ChatMessageBubble 交付物卡同入口同逻辑）。
+ *
+ * 与 TaskPage 交付物卡的关系：TaskPage 列 ``scan_workspace_artifacts`` 扫到的全部
+ * (task, file) 对（含子目录、按 task 分组），本 Tab 列 ``list_files`` 的顶层文件（粗粒度
+ * 「工作区里有哪些文件」），两者互补——抽屉侧重「这群产了哪些文件可下载」的快速浏览。
+ */
+function FilesTabContent({
+  groupId,
+  groupFiles,
+  filesLoading,
+  groupTasks,
+  downloading,
+  onDownload,
+}: FilesTabContentProps) {
+  if (filesLoading) {
+    return (
+      <div style={{ textAlign: 'center', padding: 32 }}>
+        <Spin size="small" />
+      </div>
+    )
+  }
+  if (groupFiles.length === 0) {
+    return (
+      <div style={{
+        fontSize: 13, color: '#b0b0b0',
+        border: '1px dashed #d0d7de',
+        padding: '24px 16px',
+        borderRadius: 8, textAlign: 'center', display: 'flex',
+        alignItems: 'center', justifyContent: 'center', gap: 8,
+        margin: '16px 0',
+      }}>
+        <FileOutlined style={{ fontSize: 16, color: '#b0b0b0' }} />
+        群组暂无共享文件（任务完成后自动扫描工作区产物）
+      </div>
+    )
+  }
+  return (
+    <div style={{ padding: '8px 0 16px' }}>
+      <div style={{ fontSize: 12, color: '#999', marginBottom: 8 }}>
+        共 {groupFiles.length} 个文件 · 点击下载（{groupId ? '就绪' : '未选群组'}）
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {groupFiles.map((file) => {
+          const sourceTask = findSourceTask(file.name, groupTasks)
+          return (
+            <div
+              key={file.name}
+              style={{
+                display: 'flex', alignItems: 'center', gap: 10,
+                padding: '10px', borderRadius: 8,
+                border: '1px solid #f0f0f0',
+                background: '#fff',
+                transition: 'border-color 0.18s ease',
+                flexShrink: 0,
+              }}
+              onMouseEnter={(e) => {
+                (e.currentTarget as HTMLDivElement).style.borderColor = '#F26522'
+              }}
+              onMouseLeave={(e) => {
+                (e.currentTarget as HTMLDivElement).style.borderColor = '#f0f0f0'
+              }}
+            >
+              <div style={{
+                width: 34, height: 34, borderRadius: 6,
+                background: '#f5f7fa',
+                display: 'flex', alignItems: 'center', justifyContent: 'center', flexShrink: 0,
+              }}>
+                {fileIconFor(file.name, { fontSize: 17 })}
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <Tooltip title={file.name}>
+                  <div style={{
+                    fontSize: 13, fontWeight: 500, color: '#1f2937',
+                    overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {file.name}
+                    {/* 来源 task：basename 命中则标主产物 Tag + task 标题，未命中标「独立产物」 */}
+                    {sourceTask && (
+                      <Tag
+                        color="gold"
+                        style={{ marginInlineStart: 6, fontSize: 10, lineHeight: '14px', padding: '0 4px' }}
+                      >
+                        主产物
+                      </Tag>
+                    )}
+                  </div>
+                </Tooltip>
+                <div style={{ fontSize: 11, color: '#999', marginTop: 2, display: 'flex', flexWrap: 'wrap', gap: 4 }}>
+                  <span>{humanSize(file.size)}</span>
+                  <span>·</span>
+                  <span>{file.modified_at ? new Date(file.modified_at).toLocaleString() : ''}</span>
+                </div>
+                {/* 来源 task 行：best-effort 反查，未命中时显示「独立产物」（coordinator 直写或无 task 记录） */}
+                <Tooltip title={sourceTask ? `任务：${sourceTask.title}` : '未关联任务（coordinator 直写或无 task 记录）'}>
+                  <div style={{
+                    fontSize: 11, color: sourceTask ? '#722ed1' : '#b0b0b0',
+                    marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                  }}>
+                    {sourceTask ? `来源任务：${sourceTask.title}` : '独立产物（无任务关联）'}
+                  </div>
+                </Tooltip>
+              </div>
+              <Tooltip title={!groupId ? '未选择群组' : '下载'}>
+                <Button
+                  type="primary"
+                  size="small"
+                  ghost
+                  icon={<DownloadOutlined />}
+                  loading={downloading === file.name}
+                  disabled={!groupId || (downloading !== null && downloading !== file.name)}
+                  onClick={() => onDownload(file.name)}
+                />
+              </Tooltip>
+            </div>
+          )
+        })}
+      </div>
+    </div>
   )
 }
