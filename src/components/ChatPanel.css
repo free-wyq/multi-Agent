@@ -159,6 +159,44 @@
   transform: translateY(-2px);
 }
 
+/* ── 需求2-前端：气泡外追问引导 chip ──
+ * 设计单真源 docs/structured-result-card-schema.md mockup 第 4 层「💡 您可能还想问: [chip]...」。
+ * 渲染在 chat-bubble-wrap 内、chat-bubble 之外（时间戳下方）——视觉上挂在气泡正下方，
+ * 与 mockup「气泡外 chip」一致。仅非用户消息渲染（用户自己的消息无需追问引导）。
+ * chip 用 AntD Tag（[[use-open-source-not-handrolled]] 不手写 div）+ cursor:pointer 暗示可点。 */
+.chat-followup-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-followup-label {
+  font-size: 12px;
+  color: #8c8c8c;
+  flex-shrink: 0;
+}
+
+.chat-followup-chip {
+  cursor: pointer;
+  margin: 0;
+  font-size: 12px;
+  border-radius: 12px;
+  padding: 1px 10px;
+  background: #fafafa;
+  border: 1px solid #f0f0f0;
+  color: #595959;
+  transition: all 0.15s ease;
+  user-select: none;
+}
+
+.chat-followup-chip:hover {
+  color: #fa8c16;
+  border-color: #ffd591;
+  background: #fff7e6;
+}
+
 /* ── 日期分组分隔条 ──
  * 居中淡灰标签，两端不用横线（横线在窄屏会顶到气泡），微信/钉钉同款。
  * margin 上下留白与气泡间距协调（上 8 下 4，让分隔条更贴近它之后的当天消息组）。 */

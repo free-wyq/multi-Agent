@@ -31,6 +31,7 @@ import SlashAutocomplete from './SlashAutocomplete'
 import ChatMessageBubble, { type ArtifactFile } from './ChatMessageBubble'
 import BubbleSpeakButton from './BubbleSpeakButton'
 import BubbleCopyButton from './BubbleCopyButton'
+import { generateFollowUps } from '../lib/followUpSuggestions'
 import './ChatPanel.css'
 
 const { Text } = Typography
@@ -1123,6 +1124,18 @@ export default function ChatPanel({
     }, 0)
   }, [chatInput, inputCursor])
 
+  // 需求2-前端：追问引导 chip 点击 → 填入输入框（不自动发送，用户可改后发）。
+  // 与 insertMention/selectSlashCommand 同款——改 chatInput + 聚焦输入框光标到末尾。
+  // 不自动发送：用户可能想合并多个 chip / 修改后再发，点即发会跳过用户确认。
+  const handleFollowUpClick = useCallback((text: string) => {
+    setChatInput(text)
+    setTimeout(() => {
+      const textarea = inputRef.current?.resizableTextArea?.textArea
+      if (textarea) textarea.setSelectionRange(text.length, text.length)
+      inputRef.current?.focus()
+    }, 0)
+  }, [])
+
   const handleInputKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // ── 补全下拉打开时，优先处理导航/选择（拦截 Enter/Arrow/Escape）──
     if (slashOpen && slashCommands.length > 0) {
@@ -1407,6 +1420,32 @@ export default function ChatPanel({
                           </span>
                         )}
                         {' · 完成'}
+                      </div>
+                    )
+                  })()}
+                  {/* 需求2-前端：气泡外追问引导 chip——按本条回复内容生成 2-3 个 follow-up
+                      问题渲染成可点 Tag（点即填入输入框，不自动发送，用户可改后发）。
+                      设计单真源 docs/structured-result-card-schema.md mockup 第 4 层
+                      「💡 您可能还想问: [chip1] [chip2] [chip3]」。仅非用户消息且 content 非空
+                      时渲染——用户自己的消息无需追问引导；task_log/announce 等无 content 跳过。
+                      策略=纯前端规则（lib/followUpSuggestions.ts generateFollowUps），
+                      零后端调用 / 零 LLM 往返 / 即时确定可解释。气泡外（chat-bubble-wrap 内、
+                      chat-bubble 之外）——与 mockup「气泡外 chip」一致，视觉上挂在气泡下方。 */}
+                  {!isUser && msg.content && (() => {
+                    const ups = generateFollowUps(msg.content)
+                    if (ups.length === 0) return null
+                    return (
+                      <div className="chat-followup-chips">
+                        <span className="chat-followup-label">💡 您可能还想问：</span>
+                        {ups.map((q) => (
+                          <Tag
+                            key={q}
+                            className="chat-followup-chip"
+                            onClick={() => handleFollowUpClick(q)}
+                          >
+                            {q}
+                          </Tag>
+                        ))}
                       </div>
                     )
                   })()}
