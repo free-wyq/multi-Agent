@@ -117,6 +117,39 @@ export const conversationApi = {
     http<Conversation>('POST', '/api/conversations', body),
   get: (id: string) => http<Conversation | null>('GET', `/api/conversations/${id}`),
   delete: (id: string) => http<boolean>('DELETE', `/api/conversations/${id}`),
+  /**
+   * 任务14c：单聊会话工作区产物文件列表（GET /api/conversations/{id}/files）。
+   *
+   * 任务14a 后端补的 /api/conversations 命名空间文件路由（list_files key 无关，
+   * conversation_id 直接当 workspace key）。返回顶层文件 name/size/modified_at
+   * （与 groupApi.listFiles 同结构 GroupFile，因单聊/群聊共用 crud.list_files）。
+   * 工作区不存在时返 []。
+   */
+  listFiles: (id: string) => http<GroupFile[]>('GET', `/api/conversations/${id}/files`),
+  /**
+   * 任务14c：单聊会话工作区产物下载 URL（GET /api/conversations/{id}/files/{name:path}）。
+   *
+   * 与 groupApi.downloadFileUrl 对称：fileName 是工作区相对 POSIX 路径（可能含子目录），
+   * 各段 encodeURIComponent 后用 `/` 拼。返回 URL，调用方决定 fetch 拿 Blob 或 window.open。
+   */
+  downloadFileUrl: (conversationId: string, fileName: string): string => {
+    const encoded = fileName
+      .split('/')
+      .map((seg) => encodeURIComponent(seg))
+      .join('/')
+    return `${API_BASE}/api/conversations/${conversationId}/files/${encoded}`
+  },
+  /**
+   * 任务14c：下载单聊会话产物为 Blob（可控下载，可加 loading/错误提示）。
+   * 失败抛 Error（http 状态 + 后端文案），与 groupApi.downloadFile 同语义。
+   */
+  downloadFile: async (conversationId: string, fileName: string): Promise<Blob> => {
+    const resp = await fetch(conversationApi.downloadFileUrl(conversationId, fileName))
+    if (!resp.ok) {
+      throw new Error(`下载失败 (${resp.status}): ${await resp.text()}`)
+    }
+    return resp.blob()
+  },
 }
 
 export interface GroupMember {

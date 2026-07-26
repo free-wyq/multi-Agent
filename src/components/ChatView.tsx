@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Button, Empty, Switch, Tag, Tooltip, Typography } from 'antd'
-import { TeamOutlined } from '@ant-design/icons'
+import { InfoCircleOutlined, TeamOutlined } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
 import { useBusEventContext } from '../contexts/BusEventContext'
@@ -8,6 +8,7 @@ import { useSettings } from '../contexts/SettingsContext'
 import { groupApi, type GroupMember } from '../services/api'
 import ChatPanel from './ChatPanel'
 import GroupInfoDrawer from './GroupInfoDrawer'
+import ConversationInfoDrawer from './ConversationInfoDrawer'
 import StopTaskButton from './StopTaskButton'
 import { AgentEditButton } from './AgentDetailPanel'
 
@@ -167,6 +168,19 @@ export default function ChatView() {
               small
             />
           )}
+          {/* 任务14c：单聊会话设置抽屉入口（与群聊 ⚙群信息 对称）。
+              单聊是独立 ConversationEntity，开 ConversationInfoDrawer（会话身份 + 文件 Tab）。
+              未关联 agent 也可开（仅文件 Tab + 删除会话）。 */}
+          {isSingleChat && (
+            <Tooltip title="会话信息">
+              <Button
+                type="text"
+                icon={<InfoCircleOutlined />}
+                size="small"
+                onClick={() => setInfoOpen(true)}
+              />
+            </Tooltip>
+          )}
           {!isSingleChat && (
             <Tooltip title="群信息">
               <Button
@@ -203,6 +217,20 @@ export default function ChatView() {
           members={members}
           membersLoading={membersLoading}
           agents={agents}
+          onChanged={refreshAll}
+        />
+      )}
+
+      {/* 任务14c：单聊会话设置抽屉（仅单聊有）。单聊是独立 ConversationEntity，
+          无群主/成员语义，开 ConversationInfoDrawer（会话身份 + 文件 Tab + 删除会话）。
+          抽屉内部按 conversation_id 拉文件/任务，单聊 agent 透传用于详情 Tab 身份段 + 编辑入口。 */}
+      {isSingleChat && activeConversation && (
+        <ConversationInfoDrawer
+          open={infoOpen}
+          onClose={() => setInfoOpen(false)}
+          conversation={activeConversation}
+          conversationId={groupId}
+          agent={singleAgent ?? null}
           onChanged={refreshAll}
         />
       )}
