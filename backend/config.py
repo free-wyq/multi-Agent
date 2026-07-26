@@ -274,3 +274,14 @@ def set_config(model: str | None = None) -> dict[str, Any]:
 # override ``config.worker_timeout`` takes precedence (read fresh per task);
 # <=0 here or per-group disables the timeout (hang-tolerant legacy behaviour).
 WORKER_TASK_TIMEOUT = float(os.environ.get("WORKER_TASK_TIMEOUT", "300") or "300")
+
+# 任务16c：MCP 工具自省（load_mcp_tools → MultiServerMCPClient.get_tools spawn stdio
+# 子进程并 tools/list）的墙钟超时上限。stdio server 启动失败 / 自省挂死时，避免整个
+# worker 任务被 MCP 拖到 WORKER_TASK_TIMEOUT（300s）才被看门狗降级——自省挂在更早的
+# 阶段，应有更短的独立超时让 load_mcp_tools 失败、降级为「无该 MCP 工具」而非整任务
+# 超时。env 可调；<=0 禁用（仅用于测试，生产留默认）。create_react_agent 工具调用阶段
+# 的超时不受此管——那是 LLM 请求超时（request_timeout），子进程在 ainvoke 时被
+# adapter 重新 spawn 且会话退出即终止，不依赖此上限。
+MCP_INTROSPECT_TIMEOUT = float(
+    os.environ.get("MCP_INTROSPECT_TIMEOUT", "20") or "20"
+)

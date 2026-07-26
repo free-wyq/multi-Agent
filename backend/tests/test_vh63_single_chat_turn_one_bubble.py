@@ -305,6 +305,10 @@ def _run_on_log(task_data: dict | None):
     engine.agent_id = "agent_x"
     engine.name = "x"
     engine.coordinator_id = ""
+    # _turn_trace 累加器（55c6eca 起在 on_log 里落 trace；__new__ 跳过了 __init__
+    # 的初始化，须显式补一个空 dict，否则 ``self._turn_trace.setdefault`` 报
+    # AttributeError——与 on_log emit 归并 key 的断言无关，纯 stub）。
+    engine._turn_trace = {}
     # _publish_log / _reply stub（_run_worker_task 会调它们，但不影响 on_log 验证）
     async def fake_publish_log(*a, **kw):
         pass

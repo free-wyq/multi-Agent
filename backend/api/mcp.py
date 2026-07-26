@@ -29,8 +29,10 @@ router = APIRouter(prefix="/api/mcp", tags=["mcp"])
 
 # ── stdio 命令白名单 + shell 元字符拒绝（任务1，借鉴 deer-flow MCP router） ──────
 # 仅允许裸可执行名（单用户桌面应用，无需 admin/OAuth）。扩展方式：往 frozenset 加名字。
+# 任务16c：补 ``python3``——多数 Linux dev 机 PATH 上只有 ``python3``（无 ``python``
+# 软链），原白名单只含 ``python`` 会误拦合法解释器（用户填 ``python3`` 落 400）。
 DEFAULT_STDIO_COMMAND_WHITELIST: frozenset[str] = frozenset(
-    {"npx", "uvx", "python", "node", "uv"}
+    {"npx", "uvx", "python", "python3", "node", "uv"}
 )
 
 # shell 元字符拒绝集：命中任一即拒（防注入）。

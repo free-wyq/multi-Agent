@@ -42,6 +42,15 @@ client = TestClient(app)
 GROUP = "group_pl12_dl"
 WS = ws_mod.workspace_path(GROUP)
 
+# 测试隔离加固：其他测试（如 test_vh66）在模块顶层也重绑 ``ws_mod.WORKSPACE_ROOT``
+# 到各自临时目录。pytest 按文件名字母序收集时，若前序测试模块的 import 把
+# ``WORKSPACE_ROOT`` 改向别处，本模块顶层的 ``WS = workspace_path(GROUP)`` 会在
+# 错误的根下建目录。每个 test_ 入口重新对齐 ``WORKSPACE_ROOT`` 到本模块隔离根，
+# 并重算 ``WS``，保证 ``safe_path`` 与写入路径同源（修跨测试工作区漂移导致的 404）。
+def _ensure_isolated_ws() -> Path:
+    ws_mod.WORKSPACE_ROOT = Path(_TMP) / "workspaces"
+    return ws_mod.workspace_path(GROUP)
+
 
 def _check(name: str, cond: bool, detail: str = "") -> None:
     mark = "✓" if cond else "✗"
@@ -60,7 +69,8 @@ def check_routes() -> None:
 
 def test_root_file() -> None:
     # root-level file: report.md with known content + .md MIME
-    (WS / "report.md").write_text("# 交付物\nhello PL-12\n")
+    ws = _ensure_isolated_ws()
+    (ws / "report.md").write_text("# 交付物\nhello PL-12\n")
     r = client.get(f"/api/groups/{GROUP}/files/report.md")
     _check("root file 200", r.status_code == 200, str(r.status_code))
     _check("content correct", "hello PL-12" in r.text, r.text[:80])
@@ -73,7 +83,8 @@ def test_root_file() -> None:
 
 def test_subdir_file() -> None:
     # sub-directory file recorded by scan_workspace_artifacts as POSIX path
-    (WS / "login-api").mkdir(exist_ok=True)
+    ws = _ensure_isolated_ws()
+    (ws / "login-api").mkdir(exist_ok=True)
     (WS / "login-api" / "index.js").write_text("const x = 1;\n")
     r = client.get(f"/api/groups/{GROUP}/files/login-api/index.js")
     _check("subdir file 200 (path converter eats slash)",
@@ -102,7 +113,8 @@ def test_not_found() -> None:
 
 def test_unknown_mime() -> None:
     # no extension → application/octet-stream
-    (WS / "rawbin").write_bytes(b"\x00\x01\x02binary")
+    ws = _ensure_isolated_ws()
+    (ws / "rawbin").write_bytes(b"\x00\x01\x02binary")
     r = client.get(f"/api/groups/{GROUP}/files/rawbin")
     _check("unknown MIME 200", r.status_code == 200, str(r.status_code))
     _check("default MIME application/octet-stream",
@@ -112,6 +124,7 @@ def test_unknown_mime() -> None:
 
 def test_unknown_group_empty_ws() -> None:
     # group whose workspace exists but has no files → 404 not 500
+    _ensure_isolated_ws()  # 对齐 WORKSPACE_ROOT（与其他 test_ 同源隔离）
     empty_group = "group_pl12_dl_empty"
     ws_mod.workspace_path(empty_group)  # create empty ws
     r = client.get(f"/api/groups/{empty_group}/files/anything.md")

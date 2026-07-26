@@ -42,7 +42,7 @@ from langgraph.checkpoint.memory import MemorySaver
 from langgraph.errors import GraphRecursionError
 from langgraph.prebuilt import create_react_agent
 
-from config import get_config
+from config import get_config, MCP_INTROSPECT_TIMEOUT
 from engine.tools import (
     SKILL_TOOL_NAMES,
     resolve_skill_tools,
@@ -63,8 +63,20 @@ _DELEGATE_DEPTH: contextvars.ContextVar = contextvars.ContextVar(
 )
 _DELEGATE_MAX_DEPTH = 2  # 允许 delegate→delegate 一层嵌套，三层封顶
 
-# extra tools beyond the framework-internal set (MCP, injected per-run)
-_EXTRA_TOOLS: list = []
+# extra tools beyond the framework-internal set (MCP, injected per-run).
+#
+# 任务16c：原实现是进程级 ``_EXTRA_TOOLS`` 全局变量，``set_extra_tools`` 在 run 前
+# 写、run 中读、finally 清。多 worker 引擎（多个 group/conversation 的 AgentEngine）
+# 各自的 ``_run_worker_task`` → ``execute_agent_task`` 在同一 asyncio loop 里交错执行：
+# engine A ``set_extra_tools([mcp_a])`` → 切到 engine B ``set_extra_tools([mcp_b])``
+# → 切回 engine A ``run_agent_loop`` 读到的是 B 的工具（污染）。换成 ``contextvars
+# .ContextVar`` 后，每个 worker 任务的 ``execute_body`` 协程有独立 context 副本，
+# A 的 set 不影响 B 的读（asyncio task 切换时 contextvars 自动隔离）——与既有
+# ``_DELEGATE_DEPTH`` 同型（参见该变量的并发安全注释）。``set_extra_tools`` 改用
+# ``.set()`` 返回 token（delegate 同款 try/finally 还原语义），run 内读用 ``.get()``。
+_EXTRA_TOOLS: contextvars.ContextVar[list] = contextvars.ContextVar(
+    "extra_tools", default=[]
+)
 
 _TOOL_SYSTEM_SUFFIX = """
 
@@ -96,9 +108,16 @@ def set_extra_tools(tools: list) -> None:
 
     Set by the executor before calling ``run_agent_loop``. Cleared after the
     loop so concurrent agent runs on different groups don't bleed tool sets.
+
+    任务16c：``_EXTRA_TOOLS`` 改 ``contextvars.ContextVar``（见其声明注释的并发
+    隔离理由）。``set_extra_tools`` 直接 ``.set()`` —— caller（``execute_agent_task``
+    的 try/finally）保证 run 后再 ``set_extra_tools([])`` 清空。run_agent_loop 内
+    读用 ``_EXTRA_TOOLS.get()``。token 由 caller 管理（见 ``execute_agent_task``
+    的 try/finally）；这里只做 set，不返回 token（保持调用签名不变，与 delegate 的
+    ``_DELEGATE_DEPTH.set`` token 模式解耦——delegate 在自身 try/finally 内 set/重置，
+    extra_tools 在 executor 的 try/finally 内 set/重置，各管各的 contextvar）。
     """
-    global _EXTRA_TOOLS
-    _EXTRA_TOOLS = list(tools)
+    _EXTRA_TOOLS.set(list(tools))
 
 
 def _format_tool_names(tools: list) -> str:
@@ -195,7 +214,7 @@ async def run_agent_loop(
     cfg = get_config()
     model_name = agent_model or cfg["model"]
     tools = tools_for_group(group_id)
-    mcp_tools = list(_EXTRA_TOOLS)
+    mcp_tools = list(_EXTRA_TOOLS.get())
     tools = tools + mcp_tools
     # delegate 工具：仅顶层 worker turn 注入（depth==0），子 agent 不带 → 物理断递归。
     # 子 agent 走 run_skill_loop 自装配 tools，不经此注入点。
