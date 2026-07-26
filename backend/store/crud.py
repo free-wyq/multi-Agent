@@ -12,7 +12,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import Integer, cast, delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from models import (
@@ -30,6 +30,9 @@ from models import (
     ScheduledTaskRun,
     Skill,
     Task,
+    UsageReport,
+    UsageRow,
+    UsageTotals,
 )
 from store.entities import (
     AgentEntity,
@@ -829,6 +832,129 @@ async def list_files(group_id: str) -> list[GroupFile]:
                 )
             )
     return out
+
+
+# ── Usage aggregation (PRD 3.6 Token 仪表盘 · 任务15a) ────────────────
+
+
+# Valid ``group_by`` dimensions. ``model``/``day``/``conversation``/``agent``
+# map to a ``json_extract`` / column / ``substr(created_at)`` expression used
+# as the GROUP BY key. Anything else falls back to ``model``.
+_USAGE_GROUP_BY = {"model", "day", "conversation", "agent"}
+
+
+async def aggregate_usage(
+    start: str | None = None,
+    end: str | None = None,
+    model: str | None = None,
+    group_by: str = "model",
+) -> UsageReport:
+    """Aggregate token usage from ``messages.data`` via SQLite JSON1 + GROUP BY.
+
+    The persisted ``agent_reply.data`` (chat/ask path, coordinator ``node_chat``
+    + worker ``node_brain_decide``) carries ``{tokens, elapsed_ms, model,
+    reasoning_tokens, ...}``. Execute-path announce + ``user_input`` rows have
+    ``data=None`` and carry no stats — they are excluded because
+    ``json_extract(data, '$.elapsed_ms')`` returns NULL for them, and the WHERE
+    clause ``json_extract(data,'$.elapsed_ms') IS NOT NULL`` filters the stats
+    rows (elapsed_ms is the canonical "this reply has stats" marker — see
+    ``engine/reply.py`` + frontend ``parseStats(strictElapsed=True)``).
+
+    Aggregation is done in SQL (not pulled back into Python) so a long history
+    is one query. SQLite JSON1 (``json_extract``) is enabled by default with
+    aiosqlite; ``func.json_extract`` was already used in
+    ``get_message_by_reply_id``.
+
+    Args:
+        start: ISO timestamp lower bound (inclusive) on ``created_at``. ``None``
+            = no lower bound. Compared lexically against the ISO-8601 ``Z``
+            string stored in ``created_at`` (lexically comparable for a single
+            timezone + same-width format).
+        end: ISO timestamp upper bound (exclusive). ``None`` = no upper bound.
+        model: filter by ``data.model`` exact match. ``None`` = all models.
+        group_by: dimension — ``model`` (default) / ``day`` / ``conversation``
+            / ``agent``. ``day`` groups by ``substr(created_at,1,10)`` (the
+            ``YYYY-MM-DD`` prefix of the ISO timestamp); ``conversation`` groups
+            by ``conversation_id``; ``agent`` by ``sender_id``.
+
+    Returns:
+        ``UsageReport`` with per-group ``rows`` + grand ``totals``. Empty
+        ``rows`` when no stats-carrying messages match (returns a valid report
+        with zeroed totals — the endpoint always returns 200, never 404).
+    """
+    from store.database import SessionLocal
+
+    dim = group_by if group_by in _USAGE_GROUP_BY else "model"
+    # JSON1 field key references data->'$.field' — NULL when data is NULL or
+    # the field is absent. CAST to INTEGER so SUM aggregates numerically
+    # (json_extract returns the JSON value; SQLite SUM of text would coerce
+    # to 0). Coalesce NULL → 0 so rows with partial stats still sum.
+    tok = cast(func.json_extract(MessageEntity.data, "$.tokens"), Integer)
+    el = cast(func.json_extract(MessageEntity.data, "$.elapsed_ms"), Integer)
+    rt = cast(
+        func.json_extract(MessageEntity.data, "$.reasoning_tokens"), Integer
+    )
+
+    if dim == "model":
+        key_expr = func.json_extract(MessageEntity.data, "$.model")
+    elif dim == "day":
+        # created_at is "YYYY-MM-DDThh:mm:ssZ" — first 10 chars = the date.
+        key_expr = func.substr(MessageEntity.created_at, 1, 10)
+    elif dim == "conversation":
+        key_expr = MessageEntity.conversation_id
+    else:  # agent
+        key_expr = MessageEntity.sender_id
+
+    conditions = [
+        MessageEntity.type_ == "agent_reply",
+        func.json_extract(MessageEntity.data, "$.elapsed_ms").isnot(None),
+    ]
+    if start:
+        conditions.append(MessageEntity.created_at >= start)
+    if end:
+        conditions.append(MessageEntity.created_at < end)
+    if model:
+        conditions.append(func.json_extract(MessageEntity.data, "$.model") == model)
+
+    async with SessionLocal() as db:
+        stmt = (
+            select(
+                key_expr.label("key"),
+                func.coalesce(func.sum(tok), 0).label("tokens"),
+                func.coalesce(func.sum(el), 0).label("elapsed_ms"),
+                func.coalesce(func.sum(rt), 0).label("reasoning_tokens"),
+                func.count().label("messages"),
+            )
+            .where(*conditions)
+            .group_by("key")
+            .order_by(func.coalesce(func.sum(tok), 0).desc())
+        )
+        result = await db.execute(stmt)
+        rows = [
+            UsageRow(
+                key=str(r.key) if r.key is not None else "",
+                tokens=int(r.tokens or 0),
+                elapsed_ms=int(r.elapsed_ms or 0),
+                reasoning_tokens=int(r.reasoning_tokens or 0),
+                messages=int(r.messages or 0),
+            )
+            for r in result.all()
+        ]
+
+    totals = UsageTotals(
+        tokens=sum(r.tokens for r in rows),
+        elapsed_ms=sum(r.elapsed_ms for r in rows),
+        reasoning_tokens=sum(r.reasoning_tokens for r in rows),
+        messages=sum(r.messages for r in rows),
+    )
+    return UsageReport(
+        start=start,
+        end=end,
+        model=model,
+        group_by=dim,
+        totals=totals,
+        rows=rows,
+    )
 
 
 # ── Skill helpers ───────────────────────────────────────────────

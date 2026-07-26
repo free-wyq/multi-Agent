@@ -23,6 +23,7 @@ from api import (
     skills,
     system,
     tasks,
+    usage,
     websocket,
 )
 from engine.registry import registry
@@ -73,3 +74,4 @@ app.include_router(mcp.router)
 app.include_router(scheduled_tasks.router)
 app.include_router(websocket.router)
 app.include_router(plan.router)
+app.include_router(usage.router)

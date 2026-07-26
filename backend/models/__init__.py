@@ -26,6 +26,7 @@ from .scheduled_task import (
 )
 from .skill import Skill, SkillCreatePayload, SkillUploadPayload
 from .task import Task, TaskCreatePayload, TaskStatus
+from .usage import UsageReport, UsageRow, UsageTotals
 
 __all__ = [
     "AgentDefinition",
@@ -48,6 +49,9 @@ __all__ = [
     "Skill",
     "SkillCreatePayload",
     "SkillUploadPayload",
+    "UsageReport",
+    "UsageRow",
+    "UsageTotals",
     "McpConnection",
     "McpConnectionCreatePayload",
     "ScheduledTask",
