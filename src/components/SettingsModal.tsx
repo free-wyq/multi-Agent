@@ -6,9 +6,10 @@
  *  - 自己画左侧可点击导航行 + 右侧按 activeKey 条件渲染更直白，密度与 GroupInfoDrawer/AgentDetailPanel 一致。
  *
  * 七个设置项：MCP / 技能 / 记忆 / 模型服务商 / 外部系统 / 即时消息 / 用户信息。
- *  - MCP、技能直接复用全屏路由页（McpPage/SkillPage），它们自带数据拉取与 height:100%+overflowY:auto
- *    根容器，放进右侧时外层已 overflowY auto，让其自然铺；
- *  - 记忆是占位（后端 /api/memory 端点待补）；
+ *  - MCP、技能、记忆直接复用全屏路由页（McpPage/SkillPage/MemoryPage），它们自带数据拉取
+ *    与 height:100%+overflowY:auto 根容器，放进右侧时外层已 overflowY auto，让其自然铺；
+ *  - 记忆管理页（MemoryPage · 任务17c）：memoryApi CRUD + scope 三档筛选 + importance
+ *    就地调节 + enable/disable 软删除 + FTS5 检索调试条（任务17b 后端 /api/memory）；
  *  - 模型服务商：多 provider 管理（providerApi CRUD + activate），新增/编辑委托 ProviderEditor 组件
  *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
  *  - 外部系统：智能体数据导出（文件下载 / Webhook 推送 / 数据库同步），占位卡片待后端端点。
@@ -32,6 +33,7 @@ import {
 } from '@ant-design/icons'
 import McpPage from '../pages/McpPage'
 import SkillPage from '../pages/SkillPage'
+import MemoryPage from '../pages/MemoryPage'
 import ProviderEditor from './ProviderEditor'
 import UsageDashboard from './UsageDashboard'
 import { providerApi, type LlmProvider } from '../services/api'
@@ -253,18 +255,7 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
         >
           {activeKey === 'mcp' && <McpPage />}
           {activeKey === 'skills' && <SkillPage />}
-          {activeKey === 'memory' && (
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'center',
-                height: '100%',
-              }}
-            >
-              <Empty description="记忆管理开发中（后端 /api/memory 端点待补）" />
-            </div>
-          )}
+          {activeKey === 'memory' && <MemoryPage />}
           {activeKey === 'tts' && <TtsSettingsPanel />}
           {activeKey === 'external' && (
             <div style={{ maxWidth: 560 }}>

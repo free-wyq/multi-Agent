@@ -1094,6 +1094,121 @@ export const usageApi = {
     }),
 }
 
+// ── Memory API (PRD 记忆模块 · 任务17b 后端 / 任务17c 前端) ───────────
+
+/** L2 长期记忆作用域：global=全局用户画像 / agent=某智能体专属 / conversation=某会话专属。
+ *  对齐后端 models/memory.Memory.scope（设计 docs/memory-module-design.md §4.3）。 */
+export type MemoryScope = 'global' | 'agent' | 'conversation'
+
+/**
+ * 一条 L2 长期记忆（后端 models/memory.Memory 的 TS 镜像）。
+ *
+ * 跨会话持久的事实/偏好/结论，按 ``scope``+``scope_ref`` 圈定注入范围，``importance``
+ * (0.0–1.0) 是检索排序权重。与 L1 会话上下文（recent messages）物理隔离——L2 只读注入
+ * system_prompt，不进 state schema。
+ *
+ * ``enabled`` 软删除开关（disable 后不被检索命中，但行保留）。``access_count`` /
+ * ``last_accessed_at`` 在检索命中时自增/落库，用于衰减排序 + UI「最近用过」展示。
+ */
+export interface Memory {
+  id: string
+  user_id: string
+  scope: MemoryScope
+  /** scope 的指向 id：global→"" / agent→agent_id / conversation→conversation_id。 */
+  scope_ref: string
+  content: string
+  /** 来源溯源 {source_conversation_id, source_agent_id, extracted_at}；手动新增为 null。 */
+  metadata_: Record<string, unknown> | null
+  importance: number
+  enabled: boolean
+  created_at: string
+  updated_at: string
+  last_accessed_at: string | null
+  access_count: number
+}
+
+/** POST /api/memory body —— 手动新增（用户在 UI 录入）。importance 默认 1.0（显式保存=高价值）。 */
+export interface MemoryCreatePayload {
+  content: string
+  scope?: MemoryScope
+  scope_ref?: string
+  importance?: number
+  metadata_?: Record<string, unknown> | null
+  enabled?: boolean
+  user_id?: string
+}
+
+/** PUT /api/memory/{id} body —— 部分更新（exclude_unset 语义，仅传字段被写）。 */
+export interface MemoryUpdatePayload {
+  content?: string
+  scope?: MemoryScope
+  scope_ref?: string
+  importance?: number
+  enabled?: boolean
+  metadata_?: Record<string, unknown> | null
+}
+
+/** POST /api/memory/search 单条命中（memory + bm25 衍生相关性分数）。 */
+export interface MemorySearchResult {
+  memory: Memory
+  score: number
+}
+
+/** POST /api/memory/search 响应 —— top_k 记忆按相关性排序。 */
+export interface MemorySearchResponse {
+  query: string
+  top_k: number
+  results: MemorySearchResult[]
+}
+
+/**
+ * 记忆模块 API（GET/POST/PUT/DELETE + enable/disable 软删除 + search FTS5 检索）。
+ *
+ * 与 mcpApi/providerApi 同构（CRUD + 状态切换），区别在 search 走后端 FTS5 bm25+importance
+ * 排序（非前端过滤）。``list`` 的 ``keyword`` 是 SQL LIKE 简单过滤（管理 UI 文本框），
+ * ``search`` 才是带排序的全文检索——两者语义不同，UI 用各自的入口。
+ */
+export const memoryApi = {
+  /** GET /api/memory：列记忆（按 scope/scope_ref/enabled/keyword 筛选，importance DESC 排序）。 */
+  list: (params?: {
+    user_id?: string
+    scope?: MemoryScope
+    scope_ref?: string
+    enabled?: boolean
+    keyword?: string
+    limit?: number
+  }) => {
+    const q: Record<string, string> = {}
+    if (params) {
+      if (params.user_id) q.user_id = params.user_id
+      if (params.scope) q.scope = params.scope
+      if (params.scope_ref) q.scope_ref = params.scope_ref
+      if (typeof params.enabled === 'boolean') q.enabled = String(params.enabled)
+      if (params.keyword) q.keyword = params.keyword
+      if (typeof params.limit === 'number') q.limit = String(params.limit)
+    }
+    return http<Memory[]>('GET', '/api/memory', undefined, Object.keys(q).length ? q : undefined)
+  },
+  /** GET /api/memory/{id}：单条回读（不存在返回 null）。 */
+  get: (id: string) => http<Memory | null>('GET', `/api/memory/${id}`),
+  /** POST /api/memory：手动新增。scope=agent/conversation 必须带 scope_ref（后端 400 守卫）。 */
+  create: (payload: MemoryCreatePayload) => http<Memory>('POST', '/api/memory', payload),
+  /** PUT /api/memory/{id}：部分更新 content/importance/enabled/scope。 */
+  update: (id: string, payload: MemoryUpdatePayload) =>
+    http<Memory | null>('PUT', `/api/memory/${id}`, payload),
+  /** DELETE /api/memory/{id}：硬删除（连同 FTS5 sidecar 行）。 */
+  remove: (id: string) => http<boolean>('DELETE', `/api/memory/${id}`),
+  /** POST /api/memory/{id}/enable：软删除恢复（enabled=true，重新参与检索）。 */
+  enable: (id: string) => http<Memory | null>('POST', `/api/memory/${id}/enable`),
+  /** POST /api/memory/{id}/disable：软删除（enabled=false，不被检索命中，行保留）。 */
+  disable: (id: string) => http<Memory | null>('POST', `/api/memory/${id}/disable`),
+  /** POST /api/memory/search：FTS5 全文检索（bm25+importance 排序，top_k 默认 5 上限 50）。 */
+  search: (
+    query: string,
+    opts?: { scope?: MemoryScope; scope_ref?: string; user_id?: string; top_k?: number },
+  ) => http<MemorySearchResponse>('POST', '/api/memory/search', { query, ...opts }),
+}
+
 // ── 实时事件：WebSocket ──────────────────────────────────
 
 export interface BusEventData {
