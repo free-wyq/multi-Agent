@@ -417,11 +417,6 @@ class AgentEngine:
                         "[engine %s] failed to persist artifact for task %s",
                         self.name, task_id,
                     )
-                await self._publish_log(
-                    task_id, f"📦 产物已记录：{artifact_path}"
-                    + (f"（共 {len((artifact or {}).get('files', []))} 个文件）"
-                       if artifact and len(artifact.get("files", [])) > 1 else "")
-                )
 
         await emit_task_completed(
             group_id,
