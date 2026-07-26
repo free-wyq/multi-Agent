@@ -453,6 +453,34 @@ export default function ChatMessageBubble({
     return rows
   }, [toolEvents])
 
+  // 任务2：worker 持久化气泡「📝 最终生成」补耗时——从已落盘 data.trace 派生（零后端改动）。
+  // 根因见 [[unified-process-panel-and-duration-gap-2026-07-26]]：worker execute 路径
+  // reply_data 只塞 reply_id+trace，不落 elapsed_ms/tokens/model（仅协调者 _unified_reply 落）。
+  // 但 registry.on_log 把 tool_start/tool_end 的 ISO timestamp 落进 data.trace，
+  // ChatPanel extractTraceEvents 解析成 toolEvents（timestamp=Date.parse(iso)→ms，phase='start'/'end'）。
+  // 这里取首 tool_start（min start timestamp）到末 tool_end（max end timestamp）的墙钟跨度
+  // 作耗时兜底——数据真实，仅补耗时（补不了 tokens/model，execute 路径本无 usage）。
+  // 无 tool 事件（纯文本回复）→ undefined，📝 item 不显耗时（同原状，无回归）。
+  const traceElapsedMs = useMemo(() => {
+    let firstStart = Infinity
+    let lastEnd = -Infinity
+    for (const e of toolEvents) {
+      const ts = e.timestamp
+      if (!Number.isFinite(ts) || ts <= 0) continue
+      const d = (e.data || {}) as Record<string, unknown>
+      const phase = d['phase']
+      if (phase === 'start') {
+        if (ts < firstStart) firstStart = ts
+      } else if (phase === 'end') {
+        if (ts > lastEnd) lastEnd = ts
+      }
+    }
+    if (Number.isFinite(firstStart) && Number.isFinite(lastEnd) && lastEnd >= firstStart) {
+      return lastEnd - firstStart
+    }
+    return undefined
+  }, [toolEvents])
+
   const toggleProcessPanel = () => {
     setProcessPanelExpanded((v) => !v)
   }
@@ -711,6 +739,9 @@ export default function ChatMessageBubble({
   // ── 3. 最终生成 item（仅完成态 !isStreaming && hasContent && finalStats）──
   // 只放元数据：字数 + [可选] tokens/耗时/model/推理 tokens。不重复渲染 content 正文（正文在 Bubble.content 里）。
   // 用 antd Divider type="vertical" 做段间分隔，不用 emoji。
+  // 任务2：耗时优先用 finalStats.elapsedMs（协调者落盘真值）；worker execute 路径无 stats
+  // 时 fallback 到 traceElapsedMs（首 tool_start 到末 tool_end 墙钟跨度，从 data.trace 派生）。
+  const finalElapsedMs = finalStats?.elapsedMs ?? traceElapsedMs
   if (!isStreaming && hasContent && finalStats) {
     processItems.push({
       sortKey: Infinity,
@@ -722,8 +753,8 @@ export default function ChatMessageBubble({
           <Space size={8} split={<Divider type="vertical" style={{ margin: 0 }} />}>
             <Typography.Text type="secondary" style={{ fontSize: 12 }}>最终生成</Typography.Text>
             <Typography.Text style={{ fontSize: 12 }}>{content.length} 字</Typography.Text>
-            {finalStats.elapsedMs != null && finalStats.elapsedMs > 0 && (
-              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{formatElapsed(finalStats.elapsedMs)}</Typography.Text>
+            {finalElapsedMs != null && finalElapsedMs > 0 && (
+              <Typography.Text type="secondary" style={{ fontSize: 12 }}>{formatElapsed(finalElapsedMs)}</Typography.Text>
             )}
             {finalStats.tokens != null && finalStats.tokens > 0 && (
               <Typography.Text type="secondary" style={{ fontSize: 12 }}>↓ {finalStats.tokens}</Typography.Text>
