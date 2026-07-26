@@ -4,7 +4,7 @@
   margin: 0 auto;
 }
 
-/* ── 顶部横幅 ── */
+/* ── 顶部横幅（KEEP：indigo 3D 渐变 + 两个 radial 光晕伪元素，全仓唯一保留的蓝）── */
 .agent-hero {
   background: linear-gradient(135deg, #1e1b4b 0%, #312e81 40%, #4338ca 100%);
   border-radius: 16px;
@@ -111,30 +111,17 @@
   gap: 20px;
 }
 
-/* ── 单张卡片 ── */
-.agent-card {
-  background: var(--surface-raised);
-  border-radius: 14px;
-  overflow: hidden;
-  border: 1px solid var(--border-card);
-  box-shadow: var(--shadow-card);
-  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              box-shadow 0.25s cubic-bezier(0.4, 0, 0.2, 1),
-              border-color 0.25s ease;
-  cursor: default;
+/* ── 卡片 cover（banner + 浮起的头像）── */
+.agent-card-cover {
   position: relative;
 }
 
-.agent-card--hovered {
-  transform: translateY(-4px);
-  box-shadow: 0 12px 32px rgba(0, 0, 0, 0.1);
-  border-color: #e0e7ff;
+/* 顶部渐变条 */
+.agent-card-banner {
+  height: 6px;
 }
 
-.agent-card--working {
-  /* 工作中脉冲 */
-}
-
+/* 工作中 banner 脉冲（working 状态类挂在 AntD Card 上）*/
 .agent-card--working .agent-card-banner {
   animation: banner-pulse 2s ease-in-out infinite;
 }
@@ -144,33 +131,18 @@
   50% { opacity: 0.7; }
 }
 
-/* 顶部渐变条 */
-.agent-card-banner {
-  height: 6px;
-  transition: opacity 0.25s ease;
-}
-
-/* 卡片主体 */
-.agent-card-body {
-  padding: 20px 20px 16px;
-}
-
-/* 头像 + 状态 */
-.agent-card-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  margin-bottom: 12px;
-}
-
-/* ── 头像 ── */
+/* ── 头像（robot-avatar.png + 角色色环，静态不灵动）── */
 .agent-card-avatar {
   width: 56px;
   height: 56px;
   border-radius: 50%;
   flex-shrink: 0;
-  position: relative;
-  transition: transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  position: absolute;
+  top: 14px;          /* 头像落在 banner 下方卡内，不再半露到卡外 */
+  left: 50%;
+  transform: translateX(-50%);
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
+  background: var(--surface-raised);
 }
 
 .agent-card-avatar-img {
@@ -180,12 +152,11 @@
   border-radius: 50%;
   border: 2.5px solid transparent;
   background-clip: padding-box;
-  animation: avatar-bob 3s ease-in-out infinite;
   position: relative;
   z-index: 1;
 }
 
-/* 角色色环 */
+/* 角色色环（静态，仅标识角色色，不呼吸） */
 .agent-card-avatar-ring {
   position: absolute;
   inset: 0;
@@ -193,50 +164,15 @@
   border: 2.5px solid currentColor;
   pointer-events: none;
   z-index: 0;
-  transition: box-shadow 0.3s ease, border-color 0.3s ease;
 }
 
-.agent-card--hovered .agent-card-avatar {
-  transform: scale(1.1);
+/* cover 高度补足：banner(6px) + 头像偏移 + 头像半径 + 底部留白 */
+.agent-card-cover {
+  position: relative;
+  height: 58px;
 }
 
-.agent-card--hovered .agent-card-avatar-ring {
-  animation: ring-glow 1.5s ease-in-out infinite;
-}
-
-@keyframes avatar-bob {
-  0%, 100% { transform: translateY(0) scale(1); }
-  50% { transform: translateY(-1.5px) scale(1.03); }
-}
-
-@keyframes ring-glow {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.5; }
-}
-
-/* 工作中头像更活跃 */
-.agent-card--working .agent-card-avatar-img {
-  animation-duration: 1.2s;
-}
-
-.agent-card--working .agent-card-avatar-ring {
-  animation: ring-pulse 1s ease-in-out infinite;
-}
-
-@keyframes ring-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.08); opacity: 0.6; }
-}
-
-.agent-card-status-badge {
-  margin-top: 4px;
-}
-
-.agent-card-status-badge .ant-badge-status-dot {
-  width: 8px;
-  height: 8px;
-}
-
+/* ── Card body 内部样式 ── */
 /* 名称行 */
 .agent-card-name-row {
   display: flex;
@@ -308,30 +244,7 @@
   font-style: italic;
 }
 
-/* 底部操作 */
-.agent-card-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 4px;
-  border-top: 1px solid #f5f5f5;
-  padding-top: 12px;
-}
-
-.agent-action-btn {
-  border-radius: 8px !important;
-  width: 36px;
-  height: 36px;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s ease;
-}
-
-.agent-action-btn:hover {
-  background: #f5f5f5;
-}
-
-/* ── 新建占位卡 ── */
+/* ── 新建占位卡（保留：手写 div，本任务不动）── */
 .agent-card--new {
   display: flex;
   flex-direction: column;
