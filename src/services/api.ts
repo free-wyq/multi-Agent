@@ -1024,6 +1024,76 @@ export const scheduledTaskApi = {
   history: (id: string) => http<ScheduledTaskRun[]>('GET', `/api/scheduled-tasks/${id}/runs`),
 }
 
+// ── Usage API (PRD 3.6 Token 仪表盘 · 任务15a) ─────────────────
+
+/**
+ * 一组聚合结果行（后端 ``UsageRow`` 镜像，snake_case）。
+ *
+ * ``key`` 是分组键——按维度不同：``group_by=model`` 时是模型 id，
+ * ``day`` 时是 ``YYYY-MM-DD``，``conversation`` 时是 ``conversation_id``，
+ * ``agent`` 时是 ``sender_id``。空串 = 该维度值缺失（如 chat 回复 ``data.model`` 为空）。
+ */
+export interface UsageRow {
+  key: string
+  tokens: number
+  elapsed_ms: number
+  reasoning_tokens: number
+  messages: number
+}
+
+/** 全局合计（所有行求和，后端 ``UsageTotals`` 镜像）。 */
+export interface UsageTotals {
+  tokens: number
+  elapsed_ms: number
+  reasoning_tokens: number
+  messages: number
+}
+
+/**
+ * 用量聚合报告（后端 ``UsageReport`` 镜像）。
+ *
+ * ``rows`` 已按 ``tokens`` 降序（后端 ``order_by coalesce(sum(tokens),0).desc()``），
+ * 前端直接渲染即可。空结果（无 stats 行）→ ``totals`` 全 0 + ``rows=[]``，端点恒 200。
+ *
+ * 数据口径：仅 ``chat/ask`` 路径的 ``agent_reply``（coordinator ``node_chat`` + worker
+ * ``node_brain_decide``）携带 per-turn 流式 run-stats（``{tokens, elapsed_ms, model,
+ * reasoning_tokens}``）。execute 路径模板 announce（``任务完成 🎉`` 等，registry ``_reply``
+ * 恒 ``data=None``）+ ``user_input`` 行不计入——这是设计取舍，UsageDashboard 须标注
+ * 「execute 任务类回复未计入口径」（任务15c）。
+ */
+export interface UsageReport {
+  start: string | null
+  end: string | null
+  model: string | null
+  group_by: string
+  totals: UsageTotals
+  rows: UsageRow[]
+}
+
+/** 聚合维度字面量联合（``group_by`` 入参约束）。 */
+export type UsageGroupBy = 'model' | 'day' | 'conversation' | 'agent'
+
+/** 任务15a: token 用量聚合——GET /api/usage?start=&end=&model=&group_by=。 */
+export const usageApi = {
+  /**
+   * 拉取用量聚合报告。``start``/``end`` 为 ISO-8601 字符串（含 ``Z`` 后缀，与后端
+   * ``created_at`` 同格式按字典序比较）；``model`` 按 ``data.model`` 精确匹配过滤；
+   * ``group_by`` 切换聚合维度（非法值后端 lenient 兜底 ``model``，不报 400）。
+   */
+  report: (
+    start?: string | null,
+    end?: string | null,
+    model?: string | null,
+    groupBy: UsageGroupBy | string = 'model',
+  ) =>
+    http<UsageReport>('GET', '/api/usage', undefined, {
+      ...(start ? { start } : {}),
+      ...(end ? { end } : {}),
+      ...(model ? { model } : {}),
+      group_by: groupBy,
+    }),
+}
+
 // ── 实时事件：WebSocket ──────────────────────────────────
 
 export interface BusEventData {
