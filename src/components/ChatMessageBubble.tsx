@@ -6,6 +6,9 @@ import type { TraceEvent } from '../services/api'
 import { groupApi } from '../services/api'
 import { fileIconFor, saveBlob, humanSize } from '../lib/fileIcon'
 import { renderMarkdown } from '../lib/renderMarkdown'
+// 卡片段解析/切片抽到 lib（[任务10d] 先抽纯函数再测，作为后续卡片重构安全网）——
+// parseCards/splitContentByCards 纯函数无 React 依赖，单测锁住契约。
+import { splitContentByCards, type ParsedCard } from '../lib/cardSegments'
 import BubbleCopyButton from './BubbleCopyButton'
 import './ChatMessageBubble.css'
 
@@ -30,96 +33,13 @@ import './ChatMessageBubble.css'
 // 非贪婪捕获（[\s\S] 跨换行）到闭合三反引号。
 // ════════════════════════════════════════════════════════════════════════════
 
-/** 与后端 `llm.card_fragment.CARD_FRAGMENT_RE` byte-identical 的 card 围栏正则。
- *  `g` flag 用于 matchAll 全局扫描；调用前需手动重置 lastIndex（matchAll 自管，不重置）。 */
-const CARD_RE = /```card\s*\n([\s\S]*?)```/g
-
-/** card payload JSON schema（设计单真源 docs/structured-result-card-schema.md §4）。
- *  字段全 optional——前端容错（缺字段当空/降级），后端提示词负责产出合法结构。
- *  值类型统一 string（数字也 stringify，如 "9821" 而非 9821——避免渲染时数字不显示/排序歧义）。
- *  - kind=kv:    items: Array<{label:string, value:string}>
- *  - kind=list:  items: Array<string>
- *  - kind=table: columns: Array<string>, rows: Array<Array<string>>
- *  未知 kind → 整块降级为普通代码块（不崩，显示原始 JSON）。 */
-interface CardPayload {
-  icon?: string
-  title?: string
-  kind?: 'kv' | 'list' | 'table' | string
-  items?: Array<{ label: string; value: string }> | Array<string> | unknown
-  columns?: string[] | unknown
-  rows?: Array<Array<string>> | unknown
-}
-
-/** 解析 content，返回各 card 块的 payload + 字符区间。
- *  非法 JSON 的块：按设计 §6「降级为普通代码块渲染，不静默丢弃」——返回 raw 字段（原 ```card...```
- *  原文），渲染时当普通 code 块走（让用户看到原始 JSON 便于调提示词，而非吞掉）。
- *
- *  对齐后端 `extract_card_payloads` 的优雅降级：后端 skip 非法 JSON 块（不 surface 为卡片），
- *  前端则把非法块保留为普通代码块（同一语义的两种表现——都不当卡片解析，都不崩）。 */
-interface ParsedCard {
-  /** 解析成功的合法 payload（json 非 null）；失败块为 null（用 raw 走 code 块降级）。 */
-  json: CardPayload | null
-  /** 解析失败时保留的原 ```card...``` 原文（含围栏），降级为普通 code 块显示。 */
-  raw: string
-  /** content 内字符区间 [start, end)——用于切片剔除卡片段、剩余走散文渲染。 */
-  start: number
-  end: number
-}
-
-function parseCards(content: string): ParsedCard[] {
-  const out: ParsedCard[] = []
-  if (!content) return out
-  // matchAll 自管 lastIndex，但 CARD_RE 带 g flag 是模块级共享单例——matchAll 内部用副本迭代，
-  // 不会污染外部 state（matchAll 语义保证）。仍显式 reset 以防被前次 matchAll 之外的 exec 残留。
-  CARD_RE.lastIndex = 0
-  for (const m of content.matchAll(CARD_RE)) {
-    const raw = m[0]
-    const start = m.index ?? 0
-    const end = start + raw.length
-    try {
-      const json = JSON.parse(m[1]) as CardPayload
-      // 顶层非 object（如裸 JSON 数组/数字）→ 降级 code 块（schema 要求顶层 object）
-      if (typeof json !== 'object' || json === null || Array.isArray(json)) {
-        out.push({ json: null, raw, start, end })
-      } else {
-        out.push({ json, raw, start, end })
-      }
-    } catch {
-      // 非法 JSON：降级为普通代码块（不静默丢弃——设计 §6 契约）
-      out.push({ json: null, raw, start, end })
-    }
-  }
-  return out
-}
-
-/** 把 content 切成「散文段 + 卡片段」交替列表（按出现顺序）。
- *  卡片块在 content 内的字符区间被剔除，剩余片段按散文渲染；卡片插回原位置。
- *  设计 §3：worker 可在回复里穿插任意段散文 + 多张卡片，前端按出现顺序渲染。 */
-type ContentSegment =
-  | { type: 'text'; text: string }
-  | { type: 'card'; card: ParsedCard }
-
-function splitContentByCards(content: string): ContentSegment[] {
-  const cards = parseCards(content)
-  if (cards.length === 0) return [{ type: 'text', text: content }]
-  const segs: ContentSegment[] = []
-  let cursor = 0
-  for (const card of cards) {
-    // 卡片前的散文段（可能为空串——跳过空段避免渲染空白）
-    if (card.start > cursor) {
-      const text = content.slice(cursor, card.start)
-      if (text) segs.push({ type: 'text', text })
-    }
-    segs.push({ type: 'card', card })
-    cursor = card.end
-  }
-  // 最后一个卡片之后的尾部散文
-  if (cursor < content.length) {
-    const text = content.slice(cursor)
-    if (text) segs.push({ type: 'text', text })
-  }
-  return segs
-}
+// 解析/切片逻辑（CARD_RE / parseCards / splitContentByCards / ParsedCard / CardPayload /
+// ContentSegment）已抽到 `src/lib/cardSegments.ts`（[任务10d]）——组件只保留渲染层
+// （StructuredCard：kv/list/table 分支 + 未知 kind 降级 code 块）。lib 纯函数由单测锁契约，
+// 是后续卡片重构（任务7a 换 antd Card / 任务4 持久化气泡复用切卡）的安全网。
+// CARD_RE 与后端 `backend/llm/card_fragment.py CARD_FRAGMENT_RE` byte-identical——后端
+// count_card_fragments 计数与前端 parseCards 解析对同一 content 的「块数」判定必须一致。
+// ════════════════════════════════════════════════════════════════════════════
 
 /** 安全取 string：payload 里值理论上全是 string，但容错——数字/布尔强转 string，对象/数组 JSON 化。 */
 function asString(v: unknown): string {
