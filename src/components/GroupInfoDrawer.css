@@ -1,10 +1,12 @@
-/* ── 群聊头像灵动动画（L2-04 从 GroupPage.css 迁入，仅保留 GroupInfoDrawer 用的 class） ──
+/* ── 群聊头像装饰（L2-04 从 GroupPage.css 迁入，仅保留 GroupInfoDrawer 用的 class） ──
  *
  * 原 GroupPage.css 含两类 class：
  *  1. chat-*（聊天气泡/头像）—— 已在 ChatPanel.css 重复定义，GroupPage 删除后无需保留；
- *  2. group-avatar-*（群信息抽屉大头像动画）—— GroupInfoDrawer 独用，迁入本文件。
+ *  2. group-avatar-*（群信息抽屉大头像装饰）—— GroupInfoDrawer 独用，迁入本文件。
  *
- * GroupInfoDrawer 的群头像用 .group-avatar-wrap + .group-avatar-img，带发光环 + 涟漪呼吸。
+ * GroupInfoDrawer 的群头像用 .group-avatar-wrap + .group-avatar-img，带静态发光环 + 静态涟漪环。
+ * 任务7b：去手写 @keyframes（group-bob 悬浮 / group-glow-flow 流动 / group-ping 涟漪）——
+ * 对齐 [[chat-lag-jitter-fix-2026-07-23]] 不要灵动约束；装饰渐变保留为静态，hover 交互动效保留。
  */
 
 /* 外容器：定位发光层 */
@@ -21,7 +23,6 @@
   border-radius: 8px;
   object-fit: cover;
   display: block;
-  animation: group-bob 3s ease-in-out infinite;
   transition: transform 0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
@@ -30,7 +31,7 @@
   transform: scale(1.18);
 }
 
-/* ── 发光环（渐变流动） ── */
+/* ── 发光环（静态渐变，原 group-glow-flow 流动已去）── */
 .group-avatar-wrap::before {
   content: '';
   position: absolute;
@@ -44,8 +45,6 @@
     #722ed1 75%,
     #1677ff 100%
   );
-  background-size: 300% 300%;
-  animation: group-glow-flow 4s ease-in-out infinite;
   z-index: -1;
   opacity: 0.55;
   filter: blur(8px);
@@ -57,14 +56,13 @@
   filter: blur(10px);
 }
 
-/* ── 涟漪环（呼吸） ── */
+/* ── 涟漪环（静态边框，原 group-ping 扩散已去）── */
 .group-avatar-wrap::after {
   content: '';
   position: absolute;
   inset: -2px;
   border-radius: 10px;
   border: 2px solid rgba(22, 119, 255, 0.4);
-  animation: group-ping 2s cubic-bezier(0, 0, 0.2, 1) infinite;
   pointer-events: none;
 }
 
@@ -78,25 +76,4 @@
 }
 .group-avatar-list-wrap:hover .group-avatar-list {
   transform: scale(1.15) rotate(-3deg);
-}
-
-/* ── Keyframes ── */
-
-/* 悬浮呼吸 */
-@keyframes group-bob {
-  0%, 100% { transform: translateY(0) scale(1); }
-  50% { transform: translateY(-3px) scale(1.04); }
-}
-
-/* 渐变流动 */
-@keyframes group-glow-flow {
-  0%   { background-position: 0% 50%; opacity: 0.5; }
-  50%  { background-position: 100% 50%; opacity: 0.8; }
-  100% { background-position: 0% 50%; opacity: 0.5; }
-}
-
-/* 涟漪扩散 */
-@keyframes group-ping {
-  0%   { transform: scale(1); opacity: 0.6; }
-  75%, 100% { transform: scale(1.25); opacity: 0; }
 }
