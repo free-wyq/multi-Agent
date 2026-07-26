@@ -166,6 +166,75 @@ async function cleanupStaleTestEntities(apiBase: string): Promise<void> {
   } catch {
     /* 非致命 */
   }
+
+  // ── memories（L2 长期记忆，独立实体）：全删（seed 无记忆）──
+  // 记忆是测试数据（任务20c 流程9 建固定 content 的记忆），上一轮失败测试可能留下
+  // 同 content 记忆 → 本轮新建第二条 → 删一条后仍剩一条 → toHaveCount(0) 失败。
+  // seed 无记忆，全删安全。best-effort。
+  try {
+    const r = await fetch(`${apiBase}/api/memory`)
+    if (r.ok) {
+      const mems = (await r.json()) as Array<{ id: string }>
+      for (const m of mems) {
+        await fetch(`${apiBase}/api/memory/${m.id}`, { method: 'DELETE' }).catch(
+          () => {},
+        )
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+
+  // ── scheduled-tasks（定时任务，独立实体）：全删（seed 无定时任务）──
+  // 流程10 建固定 name 的定时任务，上一轮失败测试残留同名任务 → 本轮新建第二条 →
+  // 卡片 filter hasText 命中多个 → strict mode / toHaveCount 失败。seed 无定时任务，
+  // 全删安全（后端 DELETE 先 remove_job 取消调度再删库，无副作用）。best-effort。
+  try {
+    const r = await fetch(`${apiBase}/api/scheduled-tasks`)
+    if (r.ok) {
+      const tasks = (await r.json()) as Array<{ id: string }>
+      for (const t of tasks) {
+        await fetch(`${apiBase}/api/scheduled-tasks/${t.id}`, {
+          method: 'DELETE',
+        }).catch(() => {})
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+
+  // ── im-channels（IM 渠道，独立实体）：全删（seed 无 IM 渠道）──
+  // 流程11 建固定 name 的渠道，同理残留致 strict mode 多命中。seed 无渠道，全删安全。
+  try {
+    const r = await fetch(`${apiBase}/api/im-channels`)
+    if (r.ok) {
+      const chs = (await r.json()) as Array<{ id: string }>
+      for (const c of chs) {
+        await fetch(`${apiBase}/api/im-channels/${c.id}`, { method: 'DELETE' }).catch(
+          () => {},
+        )
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
+
+  // ── mcp connections（MCP 连接，独立实体）：全删（seed 无 MCP 连接）──
+  // 流程8 建固定 name 的 echo MCP 连接，残留致 strict mode 多命中。seed 无 MCP 连接，
+  // 全删安全（后端级联从 agent.mounted_mcp 移除引用）。best-effort。
+  try {
+    const r = await fetch(`${apiBase}/api/mcp`)
+    if (r.ok) {
+      const conns = (await r.json()) as Array<{ id: string }>
+      for (const c of conns) {
+        await fetch(`${apiBase}/api/mcp/${c.id}`, { method: 'DELETE' }).catch(
+          () => {},
+        )
+      }
+    }
+  } catch {
+    /* 非致命 */
+  }
 }
 
 export default async function globalSetup(): Promise<void> {
