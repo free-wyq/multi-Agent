@@ -116,6 +116,13 @@
   margin: 0;
 }
 
+/* Popover 内多段（参数/输出）容器：段间留空隙，避免两段 pre 紧贴。 */
+.chat-tool-payload-wrap {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
 /* 工具 payload 详情块（Popover 内深色 code 块）。 */
 .chat-tool-payload {
   background: #1e1e1e;
@@ -124,12 +131,26 @@
   border-radius: 4px;
   font-size: 12px;
   font-family: 'monospace';
-  margin: 4px 0 0;
+  margin: 0;
   overflow-x: auto;
   white-space: pre-wrap;
   word-break: break-all;
   max-height: 200px;
   overflow-y: auto;
+}
+
+/* Popover 内「参数」「输出」段标签——小号灰大写，区分多段 payload。 */
+.chat-tool-payload-label {
+  font-size: 10px;
+  color: #8b949e;
+  margin-top: 4px;
+  margin-bottom: 2px;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+}
+
+.chat-tool-payload-label:first-child {
+  margin-top: 0;
 }
 
 /* ── 状态行（Claude-Code 风格 "model · Ns · ↓ N tokens · thinking"）── */

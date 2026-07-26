@@ -370,9 +370,13 @@ interface ToolRow {
   key: string
   /** 工具名（run_command / write_file / ...），来自 data.name。 */
   name: string
-  /** start 阶段的参数摘要（data.args，已 stringify + 截断），end 阶段无。 */
+  /** start 阶段的参数摘要（data.args，已 stringify + 截断），完成态也带（从配对 start 取）。
+   *  渲染层完成态与执行中都显示（让用户一眼看到「执行了什么命令」，而非只 run_command + 耗时）。 */
   argsPreview: string
-  /** 该工具调用的原始 payload（start→args / end→output），展开后展示。 */
+  /** 该工具调用的完整参数（data.args，未截断）——「详情」Popover 点开看完整命令用。
+   *  完成态从配对的 start 取；孤儿 start 从自身取。 */
+  args: unknown
+  /** 该工具调用的输出（data.output，仅 end 阶段有）——「详情」Popover 点开看返回结果用。 */
   payload: unknown
   /** 是否 end 阶段（返回结果）。start=调用中，end=已返回。 */
   isEnd: boolean
@@ -498,6 +502,9 @@ export default function ChatMessageBubble({
           key: e.id,
           name,
           argsPreview: startData ? toPreview(startData['args']) : '',
+          // 完成态也带 args（从配对 start 取）——渲染层需显命令参数，否则完成态只显 run_command+耗时，
+          // 看不到「执行了什么」。args 是未截断完整参数，argsPreview 是截断预览。
+          args: startData ? startData['args'] : undefined,
           payload: data['output'],
           isEnd: true,
           elapsedMs: startEv ? Math.max(0, e.timestamp - startEv.timestamp) : undefined,
@@ -515,6 +522,7 @@ export default function ChatMessageBubble({
           key: startEv.id,
           name: String(data['name'] || '(unknown)'),
           argsPreview: toPreview(data['args']),
+          args: data['args'],
           payload: data['args'],
           isEnd: false,
           timestamp: startEv.timestamp,
@@ -731,27 +739,48 @@ export default function ChatMessageBubble({
             <Tag color={row.isEnd ? 'success' : 'processing'} bordered={false} style={{ fontSize: 11 }}>
               {row.isEnd ? formatElapsed(row.elapsedMs ?? 0) : '执行中'}
             </Tag>
-            {row.isEnd && row.payload != null && (
+            {/* 命令参数预览：完成态（isEnd）也从配对 start 的 args 取，执行中从自身 args 取。
+                截断 + ellipsis 防撑爆气泡，让用户一眼看到「执行了什么」（如 curl 'https://...'）。 */}
+            {row.argsPreview && (
+              <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, maxWidth: 320 }} title={toPreview(row.args, 500)}>
+                {row.argsPreview}
+              </Typography.Text>
+            )}
+            {/* 「详情」Popover：完成态含「参数 + 输出」两段（args 来自 start、output 来自 end）；
+                执行中只有「参数」一段（output 未返回）。点开看完整 payload，不撑爆行。 */}
+            {(row.args != null || row.payload != null) && (
               <Popover
                 placement="rightTop"
-                title="输出"
+                title={row.isEnd ? '工具调用详情' : '参数'}
                 content={
-                  <pre className="chat-tool-payload">
-                    {typeof row.payload === 'string'
-                      ? row.payload
-                      : JSON.stringify(row.payload, null, 2)}
-                  </pre>
+                  <div className="chat-tool-payload-wrap">
+                    {row.args != null && (
+                      <>
+                        <div className="chat-tool-payload-label">参数</div>
+                        <pre className="chat-tool-payload">
+                          {typeof row.args === 'string'
+                            ? row.args
+                            : JSON.stringify(row.args, null, 2)}
+                        </pre>
+                      </>
+                    )}
+                    {row.payload != null && (
+                      <>
+                        <div className="chat-tool-payload-label">输出</div>
+                        <pre className="chat-tool-payload">
+                          {typeof row.payload === 'string'
+                            ? row.payload
+                            : JSON.stringify(row.payload, null, 2)}
+                        </pre>
+                      </>
+                    )}
+                  </div>
                 }
                 trigger="click"
                 overlayClassName="chat-tool-payload-popover"
               >
                 <Typography.Link style={{ fontSize: 11 }}>详情</Typography.Link>
               </Popover>
-            )}
-            {!row.isEnd && row.argsPreview && (
-              <Typography.Text type="secondary" ellipsis style={{ fontSize: 11, maxWidth: 220 }}>
-                {row.argsPreview}
-              </Typography.Text>
             )}
           </Space>
         </div>
