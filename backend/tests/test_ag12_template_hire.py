@@ -22,17 +22,20 @@ AG-12 链路（雇佣预设角色加入员工列表）：
 验证八块（确定性断言）：
   ① 正常雇佣（原样）→ 200 + AgentDefinition（id agent_ 前缀 / name=模板名 /
      role=backend_engineer / system_prompt「你」开头 / skills+extra 来自模板 /
-     description 来自模板 / mounted_skills=[]）；
+     description 来自模板 / mounted_skills=[] / slug 去 tpl: 前缀 / icon_emoji 继承模板）；
   ② 员工列表含新雇佣 agent（GET /api/agents 真源交叉验证，列表项 name/role 一致）；
   ③ 单读 GET /api/agents/{id} 回读 == hire 响应（持久化一致）；
   ④ name 覆盖：hire tpl:data-analyst body={name:数据小分} → name=数据小分，
-     其余字段（role/description/skills）取模板原值不改；
-  ⑤ 字段真源一致：hired agent 的 role/system_prompt/skills/extra_skills/description
-     == GET /api/agents/templates 取的同 template_id 模板原值（跨端点单一真源）；
+     其余字段（role/description/skills/slug/icon_emoji）取模板原值不改；
+  ⑤ 字段真源一致：hired agent 的 role/system_prompt/skills/extra_skills/description/
+     slug/icon_emoji == GET /api/agents/templates 取的同 template_id 模板原值（跨端点单一真源）；
   ⑥ 未知 template_id → 404（catalog 无此条目）；
   ⑦ bare agent：mounted_skills/mcp/allowed_tools/denied_tools 均空 list（挂载是
      AG-08/AG-09 独立用户动作，雇佣只创建角色身份，与 AG-01 生成同立场）；
-  ⑧ 收尾清理删除探针 agent，校验无残留（避免污染后续自测/种子）。
+  ⑧ AG-08 元数据继承：slug == template_id 去掉 ``tpl:`` 前缀（如 backend-engineer），
+     icon_emoji == 模板 catalog 的 emoji（如 🔧），证明 hire_template 把模板元数据
+     透传到 AgentCreatePayload → crud.create_agent → 实体列；
+  ⑨ 收尾清理删除探针 agent，校验无残留（避免污染后续自测/种子）。
 
 为何不连 WS：AG-12 是同步 HTTP 接口（hire → crud.create_agent 落库），不经引擎
 inbox/WS 事件流，无实时事件可抓，纯 HTTP 校验即可（与 SK-12 install 同构）。
@@ -50,10 +53,16 @@ BASE = "http://localhost:8000"
 TPL_ID = "tpl:backend-engineer"
 TPL_NAME = "后端开发工程师"
 TPL_ROLE = "backend_engineer"
+# AG-08: hire 继承模板元数据 — slug 是 template_id 去 "tpl:" 前缀，icon_emoji 取 catalog emoji
+TPL_SLUG = "backend-engineer"   # template_id.removeprefix("tpl:")
+TPL_EMOJI = "🔧"                # _CATALOG backend-engineer 的 emoji
 
 # name 覆盖用例用 data-analyst 模板（与 hire 端点 curl 验证同模板，便于横向对照）。
 TPL_ID_OVERRIDE = "tpl:data-analyst"
 OVERRIDE_NAME = "数据小分"
+# AG-08: data-analyst 的 slug/emoji（name 覆盖时这两字段仍取模板原值，不应被影响）
+TPL_OVERRIDE_SLUG = "data-analyst"
+TPL_OVERRIDE_EMOJI = "📊"
 
 
 async def health_ok() -> bool:
@@ -155,15 +164,19 @@ async def main() -> int:
             and isinstance(agent.get("extra_skills"), list)
             and isinstance(agent.get("description"), str)
             and isinstance(agent.get("mounted_skills"), list)
+            # AG-08: slug 去 tpl: 前缀 + icon_emoji 继承模板 emoji
+            and agent.get("slug") == TPL_SLUG
+            and agent.get("icon_emoji") == TPL_EMOJI
         )
         if _check(
             "AgentDefinition 结构完整（id agent_ 前缀 / name=模板名 / role / "
-            "system_prompt「你」开头 / skills+extra list / description / mounted_skills list）",
+            "system_prompt「你」开头 / skills+extra list / description / mounted_skills list / "
+            "slug 去 tpl: 前缀 / icon_emoji 继承模板）",
             ok_struct,
         ):
             print(
                 f"      样本：id={new_id} name={agent.get('name')!r} "
-                f"role={agent.get('role')!r}"
+                f"role={agent.get('role')!r} slug={agent.get('slug')!r} emoji={agent.get('icon_emoji')!r}"
             )
         else:
             errs.append(f"[hire] AgentDefinition 结构异常：{agent}")
@@ -184,9 +197,13 @@ async def main() -> int:
             listed_ok = (
                 listed.get("name") == agent.get("name")
                 and listed.get("role") == agent.get("role")
+                # AG-08: 列表项 slug/icon_emoji 也须 == hire 响应（list_agents 序列化一致）
+                and listed.get("slug") == agent.get("slug")
+                and listed.get("icon_emoji") == agent.get("icon_emoji")
             )
-            if not _check("列表项 name/role == hire 响应", listed_ok):
-                errs.append(f"[list] 列表项漂移：{listed.get('name')}/{listed.get('role')}")
+            if not _check("列表项 name/role/slug/icon_emoji == hire 响应", listed_ok):
+                errs.append(f"[list] 列表项漂移：{listed.get('name')}/{listed.get('role')}"
+                            f"/{listed.get('slug')}/{listed.get('icon_emoji')}")
         else:
             errs.append("[list] 新雇佣 agent 不在员工列表")
 
@@ -206,8 +223,11 @@ async def main() -> int:
                 and reread.get("skills") == agent.get("skills")
                 and reread.get("extra_skills") == agent.get("extra_skills")
                 and reread.get("description") == agent.get("description")
+                # AG-08: slug/icon_emoji 也须持久化一致（实体列写入后回读一致）
+                and reread.get("slug") == agent.get("slug")
+                and reread.get("icon_emoji") == agent.get("icon_emoji")
             )
-            if _check("回读 id/name/role/system_prompt/skills/extra_skills/description 一致",
+            if _check("回读 id/name/role/system_prompt/skills/extra_skills/description/slug/icon_emoji 一致",
                       consistent):
                 pass
             else:
@@ -237,6 +257,20 @@ async def main() -> int:
         if not _check("role/description/skills 取模板原值（name 覆盖不影响角色定义）",
                       rest_ok, f"role={agent_ov.get('role')!r}"):
             errs.append(f"[override] 其余字段异常：{agent_ov}")
+        # AG-08: name 覆盖时 slug/icon_emoji 仍取模板原值（不随 name 改）
+        ov_meta_ok = (
+            agent_ov.get("slug") == TPL_OVERRIDE_SLUG
+            and agent_ov.get("icon_emoji") == TPL_OVERRIDE_EMOJI
+        )
+        if not _check(
+            "name 覆盖时 slug/icon_emoji 仍 == 模板原值（不随 name 改）",
+            ov_meta_ok,
+            f"slug={agent_ov.get('slug')!r} emoji={agent_ov.get('icon_emoji')!r}",
+        ):
+            errs.append(
+                f"[override] AG-08 元数据漂移："
+                f"slug={agent_ov.get('slug')!r} emoji={agent_ov.get('icon_emoji')!r}"
+            )
 
     # ── 5. 字段真源一致：hired agent 字段 == catalog 模板原值（跨端点单一真源）──
     print("\n[check 5] 字段真源一致：hired agent == GET /templates 模板原值")
@@ -246,6 +280,8 @@ async def main() -> int:
             _check("GET /templates 取到目标模板", False)
             errs.append("[xref] /templates 未取到模板")
         else:
+            # AG-08: icon_emoji 直接取模板原值；slug 是 template_id 去 "tpl:" 前缀
+            # （catalog 模板对象无 slug 字段，slug 派生自 template_id，单独比对）
             same = (
                 agent.get("role") == tpl.get("role")
                 and agent.get("system_prompt") == tpl.get("system_prompt")
@@ -253,15 +289,23 @@ async def main() -> int:
                 and agent.get("extra_skills") == tpl.get("extra_skills")
                 and agent.get("description") == tpl.get("description")
                 and agent.get("name") == tpl.get("name")  # 原样雇佣 name==模板名
+                and agent.get("icon_emoji") == tpl.get("icon_emoji")  # AG-08 emoji 继承
             )
-            if _check("hired agent role/system_prompt/skills/extra_skills/description/name == 模板原值",
-                      same):
+            slug_ok = agent.get("slug") == tpl.get("template_id", "").removeprefix("tpl:")
+            if _check(
+                "hired agent role/system_prompt/skills/extra_skills/description/name/icon_emoji == 模板原值"
+                " 且 slug == template_id 去 tpl: 前缀",
+                same and slug_ok,
+            ):
                 print(f"      role={agent.get('role')} skills={len(agent.get('skills', []))} "
-                      f"extra={len(agent.get('extra_skills', []))} 跨端点一致")
+                      f"extra={len(agent.get('extra_skills', []))} slug={agent.get('slug')!r} "
+                      f"emoji={agent.get('icon_emoji')!r} 跨端点一致")
             else:
                 errs.append(
                     f"[xref] 字段不一致：agent role={agent.get('role')!r} "
-                    f"tpl role={tpl.get('role')!r}"
+                    f"tpl role={tpl.get('role')!r} "
+                    f"slug={agent.get('slug')!r} tpl_id={tpl.get('template_id')!r} "
+                    f"emoji={agent.get('icon_emoji')!r} tpl_emoji={tpl.get('icon_emoji')!r}"
                 )
 
     # ── 6. 未知 template_id → 404 ──
@@ -287,7 +331,40 @@ async def main() -> int:
         else:
             errs.append("[bare] 雇佣的 agent 含挂载/工具字段非空（应与 AG-01 生成同 bare 立场）")
 
-    # ── 8. 收尾清理：删除所有本测试雇佣的 agent ──
+    # ── 8. AG-08 元数据继承：slug 去 tpl: 前缀 + icon_emoji 继承模板 ──
+    # hire_template 把 slug=template.template_id.removeprefix("tpl:")、icon_emoji=template.icon_emoji
+    # 透传进 AgentCreatePayload → crud.create_agent → 实体列。本块单独聚焦这两字段的继承契约，
+    # 即使 check 1/5 已含，这里给出独立的可定位断言（slug 前缀剥离 + emoji 非默认 🤖）。
+    print("\n[check 8] AG-08 元数据继承：slug 去 tpl: 前缀 / icon_emoji 继承模板")
+    if agent:
+        slug_stripped = (
+            isinstance(agent.get("slug"), str)
+            and agent.get("slug") == TPL_SLUG
+            and not agent.get("slug", "").startswith("tpl:")  # 确证「去前缀」非原样
+        )
+        emoji_inherited = (
+            isinstance(agent.get("icon_emoji"), str)
+            and agent.get("icon_emoji") == TPL_EMOJI
+            and agent.get("icon_emoji") != "🤖"  # 确证取模板 emoji 非默认占位
+        )
+        if _check(
+            f"slug == {TPL_SLUG!r}（template_id 去 tpl: 前缀，非原样透传）",
+            slug_stripped,
+            f"slug={agent.get('slug')!r}",
+        ):
+            pass
+        else:
+            errs.append(f"[inherit] slug 未正确剥离 tpl: 前缀：{agent.get('slug')!r}")
+        if _check(
+            f"icon_emoji == {TPL_EMOJI!r}（继承模板 catalog emoji，非默认 🤖）",
+            emoji_inherited,
+            f"emoji={agent.get('icon_emoji')!r}",
+        ):
+            print(f"      继承：slug={agent.get('slug')!r} emoji={agent.get('icon_emoji')!r}")
+        else:
+            errs.append(f"[inherit] icon_emoji 未继承模板：{agent.get('icon_emoji')!r}")
+
+    # ── 9. 收尾清理：删除所有本测试雇佣的 agent ──
     print(f"\n[cleanup] 删除 {len(hired_ids)} 个测试 agent")
     for aid in hired_ids:
         ok = await delete_agent(aid)
@@ -309,13 +386,15 @@ async def main() -> int:
         return 1
     print("PASS — 雇佣预设角色加入员工列表端到端验证通过：")
     print("  · 正常雇佣：POST hire tpl:backend-engineer → 200 + AgentDefinition（id agent_ 前缀 /")
-    print("    name=模板名 / role / system_prompt「你」开头 / skills+extra / mounted_skills 空）；")
-    print("  · 员工列表：GET /api/agents 含新雇佣 agent（列表项 name/role 一致）；")
-    print("  · 持久化一致：单读 GET /api/agents/{id} 回读 == hire 响应；")
-    print("  · name 覆盖：body={name} 覆盖 name，其余字段取模板原值（角色定义不改）；")
-    print("  · 字段真源：hired agent 字段 == GET /templates 模板原值（跨端点单一真源）；")
+    print("    name=模板名 / role / system_prompt「你」开头 / skills+extra / mounted_skills 空 /")
+    print("    slug 去 tpl: 前缀 / icon_emoji 继承模板）；")
+    print("  · 员工列表：GET /api/agents 含新雇佣 agent（列表项 name/role/slug/icon_emoji 一致）；")
+    print("  · 持久化一致：单读 GET /api/agents/{id} 回读 == hire 响应（含 slug/icon_emoji）；")
+    print("  · name 覆盖：body={name} 覆盖 name，其余字段（含 slug/icon_emoji）取模板原值；")
+    print("  · 字段真源：hired agent 字段 == GET /templates 模板原值（跨端点单一真源，含 icon_emoji）；")
     print("  · 未知 template_id → 404；")
-    print("  · bare agent：mounted_skills/allowed/denied 全空（挂载是 AG-08 独立动作）。")
+    print("  · bare agent：mounted_skills/allowed/denied 全空（挂载是 AG-08 独立动作）；")
+    print("  · AG-08 元数据继承：slug 剥离 tpl: 前缀、icon_emoji 取模板 emoji 非 🤖 默认。")
     return 0
 
 

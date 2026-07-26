@@ -18,7 +18,8 @@ AG-06 链路（编辑闭环）：
   - 成功后 fetchAgents 刷新列表
 
 本自测验证「编辑员工信息」全链路：创建探针 agent → GET 读原值 → PUT 改 name/role/
-system_prompt/skills/extra_skills/description → 回读 == 改后值 → 列表也含改后值 → 清理。
+system_prompt/skills/extra_skills/description/slug/icon_emoji → 回读 == 改后值 → 列表也含改后值
+→ 清理。
 
 为何不复刻前端表单：AG-06 编辑是「读原值→改→写回」的标准 PUT 闭环，前端表单只是 UI 载体，
 核心验证在后端 PUT /api/agents/{id} 的「精准合并 + 持久化 + 回读一致」。前端 handleCreateOrUpdate
@@ -26,15 +27,22 @@ system_prompt/skills/extra_skills/description → 回读 == 改后值 → 列表
 确认无缺陷，自测聚焦后端 PUT 闭环 + 前端 payload 结构契约（与 SK-09「后端字段契约 + 前端算法」
 同思路：前端读什么/写什么字段，后端就接什么/存什么，编辑即成立）。
 
-验证七块（确定性断言）：
+AG-08 字段（slug/icon_emoji）随编辑闭环一并验证：create 透传 → GET 回读 → PUT 改值 → 回读持久化，
+全走 EDIT_FIELDS 字段集（check 2-7 自动覆盖）。另加 check 8 单独验证 update_agent 的
+``exclude_none=True`` 语义——PUT 传 slug=None/icon_emoji=None 不应清除原值（前端表单留空时
+``undefined`` 经 JSON 序列化被 pydantic 当 None，后端必须保原值不被误清，否则用户在编辑别的
+字段时会无意抹掉头像/slug）。
+
+验证八块（确定性断言）：
   ① 创建探针 agent（自定义角色，system_prompt 必填）→ 200 + AgentDefinition；
   ② GET 读原值 == create 响应（编辑前基线）；
-  ③ PUT 改 name/role/system_prompt/skills/extra_skills/description → 200 + 返回改后值
-     （name/role/system_prompt/skills/extra_skills/description 全部更新）；
+  ③ PUT 改 name/role/system_prompt/skills/extra_skills/description/slug/icon_emoji → 200 + 返回改后值
+     （全部字段更新）；
   ④ GET 回读 == update 响应（修改已持久化）；
   ⑤ GET 回读 != 编辑前原值（确证真改了非幂等空操作）；
   ⑥ GET /api/agents 列表含改后 agent（列表也反映编辑结果）；
-  ⑦ 字段非「只读」验证：updated_at 严格大于 created_at（编辑刷新了时间戳）。
+  ⑦ 字段非「只读」验证：updated_at 严格大于 created_at（编辑刷新了时间戳）；
+  ⑧ PUT 传 slug=None/icon_emoji=None 时原值不被清除（exclude_none 语义守护 AG-08 字段）。
 
 为何不连 WS：AG-06 是同步 HTTP 接口（update_agent → commit 完成才返回），不经引擎 inbox/WS，
 纯 HTTP 校验即可（与 SK-05/SK-09 同构，比 PL 系列更简单）。
@@ -58,6 +66,9 @@ ORIG = {
     "skills": ["探针"],
     "extra_skills": ["初始技能"],
     "description": "编辑前：初始探针",
+    # AG-08: create 时即带 slug/icon_emoji，验证全链路透传 + 编辑闭环改值
+    "slug": "ag06-probe",
+    "icon_emoji": "🧪",
 }
 
 # 编辑后：全部字段改为不同值（验证「真改了」非空操作）
@@ -68,10 +79,16 @@ EDITED = {
     "skills": ["探针", "新增技能"],
     "extra_skills": ["改后技能A", "改后技能B"],
     "description": "编辑后：信息已更新",
+    # AG-08: 编辑改 slug/icon_emoji，验证 update_agent 精准合并不丢这两列
+    "slug": "ag06-edited",
+    "icon_emoji": "🔧",
 }
 
-# 编辑需改的字段（断言用）
-EDIT_FIELDS = ["name", "role", "system_prompt", "skills", "extra_skills", "description"]
+# 编辑需改的字段（断言用）—— AG-08 slug/icon_emoji 纳入，与全字段编辑闭环同口径
+EDIT_FIELDS = [
+    "name", "role", "system_prompt", "skills", "extra_skills",
+    "description", "slug", "icon_emoji",
+]
 
 
 async def health_ok() -> bool:
@@ -148,6 +165,9 @@ async def main() -> int:
             and agent.get("skills") == ORIG["skills"]
             and agent.get("extra_skills") == ORIG["extra_skills"]
             and agent.get("description") == ORIG["description"]
+            # AG-08: create 透传 slug/icon_emoji 到实体列，回显必须 == ORIG
+            and agent.get("slug") == ORIG["slug"]
+            and agent.get("icon_emoji") == ORIG["icon_emoji"]
         )
         if _check("创建探针 → 200 + 全字段 == ORIG", ok_create,
                   f"agent={agent}"):
@@ -169,7 +189,7 @@ async def main() -> int:
                       f"skills={before.get('skills')} extra={before.get('extra_skills')}")
 
         # ── 3. PUT 改全字段 → 200 + 返回改后值 ──
-        print("\n[check 3] PUT 改 name/role/system_prompt/skills/extra_skills/description")
+        print("\n[check 3] PUT 改 name/role/system_prompt/skills/extra_skills/description/slug/icon_emoji")
         updated = await update_agent(agent_id, EDITED)
         if updated is None:
             _check("PUT 返回 200", False, "404/None")
@@ -179,7 +199,8 @@ async def main() -> int:
             if _check("PUT 返回全字段 == EDITED", ok_update,
                       f"name={updated.get('name')!r} sp={updated.get('system_prompt')[:20]!r}…"):
                 print(f"      编辑后：name={updated.get('name')!r} "
-                      f"skills={updated.get('skills')} extra={updated.get('extra_skills')}")
+                      f"skills={updated.get('skills')} extra={updated.get('extra_skills')} "
+                      f"slug={updated.get('slug')!r} emoji={updated.get('icon_emoji')!r}")
             else:
                 errs.append(f"[update] PUT 返回字段不符：{updated}")
 
@@ -232,6 +253,41 @@ async def main() -> int:
             else:
                 errs.append(f"[ts] updated_at({ua!r}) < created_at({ca!r})")
 
+        # ── 8. AG-08 exclude_none 守护：PUT 传 slug=None/icon_emoji=None 不清原值 ──
+        # update_agent 用 model_dump(exclude_unset=True, exclude_none=True) —— 前端表单
+        # 留空时字段经 JSON 序列化为 None，后端必须跳过不写，否则用户改别的字段会无意
+        # 抹掉头像/slug。本块单独验证这一语义不被回归破坏。
+        print("\n[check 8] AG-08 exclude_none 守护：PUT slug=None/icon_emoji=None 不清原值")
+        # 只传 name 一个字段 + slug=None + icon_emoji=None，模拟前端表单留空头像/slug
+        preserve_body = {
+            "name": "AG06保字段测试",
+            "slug": None,
+            "icon_emoji": None,
+        }
+        preserved = await update_agent(agent_id, preserve_body)
+        if preserved is None:
+            _check("PUT preserve 返回 200", False, "404/None")
+            errs.append("[preserve] PUT 返回 None")
+        else:
+            # name 被改（exclude_unset 包含），slug/icon_emoji 必须保留 EDITED 值（被 None 排除）
+            preserve_ok = (
+                preserved.get("name") == "AG06保字段测试"
+                and preserved.get("slug") == EDITED["slug"]
+                and preserved.get("icon_emoji") == EDITED["icon_emoji"]
+            )
+            if _check(
+                "slug/icon_emoji 保留 EDITED 值（exclude_none 不误清 AG-08 字段）",
+                preserve_ok,
+                f"slug={preserved.get('slug')!r} emoji={preserved.get('icon_emoji')!r}",
+            ):
+                print(f"      保留：slug={preserved.get('slug')!r} "
+                      f"emoji={preserved.get('icon_emoji')!r} name 已改")
+            else:
+                errs.append(
+                    f"[preserve] AG-08 字段被 None 清除："
+                    f"slug={preserved.get('slug')!r} emoji={preserved.get('icon_emoji')!r}"
+                )
+
     finally:
         # 收尾清理：删除探针 agent，避免污染后续自测
         if created and agent_id:
@@ -256,8 +312,9 @@ async def main() -> int:
             print(f"  - {e}")
         return 1
     print("PASS — 编辑员工信息端到端打通：")
-    print("  · 创建探针 → GET 读原值（基线）→ PUT 改全字段 → GET 回读 == PUT 响应 →")
-    print("    回读 != 原值（真改了）→ 列表反映编辑 → updated_at 刷新 全过")
+    print("  · 创建探针 → GET 读原值（基线）→ PUT 改全字段（含 slug/icon_emoji）→")
+    print("    GET 回读 == PUT 响应 → 回读 != 原值（真改了）→ 列表反映编辑 →")
+    print("    updated_at 刷新 → AG-08 exclude_none 守护（None 不清原值）全过")
     return 0
 
 
