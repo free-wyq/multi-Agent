@@ -1024,6 +1024,100 @@ export const scheduledTaskApi = {
   history: (id: string) => http<ScheduledTaskRun[]>('GET', `/api/scheduled-tasks/${id}/runs`),
 }
 
+// ── IM Channel API (PRD 3.6 IM 网关 · 任务19c 后端 / 任务19d 前端) ──────
+
+/** IM 平台字面量——对齐后端 ADAPTERS 注册表（wechat/dingtalk/feishu，任务19b）。
+ *  档四新增平台在此扩联合 + 后端 adapters/ 注册即可，gateway 代码不变（open/closed）。 */
+export type ImPlatform = 'wechat' | 'dingtalk' | 'feishu'
+
+/** 入站投递目标类型——single 走 route_direct_message，group 走 route_user_message。
+ *  对齐后端 models/im.ImChannel.target_kind（默认 single，gateway 按此分流）。 */
+export type ImTargetKind = 'single' | 'group'
+
+/**
+ * IM 渠道实体（后端 models/im.ImChannel 的 TS 镜像，snake_case）。
+ *
+ * 一行 = 一条配置好的 IM bot 连接（企业微信/钉钉/飞书）。``platform`` 选 adapter；
+ * ``config`` 持平台特异凭证 JSON（app_id/app_secret/verify_token/webhook_url 等）。
+ *
+ * ``config`` 在 GET 返回时**脱敏**（敏感 key value → ``"***"``，复用 mcp._mask_sensitive
+ * 正则）；POST/PUT 接受明文，PUT 时 ``"***"`` 值会被后端 merge 回库中原值（保留未改密钥，
+ * 与 mcpApi 同款，单一真源不复制实现）。
+ *
+ * ``target_conversation_id`` 是入站投递的内部目标（单聊 conversation_id 或群聊 group_id，
+ * Path C 后两语义统一于 conversation_id 字段），gateway 按 ``target_kind`` 分流到
+ * route_direct_message / route_user_message——IM 只是又一个 caller，与前端用户消息同形。
+ *
+ * ``enabled`` 默认 False（channel 显式 enable 后才接收入站，§5.1 410 拒绝未启用）；
+ * ``outbound_log`` mock 阶段恒 True（出站走 logger.info，e2e caplog 断言该行）。
+ */
+export interface ImChannel {
+  id: string
+  name: string
+  platform: ImPlatform | string
+  config: Record<string, unknown> | null
+  target_conversation_id: string
+  target_kind: ImTargetKind | string
+  target_agent_id: string
+  enabled: boolean
+  outbound_log: boolean
+  session_bindings: Record<string, unknown> | null
+  metadata_: Record<string, unknown> | null
+  created_at: string
+  updated_at: string
+}
+
+/** POST/PUT /api/im-channels payload（后端 ImChannelCreatePayload 镜像）。
+ *  name/platform/target_conversation_id 必填，其余可选；enabled 默认 False。
+ *  config 接受明文（前端表单录入），GET 返回脱敏副本。 */
+export interface ImChannelCreatePayload {
+  name: string
+  platform: ImPlatform | string
+  config?: Record<string, unknown> | null
+  target_conversation_id: string
+  target_kind?: ImTargetKind | string
+  target_agent_id?: string
+  enabled?: boolean
+  outbound_log?: boolean
+  session_bindings?: Record<string, unknown> | null
+  metadata_?: Record<string, unknown> | null
+}
+
+/** POST /api/im-channels/{id}/test 返回（mock 出站探针结果，ImChannelTestResult 镜像）。
+ *  Mock 阶段 ok=True 表示 adapter 加载 + logger.info 出站行触发（e2e caplog 断言该行）；
+ *  失败时 ok=False + error 携带原因（永不 500，失败内联展示，与 /api/providers/{id}/test 同款）。 */
+export interface ImChannelTestResult {
+  ok: boolean
+  platform: string
+  target: string
+  error: string | null
+}
+
+/** IM 网关渠道 API（1:1 映射后端 /api/im-channels + /api/im/inbound 路由表，任务19c）。
+ *  与 mcpApi/scheduledTaskApi 同构（CRUD + enable/disable + 测试探针），区别在 config 脱敏
+ *  走 mcp._mask_sensitive 单一真源 + 测试探针触发 mock 出站日志（非自省工具列表）。 */
+export const imChannelApi = {
+  /** 列出全部 IM 渠道（按 created_at 排序，可选按 platform 过滤；GET 返回脱敏 config）。 */
+  list: (platform?: string) =>
+    http<ImChannel[]>('GET', '/api/im-channels', undefined, platform ? { platform } : undefined),
+  /** 单读渠道（404 返 null；GET 返回脱敏 config）。 */
+  get: (id: string) => http<ImChannel | null>('GET', `/api/im-channels/${id}`),
+  /** 创建渠道（明文 config 落库，返回脱敏副本）。enabled 默认 False。 */
+  create: (body: ImChannelCreatePayload) =>
+    http<ImChannel>('POST', '/api/im-channels', body),
+  /** 更新渠道（config 中 "***" 值会被后端 merge 回原值，保留未改密钥）。 */
+  update: (id: string, body: ImChannelCreatePayload) =>
+    http<ImChannel | null>('PUT', `/api/im-channels/${id}`, body),
+  /** 删除渠道。 */
+  delete: (id: string) => http<boolean>('DELETE', `/api/im-channels/${id}`),
+  /** 启用渠道（set_enabled(True)，启用后接收入站）。 */
+  enable: (id: string) => http<ImChannel | null>('POST', `/api/im-channels/${id}/enable`),
+  /** 禁用渠道（set_enabled(False)，§5.1 410 拒绝入站 + §7.3 出站对称静默）。 */
+  disable: (id: string) => http<ImChannel | null>('POST', `/api/im-channels/${id}/disable`),
+  /** mock 出站探针：实例化 adapter 调 send_outbound，返回 ImChannelTestResult（永不 500）。 */
+  test: (id: string) => http<ImChannelTestResult>('POST', `/api/im-channels/${id}/test`),
+}
+
 // ── Usage API (PRD 3.6 Token 仪表盘 · 任务15a) ─────────────────
 
 /**

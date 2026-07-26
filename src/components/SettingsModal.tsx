@@ -13,7 +13,9 @@
  *  - 模型服务商：多 provider 管理（providerApi CRUD + activate），新增/编辑委托 ProviderEditor 组件
  *    （多模型目录 + 连接级配置；PE-07 替换原内联单模型 Form）。本组件只管列表展示 + 开关启用 + 删除。
  *  - 外部系统：智能体数据导出（文件下载 / Webhook 推送 / 数据库同步），占位卡片待后端端点。
- *  - 即时消息：接收外部 IM（微信/钉钉/飞书）消息转发给智能体，占位卡片待接入。
+ *  - 即时消息（任务19d）：ImChannelPanel 接入企业微信/钉钉/飞书——imChannelApi CRUD
+ *    + 启停 + mock 出站探针 + 配置 Modal（config 脱敏回显，密钥 *** merge 保留原值，
+ *    与 mcpApi 同款单一真源）；入站回调 /api/im/inbound/{channel_id} 由后端 gateway 处理。
  *  - 用户信息：Token 用量仪表盘（UsageDashboard，任务15b/15c）——聚合 chat/ask 路径回复的
  *    tokens/推理 token/耗时/消息数，支持区间+模型+维度（model/day/conversation/agent）过滤；
  *    顶部内联 Alert 标注 execute 路径未计入口径（设计取舍，待任务2后端补全 stats 后自动变全）。
@@ -38,6 +40,7 @@ import MemoryPage from '../pages/MemoryPage'
 import SchedulePage from '../pages/SchedulePage'
 import ProviderEditor from './ProviderEditor'
 import UsageDashboard from './UsageDashboard'
+import ImChannelPanel from './ImChannelPanel'
 import { providerApi, type LlmProvider } from '../services/api'
 import { useSettings } from '../contexts/SettingsContext'
 import { useTts } from '../hooks/useTts'
@@ -295,34 +298,14 @@ export default function SettingsModal({ open, onClose, initialKey = 'mcp' }: Set
             </div>
           )}
           {activeKey === 'im' && (
-            <div style={{ maxWidth: 560 }}>
-              <div style={{ marginBottom: 4, fontSize: 16, fontWeight: 600 }}>
-                即时消息
-              </div>
-              <div style={{ fontSize: 13, color: '#999', marginBottom: 20 }}>
-                接收外部即时通讯平台消息，转发给智能体处理；智能体回复可回推到对应平台
-              </div>
-              <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                <ImChannelCard
-                  name="微信"
-                  desc="接入企业微信 / 微信，接收好友或群消息转发给智能体，回复回推到会话"
-                  status="未接入"
-                  onAction={() => message.info('微信接入配置开发中')}
-                />
-                <ImChannelCard
-                  name="钉钉"
-                  desc="接入钉钉机器人，接收钉钉群 @ 消息转发给智能体，回复推送到钉钉群"
-                  status="未接入"
-                  onAction={() => message.info('钉钉接入配置开发中')}
-                />
-                <ImChannelCard
-                  name="飞书"
-                  desc="接入飞书机器人，接收飞书消息转发给智能体，回复推送到飞书会话"
-                  status="未接入"
-                  onAction={() => message.info('飞书接入配置开发中')}
-                />
-              </div>
-            </div>
+            // 「即时消息」占位替换为 IM 渠道面板（任务19d）。
+            // ImChannelPanel 自带数据拉取（imChannelApi CRUD + conversationApi/groupApi/agentApi
+            // 联动目标候选）+ height:100%+overflowY:auto 根容器，塞进右侧内容区自适应，
+            // 与 McpPage/SkillPage/MemoryPage/SchedulePage 嵌入同款（外层 body overflow auto 兜底）。
+            // 渠道列表（Card 列表 + 平台 Tag + 启停/测试/删除 actions）+ 配置 Modal（platform
+            // Segmented + target_kind 分流目标候选 + config 子表单脱敏回显 + 启用/出站日志开关）；
+            // 测试按钮触发 mock 出站探针（后端 adapter.send_outbound → logger.info，e2e 断言该行）。
+            <ImChannelPanel />
           )}
           {activeKey === 'user' && (
             // 「用户信息」占位替换为 Token 用量仪表盘（任务15c）。
@@ -507,43 +490,6 @@ function ExternalExportCard({
         <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
       </div>
       <Button size="small" onClick={onAction}>配置</Button>
-    </div>
-  )
-}
-
-/** 即时消息 — 接入渠道卡片：平台名 + 描述 + 接入状态 + 接入按钮。 */
-function ImChannelCard({
-  name,
-  desc,
-  status,
-  onAction,
-}: {
-  name: string
-  desc: string
-  status: string
-  onAction: () => void
-}) {
-  return (
-    <div
-      style={{
-        border: '1px solid var(--border-card)',
-        borderRadius: 8,
-        padding: '14px 16px',
-        background: 'var(--surface-raised)',
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'space-between',
-        gap: 12,
-      }}
-    >
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 4 }}>
-          <span style={{ fontSize: 14, fontWeight: 600 }}>{name}</span>
-          <Tag style={{ margin: 0 }}>{status}</Tag>
-        </div>
-        <div style={{ fontSize: 12, color: '#999', lineHeight: 1.5 }}>{desc}</div>
-      </div>
-      <Button size="small" onClick={onAction}>接入</Button>
     </div>
   )
 }
