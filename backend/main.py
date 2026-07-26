@@ -16,6 +16,7 @@ from api import (
     agents,
     conversations,
     groups,
+    im,
     mcp,
     memory,
     messages,
@@ -77,3 +78,6 @@ app.include_router(scheduled_tasks.router)
 app.include_router(websocket.router)
 app.include_router(plan.router)
 app.include_router(usage.router)
+# 任务19c IM 网关：渠道管理 CRUD + 启停 + 测试 + 平台入站回调端点
+app.include_router(im.router)
+app.include_router(im.im_inbound)

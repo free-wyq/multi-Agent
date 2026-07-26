@@ -155,6 +155,21 @@ async def persist_agent_reply(
         # 观测是 best-effort：正则/计数不应影响落盘主流程。
         logger.debug("[reply %s] count_card_fragments 失败（忽略）", msg.id, exc_info=True)
     await emit_message_added(msg.model_dump())
+    # 任务19c IM 出站钩子：reply 真源落盘 + emit 后，把回复推给绑定了该会话的 IM
+    # channel。无 channel → no-op（纯前端对话零副作用，行为同 19c 前）。reply.py
+    # 只调一个 ``maybe_*`` 函数，不知 IM 是否存在 / 几个 channel / 什么平台——
+    # adapter 查表 + 分发全在 ``engine.im.outbound``（见 docs/im-gateway-design.md
+    # §5.2 方案 C）。延迟 import 防 reply↔IM 循环（outbound 反向 import store.crud，
+    # 不 import reply）。per-channel try/except 隔离：单 channel 失败不 raise 到此
+    # 处崩 reply 主流程（落盘 + emit 已完成，出站是 best-effort 投递）。
+    try:
+        from engine.im.outbound import maybe_deliver_outbound
+        await maybe_deliver_outbound(msg.model_dump())
+    except Exception:
+        logger.debug(
+            "[reply %s] IM outbound hook failed (reply already persisted + emitted)",
+            msg.id, exc_info=True,
+        )
     return msg.model_dump()
 
 

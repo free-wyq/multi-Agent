@@ -22,6 +22,8 @@ from models import (
     Group,
     GroupFile,
     GroupMember,
+    ImChannel,
+    ImChannelCreatePayload,
     LlmProvider,
     McpConnection,
     Memory,
@@ -39,6 +41,7 @@ from store.entities import (
     AgentEntity,
     ConversationEntity,
     GroupEntity,
+    ImChannelEntity,
     LlmProviderEntity,
     McpConnectionEntity,
     MemberEntity,
@@ -63,6 +66,7 @@ _PREFIX_MAP = {
     "schedrun": "schedrun_",
     "provider": "prov_",
     "mem": "mem_",
+    "imc": "imc_",
 }
 
 
@@ -2475,3 +2479,176 @@ async def search_memories(
         await db.commit()
 
         return [(_memory_to_model(ent), score_by_id.get(ent.id, 0.0)) for ent in ordered]
+
+
+# ── IM channel helpers (任务19c · IM 网关) ────────────────────────────
+
+
+def _im_channel_to_model(c: ImChannelEntity) -> ImChannel:
+    return ImChannel.model_validate(
+        {
+            "id": c.id,
+            "name": c.name,
+            "platform": c.platform,
+            "config": c.config,
+            "target_conversation_id": c.target_conversation_id,
+            "target_kind": c.target_kind,
+            "target_agent_id": c.target_agent_id,
+            "enabled": bool(c.enabled),
+            "outbound_log": bool(c.outbound_log),
+            "session_bindings": c.session_bindings,
+            "metadata_": c.metadata_,
+            "created_at": c.created_at,
+            "updated_at": c.updated_at,
+        }
+    )
+
+
+async def list_im_channels(
+    *, platform: str | None = None, enabled: bool | None = None
+) -> list[ImChannel]:
+    """List IM channels, optionally filtered by platform / enabled.
+
+    Optional filters keep the query single-source for the gateway's outbound
+    lookup (``enabled=True`` + ``target_conversation_id`` match) and the API's
+    list view (no filter / by platform). Ordered by ``created_at``.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        stmt = select(ImChannelEntity).order_by(ImChannelEntity.created_at)
+        if platform:
+            stmt = stmt.where(ImChannelEntity.platform == platform)
+        if enabled is not None:
+            stmt = stmt.where(ImChannelEntity.enabled == (1 if enabled else 0))
+        rows = (await db.execute(stmt)).scalars().all()
+        return [_im_channel_to_model(r) for r in rows]
+
+
+async def get_im_channel(channel_id: str) -> ImChannel | None:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ImChannelEntity, channel_id)
+        return _im_channel_to_model(row) if row else None
+
+
+async def get_im_channel_entity(channel_id: str) -> ImChannelEntity | None:
+    """Return the RAW ORM row (unmasked config) — used by the gateway + the
+    test endpoint, which need the real credentials to instantiate the adapter.
+
+    Mirrors ``crud.get_provider_entity`` (raw entity for the test probe that
+    must authenticate): the masked ``get_im_channel`` Pydantic model won't do
+    for actually sending outbound / verifying inbound.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        return await db.get(ImChannelEntity, channel_id)
+
+
+async def create_im_channel(payload: Any) -> ImChannel:
+    from store.database import SessionLocal
+
+    ts = _now_iso()
+    entity = ImChannelEntity(
+        id=_next_id("imc"),
+        name=payload.name,
+        platform=payload.platform,
+        config=payload.config,
+        target_conversation_id=payload.target_conversation_id,
+        target_kind=getattr(payload, "target_kind", "single") or "single",
+        target_agent_id=getattr(payload, "target_agent_id", "") or "",
+        enabled=1 if getattr(payload, "enabled", False) else 0,
+        outbound_log=1 if getattr(payload, "outbound_log", True) else 0,
+        session_bindings=getattr(payload, "session_bindings", None),
+        metadata_=getattr(payload, "metadata_", None),
+        created_at=ts,
+        updated_at=ts,
+    )
+    async with SessionLocal() as db:
+        db.add(entity)
+        await db.commit()
+        await db.refresh(entity)
+    return _im_channel_to_model(entity)
+
+
+async def update_im_channel(channel_id: str, payload: Any) -> ImChannel | None:
+    from store.database import SessionLocal
+
+    data = payload.model_dump(exclude_unset=True, exclude_none=True)
+    async with SessionLocal() as db:
+        row = await db.get(ImChannelEntity, channel_id)
+        if not row:
+            return None
+        for k, v in data.items():
+            if k in (
+                "name",
+                "platform",
+                "config",
+                "target_conversation_id",
+                "target_kind",
+                "target_agent_id",
+                "enabled",
+                "outbound_log",
+                "session_bindings",
+                "metadata_",
+            ):
+                if k in ("enabled", "outbound_log"):
+                    setattr(row, k, 1 if v else 0)
+                else:
+                    setattr(row, k, v)
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return _im_channel_to_model(row)
+
+
+async def set_im_channel_enabled(channel_id: str, enabled: bool) -> ImChannel | None:
+    """Toggle a channel's enabled state (启停开关)."""
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ImChannelEntity, channel_id)
+        if not row:
+            return None
+        row.enabled = 1 if enabled else 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+    return _im_channel_to_model(row)
+
+
+async def delete_im_channel(channel_id: str) -> bool:
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ImChannelEntity, channel_id)
+        if not row:
+            return False
+        await db.delete(row)
+        await db.commit()
+        return True
+
+
+async def list_im_channels_for_target(target_conversation_id: str) -> list[ImChannel]:
+    """List channels bound to a target conversation (出站钩子真源查询).
+
+    ``maybe_deliver_outbound`` calls this with the reply's ``conversation_id``
+    to find every channel that should receive the reply's outbound push.
+    Returns enabled channels only (disabled channels are inbound-silent per
+    §5.1, and §7.3 simplification makes outbound symmetric — disable 双向静默).
+    The caller further filters by ``outbound_log`` if it only wants logging
+    channels, but the query returns all enabled so the gateway can decide.
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        stmt = (
+            select(ImChannelEntity)
+            .where(ImChannelEntity.target_conversation_id == target_conversation_id)
+            .where(ImChannelEntity.enabled == 1)
+            .order_by(ImChannelEntity.created_at)
+        )
+        rows = (await db.execute(stmt)).scalars().all()
+        return [_im_channel_to_model(r) for r in rows]

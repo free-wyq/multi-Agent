@@ -12,6 +12,7 @@ from .group import (
     get_collaboration_mode,
     get_leader_strategy,
 )
+from .im import ImChannel, ImChannelCreatePayload, ImChannelTestResult
 from .llm_provider import LlmModel, LlmProvider, LlmProviderCreatePayload
 from .mcp import McpConnection, McpConnectionCreatePayload
 from .memory import (
@@ -47,6 +48,9 @@ __all__ = [
     "GroupFile",
     "get_leader_strategy",
     "get_collaboration_mode",
+    "ImChannel",
+    "ImChannelCreatePayload",
+    "ImChannelTestResult",
     "Task",
     "TaskCreatePayload",
     "TaskStatus",
