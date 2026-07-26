@@ -541,6 +541,15 @@ class AgentEngine:
                 report_task_id = (task.get("data") or {}).get(
                     "dispatch_task_id"
                 ) or task_id
+                # 任务12：report-back invoke_turn 可能抛 InvalidUpdateError（turn_count
+                # 并发写债——见 group_runtime.invoke_turn 的 except 分支）。重抛会冒泡到
+                # ``_execute_body`` → ``_handle_task`` 的 ``await self._worker_task`` →
+                # 该 try 只 catch CancelledError，普通 Exception 会逃逸到 ``_run_loop``
+                # 的 ``except Exception``（logger.exception 后引擎存活继续 dequeue）。
+                # 这是正确语义：report-back 失败不杀引擎，但也不假装成功（plan 步骤
+                # 保持 dispatched，handle_reply_group 未跑——下次 report-back 或重派兜底）。
+                # 这里不另加 try/except——让 group_runtime 的日志 + 上层 _run_loop 的
+                # 兜底 logger.exception 双重记录，单一真源在 group_runtime。
                 await rt.invoke_turn(
                     incoming_kind="agent_reply",
                     incoming_message=msg,

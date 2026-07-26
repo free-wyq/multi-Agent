@@ -69,6 +69,7 @@ import logging
 import os
 from typing import TYPE_CHECKING, Any
 
+from langgraph.errors import InvalidUpdateError
 from langgraph.graph import END
 from langgraph.types import Command
 
@@ -797,6 +798,25 @@ class GroupRuntime:
                 # stop-button path owns the terminal UI state).
                 cancelled = True
                 raise
+            except InvalidUpdateError as e:
+                # 任务12 债务确认（invoke_turn 路径 twin）：turn_count/current_speaker
+                # 是 last_value（无 reducer）channel，LangGraph 禁止一个 superstep 内
+                # 多节点写它。``_turn_lock`` 已在入口序列化「同 runtime 两 ainvoke」
+                # 消除了该撞点，worker.py 的 ``is_dispatch_fanout`` 守卫又排除了
+                # ``Send`` 扇出节点写 last-value 的可能；理论上 invoke_turn 路径不再
+                # 触发。若仍触发（脚本高并发 / 新增节点忘了守卫），加日志暴露撞点，
+                # 不静默吞——重抛让上层按失败回合处理（避免假装回合成功致状态错乱）。
+                logger.error(
+                    "[group_runtime] invoke_turn turn_count/current_speaker "
+                    "InvalidUpdateError on group=%s thread=%s (turn_seq=%d, kind=%s) — "
+                    "a node wrote a last-value channel in a multi-writer superstep "
+                    "(Send fan-out / report-back fork). Trace the write site; do NOT "
+                    "swallow (re-raising so the caller treats this turn as failed). "
+                    "Error: %s",
+                    self.group_id, thread_id, self._turn_seq, incoming_kind, e,
+                    exc_info=True,
+                )
+                raise
             finally:
                 coord_mod.set_reply_callback(None)
                 worker_mod.set_reply_callback(None)
@@ -901,7 +921,27 @@ class GroupRuntime:
             except asyncio.CancelledError:
                 cancelled = True
                 raise
-            finally:
+            except InvalidUpdateError as e:
+                # 任务12 债务确认：resume_plan 路径 turn_count/current_speaker
+                # last-value channel 并发写。``_turn_lock`` 已在 invoke_turn/resume_plan
+                # 入口序列化同 runtime 的 ainvoke，理论上锁住后不该再撞；若仍触发，
+                # 说明撞点不在「同 runtime 两 ainvoke」（锁覆盖范围之内），而在「同一
+                # ``ainvoke`` 内某 superstep 多节点同写 last_value」（``Send`` 扇出 +
+                # report-back 分叉链路上某节点绕过了 worker.py 的 ``is_dispatch_fanout``
+                # 守卫）。这是 task27 凌晨脚本 2 次 ``At key 'turn_count': Can receive
+                # only one value per step`` 的真因方向，加日志暴露撞点，不静默吞——
+                # 重抛让上层 registry 按失败回合处理（避免假装 resume 成功致派工死锁）。
+                logger.error(
+                    "[group_runtime] resume_plan turn_count/current_speaker "
+                    "InvalidUpdateError on group=%s thread=%s (turn_seq=%d) — "
+                    "a node wrote a last-value channel in a multi-writer superstep "
+                    "(Send fan-out / report-back fork). Trace the write site; do NOT "
+                    "swallow (re-raising so the caller treats this turn as failed). "
+                    "Error: %s",
+                    self.group_id, thread_id, self._turn_seq, e,
+                    exc_info=True,
+                )
+                raise
                 coord_mod.set_reply_callback(None)
                 worker_mod.set_reply_callback(None)
                 worker_mod.set_group_runtime(None)
