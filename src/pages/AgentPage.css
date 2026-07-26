@@ -111,18 +111,39 @@
   gap: 20px;
 }
 
-/* ── 卡片 cover（banner + 浮起的头像）── */
-.agent-card-cover {
-  position: relative;
+/* ── 智能体卡片:复刻模板广场 .agent-template-card 扁平结构,叠加角色色 tint ── */
+.agent-card.agent-card--tpl {
+  border: 1px solid #eef2ff;
+  border-radius: 12px;
+  padding: 16px;
+  /* 兜底浅蓝白渐变(无 color-mix) */
+  background: linear-gradient(180deg, #fafbff 0%, #ffffff 100%);
+  /* color-mix:极浅角色色渐变(5%)——保留 [[agent-page-redesign]] 角色色辨识,不丢 */
+  background: linear-gradient(180deg, color-mix(in srgb, var(--agent-color) 5%, #ffffff) 0%, #ffffff 100%);
+  transition: transform 0.2s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+  display: flex;
+  flex-direction: column;
 }
 
-/* 顶部渐变条 */
-.agent-card-banner {
-  height: 6px;
+.agent-card.agent-card--tpl:hover {
+  transform: translateY(-2px);
+  /* 角色色系阴影(14% alpha),与模板广场 indigo 12% 同强度 */
+  box-shadow: 0 8px 20px color-mix(in srgb, var(--agent-color) 14%, transparent);
+  border-color: color-mix(in srgb, var(--agent-color) 30%, #c7d2fe);
 }
 
-/* 工作中 banner 脉冲（working 状态类挂在 AntD Card 上）*/
-.agent-card--working .agent-card-banner {
+/* 状态点挪到顶部行内(替代模板 cat-tag 位置):去掉绝对定位/边框,变小圆点 */
+.agent-template-card-top .agent-card-status-dot {
+  position: static;
+  width: 20px;
+  height: 20px;
+  border: none;
+  box-shadow: none;
+  flex-shrink: 0;
+}
+
+/* 工作中:状态点脉冲(banner 没了,改挂状态点) */
+.agent-card--working .agent-template-card-top .agent-card-status-dot {
   animation: banner-pulse 2s ease-in-out infinite;
 }
 
@@ -131,115 +152,70 @@
   50% { opacity: 0.7; }
 }
 
-/* ── 头像（robot-avatar.png + 角色色环，静态不灵动）── */
-.agent-card-avatar {
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  flex-shrink: 0;
+/* 状态角标基类(presence dot):色随 STATUS_MAP */
+.agent-card-status-dot {
   position: absolute;
-  top: 14px;          /* 头像落在 banner 下方卡内，不再半露到卡外 */
-  left: 50%;
-  transform: translateX(-50%);
-  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.12);
-  background: var(--surface-raised);
-}
-
-.agent-card-avatar-img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
+  bottom: -2px;
+  right: -2px;
+  width: 18px;
+  height: 18px;
   border-radius: 50%;
-  border: 2.5px solid transparent;
-  background-clip: padding-box;
-  position: relative;
-  z-index: 1;
-}
-
-/* 角色色环（静态，仅标识角色色，不呼吸） */
-.agent-card-avatar-ring {
-  position: absolute;
-  inset: 0;
-  border-radius: 50%;
-  border: 2.5px solid currentColor;
-  pointer-events: none;
-  z-index: 0;
-}
-
-/* cover 高度补足：banner(6px) + 头像偏移 + 头像半径 + 底部留白 */
-.agent-card-cover {
-  position: relative;
-  height: 58px;
-}
-
-/* ── Card body 内部样式 ── */
-/* 名称行 */
-.agent-card-name-row {
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: center;
+  font-size: 9px;
+  color: #fff;
+  border: 2px solid var(--surface-raised);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.15);
+}
+
+.agent-card-status-dot--idle { background: #52c41a; }
+.agent-card-status-dot--executing { background: #F26522; }
+.agent-card-status-dot--offline { background: #bfbfbf; }
+
+/* 描述空态:agent 卡复用 */
+.agent-card-desc--empty {
+  color: #c0c0c0;
+  font-style: italic;
+}
+
+/* 底部操作行:两等宽按钮,顶到卡片底部 */
+.agent-card-actions-row {
+  display: flex;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-top: auto;
+  padding-top: 12px;
 }
 
-.agent-card-name {
-  margin: 0;
-  font-size: 16px;
-  font-weight: 600;
-  color: #1f2937;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.agent-card-status {
-  font-size: 12px;
+.agent-card-actions-row .ant-btn {
+  border-radius: 8px !important;
   font-weight: 500;
-  white-space: nowrap;
-  display: flex;
-  align-items: center;
-}
-
-/* 角色行 */
-.agent-card-role {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  margin-bottom: 12px;
-}
-
-/* 描述行（AG-05: 一句话定位） */
-.agent-card-desc {
-  margin: 0 0 12px;
-  font-size: 13px;
-  color: #6b7280;
-  line-height: 1.5;
-  display: -webkit-box;
-  -webkit-line-clamp: 2;
-  -webkit-box-orient: vertical;
-  overflow: hidden;
-}
-
-/* 技能标签 */
-.agent-card-skills {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  min-height: 28px;
-  margin-bottom: 16px;
 }
 
 .agent-skill-tag {
-  border-radius: 6px;
-  font-size: 12px;
+  border-radius: 5px !important;
+  font-size: 11px !important;
   margin: 0 !important;
-  border: none;
+  border: none !important;
+}
+
+/* 工具/已挂载行（非空才显） */
+.agent-card-meta-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 5px;
+  margin-top: 6px;
+}
+
+.agent-card-meta-label {
+  font-size: 11px;
+  color: #9ca3af;
+  margin-right: 2px;
 }
 
 .agent-no-skills {
-  font-size: 12px;
+  font-size: 11px;
   color: #c0c0c0;
   font-style: italic;
 }

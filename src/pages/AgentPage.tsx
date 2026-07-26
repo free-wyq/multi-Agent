@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type CSSProperties } from 'react'
 import {
   Button,
   Modal,
@@ -9,7 +9,6 @@ import {
   message,
   Popconfirm,
   Tooltip,
-  Card,
   Segmented,
   Space,
 } from 'antd'
@@ -507,91 +506,49 @@ export default function AgentPage() {
             )
 
             return (
-              <Card
+              <div
                 key={agent.id}
-                hoverable
-                className={status === 'executing' ? 'agent-card--working' : undefined}
-                styles={{ body: { padding: '20px 20px 16px' } }}
-                cover={
-                  <div className="agent-card-cover">
-                    <div className="agent-card-banner" style={{ background: theme.gradient }} />
-                    <div className="agent-card-avatar">
-                      <img src="/robot-avatar.png" alt={agent.name} className="agent-card-avatar-img" />
-                      <span className="agent-card-avatar-ring" style={{
-                        borderColor: theme.color,
-                        color: theme.color,
-                      }} />
-                    </div>
-                  </div>
-                }
-                actions={[
-                  <Tooltip key="edit" title="编辑">
-                    <Button
-                      type="text"
-                      icon={<EditOutlined />}
-                      onClick={() => openEdit(agent)}
-                    />
-                  </Tooltip>,
-                  <Popconfirm
-                    key="delete"
-                    title="确认删除该智能体？"
-                    description="删除后不可恢复"
-                    onConfirm={() => handleDelete(agent.id)}
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Tooltip title="删除">
-                      <Button type="text" danger icon={<DeleteOutlined />} />
-                    </Tooltip>
-                  </Popconfirm>,
-                ]}
+                className={`agent-card agent-card--tpl ${status === 'executing' ? 'agent-card--working' : ''}`}
+                style={{ '--agent-color': theme.color, '--agent-gradient': theme.gradient } as CSSProperties}
               >
-                {/* 名称 + 状态文字 */}
-                <div className="agent-card-name-row">
-                  <h3 className="agent-card-name">{agent.name}</h3>
+                {/* 顶部一行:emoji + 名称/角色 + 状态点 —— 完全复用模板广场的 class */}
+                <div className="agent-template-card-top">
+                  <span className="agent-template-emoji" aria-hidden>{theme.emoji}</span>
+                  <div className="agent-template-meta">
+                    <h4 className="agent-template-name" title={agent.name}>{agent.name}</h4>
+                    <span className="agent-template-role">{agent.role}</span>
+                  </div>
                   <Tooltip title={statusInfo.label}>
-                    <span className="agent-card-status" style={{ color: statusInfo.color }}>
-                      {status === 'executing' && <ThunderboltOutlined style={{ marginRight: 4 }} />}
-                      {status === 'idle' && <ClockCircleOutlined style={{ marginRight: 4 }} />}
-                      {status === 'offline' && <EyeOutlined style={{ marginRight: 4 }} />}
-                      {statusInfo.label}
+                    <span className={`agent-card-status-dot agent-card-status-dot--${status}`}>
+                      {status === 'executing' && <ThunderboltOutlined />}
+                      {status === 'idle' && <ClockCircleOutlined />}
+                      {status === 'offline' && <EyeOutlined />}
                     </span>
                   </Tooltip>
                 </div>
 
-                {/* 角色 */}
-                <div className="agent-card-role" style={{ color: theme.color }}>
-                  {theme.icon}
-                  <span>{agent.role}</span>
-                </div>
-
-                {/* 描述（AG-05: 一句话定位） */}
-                {agent.description && (
-                  <p className="agent-card-desc" title={agent.description}>
-                    {agent.description}
-                  </p>
+                {/* 描述:复用 .agent-template-desc(2行截断) */}
+                {agent.description ? (
+                  <p className="agent-template-desc" title={agent.description}>{agent.description}</p>
+                ) : (
+                  <p className="agent-template-desc agent-card-desc--empty">暂无描述</p>
                 )}
 
-                {/* 技能标签（AG-05: 合并核心 skills + extra_skills） */}
-                <div className="agent-card-skills">
+                {/* 技能标签:复用 .agent-template-skills / .agent-template-skill-tag */}
+                <div className="agent-template-skills">
                   {allSkills.length > 0 ? (
                     allSkills.map((s) => (
-                      <Tag key={s} color={theme.tagColor} className="agent-skill-tag">
-                        {s}
-                      </Tag>
+                      <Tag key={s} className="agent-template-skill-tag">{s}</Tag>
                     ))
                   ) : (
                     <span className="agent-no-skills">暂无技能</span>
                   )}
                 </div>
 
-                {/* 工具权限（AG-05: allowed/denied_tools——当前种子为空，留位渲染，非空才显示） */}
+                {/* 工具权限行:保留原样(agent 特有,模板没有) */}
                 {(agent.allowed_tools?.length || agent.denied_tools?.length) ? (
-                  <div className="agent-card-skills" style={{ marginTop: 6 }}>
-                    {agent.allowed_tools && agent.allowed_tools.length > 0 && (
-                      <span style={{ fontSize: 12, color: '#999', marginRight: 4 }}>工具:</span>
-                    )}
+                  <div className="agent-card-meta-line">
+                    <span className="agent-card-meta-label">工具</span>
                     {agent.allowed_tools?.map((t) => (
                       <Tag key={t} color="green" className="agent-skill-tag">{t}</Tag>
                     ))}
@@ -601,10 +558,10 @@ export default function AgentPage() {
                   </div>
                 ) : null}
 
-                {/* 已挂载技能（来自技能市场 mount） */}
+                {/* 已挂载技能行:保留原样 */}
                 {agent.mounted_skills && agent.mounted_skills.length > 0 && (
-                  <div className="agent-card-skills" style={{ marginTop: 6 }}>
-                    <span style={{ fontSize: 12, color: '#999', marginRight: 4 }}>已挂载:</span>
+                  <div className="agent-card-meta-line">
+                    <span className="agent-card-meta-label">已挂载</span>
                     {agent.mounted_skills.map((sid) => (
                       <Tag key={sid} color="geekblue" className="agent-skill-tag">
                         {skillNameMap[sid] ?? sid}
@@ -612,7 +569,31 @@ export default function AgentPage() {
                     ))}
                   </div>
                 )}
-              </Card>
+
+                {/* 底部操作行:替代 AntD Card 的 actions —— 编辑 + 删除 两个等宽按钮 */}
+                <div className="agent-card-actions-row">
+                  <Button
+                    block
+                    size="small"
+                    icon={<EditOutlined />}
+                    onClick={() => openEdit(agent)}
+                  >
+                    编辑
+                  </Button>
+                  <Popconfirm
+                    title="确认删除该智能体?"
+                    description="删除后不可恢复"
+                    onConfirm={() => handleDelete(agent.id)}
+                    okText="删除"
+                    cancelText="取消"
+                    okButtonProps={{ danger: true }}
+                  >
+                    <Button block size="small" danger icon={<DeleteOutlined />}>
+                      删除
+                    </Button>
+                  </Popconfirm>
+                </div>
+              </div>
             )
           })}
 
