@@ -1,5 +1,10 @@
 # 单聊彻底分实体重构方案（Path C · 阶段 1 探查 + 方案）
 
+> **【已落地·2026-07-23】** 本方案阶段 2 已完成并 push（6 commit + ensure_engine 懒建修复）。
+> 单聊现为独立 `ConversationEntity`，`MessageEntity`/`TaskEntity` 严格改名 `group_id`→`conversation_id`，
+> 共享 Message/流式/ChatPanel。本文保留作设计真源（决策依据 + touchpoint 清单），实现现状以代码 +
+> 记忆 `single-chat-entity-split-c2-2026-07-23` 为准。下方「保留字段名」处均已被阶段 1 收口推翻为「严格改名」。
+
 ## 0. 背景与目标
 
 用户决定走 **Path C**：单聊从 `Group` 实体里彻底独立出来，自己的存储 / 消息 / UI 路径，不再用 `single_chat` flag 把单聊塞进 `Group`。**开发期数据可丢弃**（不写迁移脚本，老 `single_chat` 群数据直接弃）。

@@ -90,7 +90,7 @@ Electron 桌面壳（electron/main.ts）
 | lifespan 关闭 | `await shutdown_scheduler()` → `await registry.shutdown_all()` | `main.py:47-49` |
 | FastAPI 实例 | `FastAPI(title=..., version="0.2.0", lifespan=lifespan)` | `main.py:52` |
 | CORS | 放行 `localhost:5173`/`127.0.0.1:5173`/`file://` | `main.py:54-63` |
-| 路由注册 | 11 个 router：system/agents/groups/conversations/tasks/messages/skills/mcp/scheduled_tasks/websocket/plan | `main.py:65-75` |
+| 路由注册 | 16 个 router：system/agents/groups/conversations/tasks/messages/skills/mcp/memory/scheduled_tasks/websocket/plan/usage/im + im_inbound | `main.py:65-83` |
 | `.env` 加载 | 在 `config.py:33-35`（`load_dotenv(PROJECT_ROOT/.env)`），config 被 import 时触发 | `config.py:33-35` |
 
 **启动序列**：建表+种子 → 建常驻引擎（每 agent 一个 `asyncio.Task` + per-group `GroupRuntime`）→ 重建 APScheduler jobs。
@@ -111,7 +111,7 @@ Electron 桌面壳（electron/main.ts）
 | 会话工厂 | `async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)` | `database.py:186-190` |
 | 建表 | `Base.metadata.create_all`（非手写 DDL） | `database.py:231-232` |
 
-**表清单**（11 张，`__tablename__`）：`agents`/`groups`/`conversations`/`members`/`tasks`/`messages`/`mcp_connections`/`skills`/`scheduled_tasks`/`scheduled_task_runs`/`llm_providers`。
+**表清单**（13 张，`__tablename__`）：`agents`/`groups`/`conversations`/`members`/`tasks`/`messages`/`mcp_connections`/`skills`/`scheduled_tasks`/`scheduled_task_runs`/`llm_providers`/`im_channels`/`memories`。
 
 ### 3.2 ORM 实体（`backend/store/entities.py`）
 
@@ -120,7 +120,7 @@ SQLAlchemy 2.0 声明式 ORM（`DeclarativeBase` + `Mapped`/`mapped_column`）�
 - JSON 列：`mapped_column(JSON, ...)`——SQLAlchemy 序列化为 SQLite TEXT 存 JSON，Python 侧原生 list/dict。
 - 时间戳：ISO8601 字符串（`String` 列，`_now_iso()` 默认值）。
 - bool 列：用 `Integer` 存（`enabled`/`installed`/`is_active`）。
-- 关键实体：`AgentEntity`(:29)、`GroupEntity`(:59)、`ConversationEntity`(:72，单聊独立实体)、`MessageEntity`(:142，`conversation_id` 关联)、`TaskEntity`(:116)、`SkillEntity`(:185，含 `requires_tools`/`triggers`/`outputs` frontmatter)、`McpConnectionEntity`(:160)、`LlmProviderEntity`(:257)。
+- 关键实体：`AgentEntity`(:29)、`GroupEntity`(:67)、`ConversationEntity`(:80，单聊独立实体)、`MemberEntity`(:110)、`TaskEntity`(:124，`conversation_id` 关联)、`MessageEntity`(:150，`conversation_id` 关联)、`McpConnectionEntity`(:168)、`SkillEntity`(:193，含 `requires_tools`/`triggers`/`outputs` frontmatter)、`ScheduledTaskEntity`(:222)+`ScheduledTaskRunEntity`(:252)、`ImChannelEntity`(:265)、`MemoryEntity`(:317，FTS5 trigram 全文检索)、`LlmProviderEntity`(:359)。
 
 ### 3.3 CRUD 层（`backend/store/crud.py`）
 
@@ -639,6 +639,10 @@ worker 执行路径工具列表加一个 `delegate` `@tool`，按需调 `delegat
 - **定时任务**：`api/scheduled_tasks.py:create` → `crud.create` + `scheduler.add_job` → APScheduler 到点回调 `_fire` → `inbox.push_task` → 同一 `AgentEngine` inbox → 同一 agentic loop。
 - **计划恢复**：`api/plan.py:plan_confirm` → `route_plan_resume` → 协调者 `_handle_notify` → `Command(resume=)` → `node_dispatch` 的 `interrupt()` 返回 payload → 扇出 pending 步骤。
 - **delegate 子智能体**：worker turn 内 `delegate(skill_id, subtask)` → `run_skill_loop`（绑该 skill 沙箱）阻塞 await → 扫产物 → summary 回喂 worker 模型。
+- **跨会话记忆检索**：`api/memory.py:search` → `crud.search_memories` SQL 原生 FTS5（`memories_fts` sidecar 虚拟表，trigram tokenizer）+ `bm25()` + importance 排序 → 命中记忆注入 worker system_prompt（L2 只读，不进 state schema）。
+- **Token 用量聚合**：`api/usage.py:aggregate_usage` → `crud.aggregate_usage` SQLite JSON1 `json_extract(messages.data,'$.tokens'/'$.elapsed_ms'/'$.model')` + `GROUP BY`（model/day/group）→ 前端 `UsageDashboard`。仅统计 chat/ask 路径回复（execute 路径 announce 未计入口径）。
+- **IM 出站**：worker `_unified_reply` 后置钩子 → `engine/im/gateway.py` 按 `im_channels.enabled` 路由 → `ImChannelAdapter.send_outbound`（mock 三平台走 `logger.info`）。
+- **IM 入站**：外部平台回调 `POST /api/im/inbound/{channel_id}` → `gateway.handle_inbound` → `push_message` 注入群 inbox（与人工发消息同路径）。
 
 ---
 

@@ -56,7 +56,7 @@ graph TB
 | worker 执行 | agent 节点 brain 决策 `execute` → `push_task` 给自己 inbox → `create_react_agent` ReAct |
 | 流式输出 | `astream_events` 的 `on_chat_model_stream` → `emit_task_token`/`emit_coordinator_token` → WS → 前端气泡逐字 |
 | 计划确认 | `POST /api/groups/{id}/plan/confirm` → `GroupRuntime.resume_plan` → `Command(resume=)` 唤醒中断的 dispatch |
-| 配置热切换 | `PUT /api/config` → `set_config` 写 os.environ → 引擎下次 invoke 的 `get_config()` 实时读到（CF-05） |
+| 配置热切换 | `GET/PUT /api/config`：`PUT` 把 `model` 持久化到 active 服务商行（DB）+ 刷新内存 active cache；无 active 服务商时降级 `set_config` 写 `os.environ` 兜底。引擎下次 invoke 的 `get_config()` 实时读到 |
 | 状态聚合 | `GET /api/status` → `registry.list_all_status()` 一次拉全（消除前端 N+1 轮询） |
 | 定时任务 | APScheduler 触发 → 复用 `push_task` 注入 worker inbox，与人工派发同路径 |
 
@@ -219,11 +219,17 @@ mindmap
 | 子智能体执行 | `engine/worker.py` `agent_loop.py` `tools.py` | `WorkerTrace.tsx` | M5/M10 |
 | 任务管理 | `api/tasks.py` | `TaskPage.tsx` | M4 |
 | 技能系统 | `api/skills.py` `agent_executor.py` | `SkillPage.tsx` | M7 |
-| MCP 工具 | `api/mcp.py` `engine/mcp_manager.py` | 配置页 | M9 |
-| 定时任务 | `api/scheduled_tasks.py` `engine/scheduler.py` | 配置页 | M8 |
+| MCP 工具 | `api/mcp.py` `engine/mcp_manager.py` | `McpPage.tsx` | M9 |
 | 执行监控 | `events/bus.py` `api/system.py` | `MonitorPage.tsx` | M11 |
 | 工作区隔离 | `engine/workspace.py` | — | M5 |
 | 实时事件 | `events/bus.py` `api/websocket.py` | `useBusEvent.ts` | M5/M11 |
+| 结构化卡片 | `llm/prompts.py` card 围栏契约 | `ChatMessageBubble.tsx` `lib/cardSegments.ts` | 需求2 |
+| 单聊会话 | `api/conversations.py` `engine/direct.py` | `ChatPanel.tsx` | Path C |
+| 模型服务商目录 | `api/llm_providers.py` `config.py` active cache | `ProviderEditor.tsx` | CF-04 |
+| 跨会话记忆（L2） | `api/memory.py` `MemoryEntity` + FTS5 | `MemoryPage.tsx` | 任务17 |
+| Token 用量 | `api/usage.py` SQLite JSON1 聚合 | `UsageDashboard.tsx` | 任务15 |
+| 即时消息网关 | `api/im.py` `engine/im/` ImChannelAdapter | `ImChannelPanel.tsx` | 任务19 |
+| 定时任务 | `api/scheduled_tasks.py` `engine/scheduler.py` | `SchedulePage.tsx` | M8/任务18 |
 
 ## 数据流：一次完整任务执行
 
@@ -321,7 +327,7 @@ sequenceDiagram
 
 ### 5. SQLite + WAL 持久化
 
-单机桌面应用，数据用 SQLAlchemy async + aiosqlite（WAL 模式）。五实体（agents/groups/members/tasks/messages）+ 技能/MCP/定时任务。实时事件用 WebSocket 总线（`BusManager` 按 group 分组 fan-out），无需查询优化与跨进程通信。
+单机桌面应用，数据用 SQLAlchemy async + aiosqlite（WAL 模式）。实体：`agents`/`groups`/`conversations`（单聊独立）/`members`/`tasks`/`messages` + `skills`/`mcp_connections`/`scheduled_tasks`/`scheduled_task_runs`/`llm_providers`/`im_channels`/`memories`（13 张表）。实时事件用 WebSocket 总线（`BusManager` 按 group 分组 fan-out），无需查询优化与跨进程通信。
 
 ### 6. DAG 依赖感知调度
 
@@ -414,7 +420,7 @@ npm run pack:linux    # 指定平台
 开发前需配置 LLM 环境变量。在项目根创建 `.env` 文件（`main.py` 启动时自动加载）：
 
 ```bash
-# .env（dotenvy 自动加载，无需手动 source）
+# .env（config.py 用 python-dotenv 自动 load_dotenv，无需手动 source）
 OPENAI_API_KEY=sk-...
 OPENAI_BASE_URL=https://api.deepseek.com/v1   # 或 OpenAI / 其他兼容端点
 LLM_MODEL=deepseek-v4-flash                    # 可选
@@ -437,8 +443,9 @@ multi-Agent/
     main.py                     # FastAPI 入口：lifespan → init_db → registry → scheduler
     config.py                   # .env 加载（OPENAI_API_KEY/BASE_URL/LLM_MODEL）
     api/                        # REST + WebSocket 路由
-      agents.py groups.py tasks.py messages.py
-      skills.py mcp.py scheduled_tasks.py system.py websocket.py
+      agents.py groups.py conversations.py tasks.py messages.py
+      skills.py mcp.py scheduled_tasks.py system.py websocket.py plan.py
+      llm_providers.py memory.py usage.py im.py
     engine/                     # LangGraph 引擎层
       registry.py              # AgentRegistry 双轨 _engines + _runtimes
       group_runtime.py          # GroupRuntime 群图回合控制器（invoke_turn/resume_plan/cancel_turn）
@@ -452,17 +459,21 @@ multi-Agent/
       inbox.py                 # asyncio.Queue channel（push_task/push_notify 唤醒）
       dispatcher.py             # DAG fan-out（dispatch_ready_steps / build_dispatch_sends 单一真源）
       mention.py                # route_user_message（入站→GroupRuntime）+ @mention 解析
+      direct.py                # 单聊路由（route_direct_message）
       workspace.py             # 工作区隔离 + safe_path
       scheduler.py             # APScheduler 定时触发
+      im/                      # IM 网关（ImChannelAdapter + 微信/钉钉/飞书 mock adapter）
     llm/                       # OpenAI 兼容 HTTP + 提示词 + JSON 提取
-    models/                    # Pydantic 数据模型（agent/group/task/message/skill/mcp/scheduled_task）
+    models/                    # Pydantic 数据模型（agent/group/conversation/task/message/skill/mcp/scheduled_task/llm_provider/memory/im）
     store/                     # SQLAlchemy async + aiosqlite + CRUD + seed
     events/                    # bus.py BusManager + typed emit helpers
   src/                          # 前端 Renderer（React）
-    pages/                      # AgentPage · GroupPage · TaskPage · MonitorPage · SkillPage
-    components/                 # LeaderPanel · WorkerTrace · LogPanel · AgentAvatar · Layout
+    pages/                      # AgentPage · GroupPage · TaskPage · MonitorPage · SkillPage · McpPage · MemoryPage · SchedulePage
+    components/                 # LeaderPanel · WorkerTrace · LogPanel · AgentAvatar · Layout · ChatPanel · PlanConfirmCard · GroupInfoDrawer · ProviderEditor · UsageDashboard · ImChannelPanel · SettingsModal
     services/api.ts            # REST fetch + WebSocket onBusEvent
     hooks/useBusEvent.ts        # logs / events / agentStatuses / plan
+    lib/cardSegments.ts         # 结构化卡片解析（parseCards / splitContentByCards）
+    lib/tts.ts                  # Web Speech API 语音朗读
 ```
 
 > 运行时数据目录：`MULTI_AGENT_DATA_DIR` 环境变量指定（Electron 托管时设为 `app.getPath('userData')`），含 SQLite 数据库 + `workspaces/{group_id}/` 工作目录 + `logs/`。
@@ -481,6 +492,12 @@ multi-Agent/
 - [x] 去中心化 A2A 协作路径（per-group swarm 群图：route_entry 分叉 + 成员节点 handoff + 图内防连发守卫）
 - [x] 单图双路径：中心化协调者子图 + 去中心化成员 handoff 同图共存，共享 GroupState
 - [x] 透明化统计：协调者/worker 回复均带「model · Ns · ↓ N tokens（含 N 推理）」状态行（流式采集真实 usage）
+- [x] 跨会话持久记忆（L2：MemoryEntity + FTS5 trigram 全文检索 + bm25/importance 排序 + system_prompt 只读注入，与 L1 会话记忆物理隔离）
+- [x] 结构化结果卡片（worker 回复内嵌 `card` 围栏 JSON → AntD Descriptions/List/Table，不改 schema/事件）
+- [x] 单聊分实体（Path C：独立 ConversationEntity + 严格改名 conversation_id，共享 Message/流式/ChatPanel）
+- [x] 模型服务商多模型目录（LlmProviderEntity + active cache 热切换 + ProviderEditor）
+- [x] Token 用量仪表盘（SQLite JSON1 聚合 messages.data 的 tokens/elapsed_ms/model，UsageDashboard）
+- [x] IM 网关（ImChannelEntity + ImChannelAdapter 协议 + 微信/钉钉/飞书 mock adapter + 入站回调/出站钩子）
 - [x] 对话语音朗读（Web Speech API，自动朗读 + 气泡按需朗读）
 - [x] 顶部栏三视图切换（对话 / 智能体广场 / skill广场）+ 用户入口移至侧栏左下角
 - [ ] 执行可控：停止执行 / 超时降级 / 失败重派
