@@ -262,6 +262,58 @@ class ScheduledTaskRunEntity(Base):
     finished_at: Mapped[str | None] = mapped_column(String, nullable=True)
 
 
+class ImChannelEntity(Base):
+    """An IM platform channel — a bidirectional bridge to an external IM bot.
+
+    One row = one configured IM bot connection (e.g. one DingTalk robot). The
+    ``platform`` selects the ``ImChannelAdapter``; ``config`` holds the
+    platform-specific credentials (app_id / app_secret / verify_token /
+    webhook_url); ``target_conversation_id`` is the internal conversation/group
+    the inbound message routes to (and whose agent replies get pushed back out).
+    At fire time the gateway (任务19c) calls ``route_user_message`` /
+    ``route_direct_message`` to reuse the existing inbound routing — IM is just
+    another ``push_notify`` caller (same shape as the scheduler). ``enabled`` is
+    the connect/disconnect toggle (mirrors ``ScheduledTaskEntity.enabled``); it
+    defaults to 0 (disabled) so a channel must be explicitly enabled before
+    accepting inbound — prevents stray inbound when credentials are misconfigured.
+
+    See ``docs/im-gateway-design.md`` §4 for the full schema + relationships.
+    """
+
+    __tablename__ = "im_channels"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True)
+    name: Mapped[str] = mapped_column(String, nullable=False)
+    # wechat | dingtalk | feishu — selects the adapter (见 engine/im/adapters)
+    platform: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # 平台特异凭证 JSON：{app_id, app_secret, verify_token, webhook_url, ...}
+    # mock 阶段可空/占位；真平台时填实。敏感字段 API 返回时脱敏（任务19c 参考
+    # mcp._mask_sensitive）。
+    config: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    # 入站投递目标：单聊 conversation_id 或群聊 group_id（Path C 后两语义统一于
+    # conversation_id 字段）。gateway 按 target_kind 分流到 route_direct_message /
+    # route_user_message。
+    target_conversation_id: Mapped[str] = mapped_column(String, nullable=False, index=True)
+    # single | group — 决定入站走 route_direct_message 还是 route_user_message
+    target_kind: Mapped[str] = mapped_column(String, nullable=False, default="single")
+    # 该 channel 绑定的 agent（单聊即 conversation.agent_id；群聊可空，走 @mention 路由）
+    target_agent_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # 默认 disabled——channel 显式 enable 后才接收入站（防误配凭证时被外部刷入站）
+    enabled: Mapped[bool] = mapped_column(Integer, nullable=False, default=0)
+    # 出站 mock 日志开关：mock 阶段恒 True，logger.info 记出站；档四真平台时此字段
+    # 语义变为「是否记出站审计日志」。
+    outbound_log: Mapped[bool] = mapped_column(Integer, nullable=False, default=1)
+    # 平台会话映射：{platform_session_id → internal_conversation_id}
+    # 一对多：一个 channel 可能对应平台上多个群/多个单聊用户，每个映射到不同的内部会话。
+    # MVP 可空（target_conversation_id 即唯一投递点）；多会话路由留档四。
+    session_bindings: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    metadata_: Mapped[dict[str, Any] | None] = mapped_column(
+        "metadata_", JSON, nullable=True
+    )
+    created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
+
+
 class MemoryEntity(Base):
     """A long-term memory record (PRD 记忆模块 · 任务17).
 
