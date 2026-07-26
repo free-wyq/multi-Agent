@@ -39,3 +39,15 @@ __pycache__/
 .session_id
 .task.md
 .claude/memory/
+events.jsonl
+state.json
+.task.md
+.task.md.*
+.pid
+.pid.*
+.session_id
+.status
+.claudeignore
+BUG_LIST.md
+night_run.log*
+night_run.*.log
