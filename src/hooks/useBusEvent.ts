@@ -113,18 +113,20 @@ export function useBusEvent(groupId: string | null) {
   const [plan, setPlan] = useState<PlanStep[] | null>(null)
   const [streaming, setStreaming] = useState<Record<string, string>>({})
   // 协调者流式回复（与 worker task_token 同构，但按 reply_id 而非 task_id 归并）：
-  //  - coordStreaming[reply_id] = { content: 累积的 content delta, senderId: 发言者 agent_id }
+  //  - coordStreaming[reply_id] = { content: 累积的 content delta, senderId: 发言者 agent_id,
+  //    conversationId?: 该气泡归属的会话 id（防串台双保险，见渲染端 StreamingBubbleList 过滤） }
   //    senderId 由事件携带（coordinator_token 的 sender_id=coordinator_id；worker 单聊/脑回路
   //    task_token 的 sender_id=worker agent_id）。Bug A：渲染层据此把 worker 推理流式冠到
   //    正确 worker 头像下，而非硬编码「群主(协调者)」。首个 delta 落定 senderId，后续不覆盖
   //    （同一 reply_id 始终属一个发言者，防陈旧事件乱改身份）。
+  //    conversationId 同样首个 delta 落定、后续不覆盖（同一 reply_id 始终属一个会话）。
   //  - coordReasoning[reply_id] = 累积的 reasoning_content delta（模型内部推理链，
   //    DeepSeek/o1 类推理模型在可见 content 之前流出；非推理模型不流，map 不存在）
   //  - coordStats[reply_id] = 最新 { elapsed_ms, tokens, phase, model, reasoning_tokens }
   //    （~200ms 节流 + done 终态）
   // coordinator 的回复走独立 LLM 直调（非 create_react_agent），不经 worker task_token 通道。
   const [coordStreaming, setCoordStreaming] = useState<
-    Record<string, { content: string; senderId: string }>
+    Record<string, { content: string; senderId: string; conversationId?: string }>
   >({})
   const [coordReasoning, setCoordReasoning] = useState<Record<string, string>>({})
   const [coordStats, setCoordStats] = useState<Record<string, CoordStats>>({})
@@ -287,6 +289,21 @@ export function useBusEvent(groupId: string | null) {
 
   useEffect(() => {
     if (!groupId) return
+
+    // 切会话/切群时清空跨会话共享的流式缓冲（reply_id 维度，无会话归属）。
+    // coordStreaming/coordReasoning/coordStats 按 reply_id 累积、streaming 按 task_id 累积、
+    // events/logs 是全局 TraceEvent/LogEntry 流——这些 Map/数组不绑定当前 groupId，旧会话残留
+    // 条目会被新会话视图渲染进来导致「单聊串台」(StreamingBubbleList.coordinatorStreamingBubbles
+    // 全量 Object.entries 渲染)。这里在切会话 effect 首帧统一清空，根因直击。
+    // agentStatuses 不在此清——已有专门播种 effect(约 207-225 行按 groupId 重拉 /api/status)。
+    // flushReasoning/flushEvents/flushLogs 的 cleanup 兜底(约 616-643 行)保留——切会话瞬间
+    // 残留 delta 灌进 state 后立即被下面这组 set 清掉，React 同 tick 批量更新，最终态为空,不闪现。
+    setCoordStreaming({})
+    setCoordReasoning({})
+    setCoordStats({})
+    setStreaming({})
+    setEvents([])
+    setLogs([])
 
     // 切群首拉：清旧群残留 plan，再主动从真源拉新群当前驻留计划。
     // 覆盖两个缺口：①引擎重启但 WS 未断连（onReconnect 不触发，真源已变但
@@ -463,6 +480,9 @@ export function useBusEvent(groupId: string | null) {
             // worker 单聊/脑回路流式（reply_id）→ coordStreaming[reply_id]，复用协调者流式气泡渲染。
             // senderId 用事件携带的 d.sender_id（worker 的 agent_id），Bug A：渲染层据此把
             // worker 推理流式冠到正确 worker 头像下。首个 delta 落定 senderId，后续不覆盖。
+            // conversationId 防串台双保险：后端 emit_task_token 的 data 只含 {phase}，无 group_id；
+            // 故从顶层 d.group_id 取（BusEventData.group_id，emit 时 = 入参 group_id=conversation_id），
+            // runtime 缺失再 fallback 闭包 groupId（当前订阅会话）。首个 delta 落定后续不覆盖。
             setCoordStreaming((prev) => {
               const existing = prev[key]
               return {
@@ -470,6 +490,7 @@ export function useBusEvent(groupId: string | null) {
                 [key]: {
                   content: (existing?.content || '') + d.content,
                   senderId: existing?.senderId || (d.sender_id as string) || '',
+                  conversationId: existing?.conversationId || d.group_id || groupId || '',
                 },
               }
             })
@@ -516,6 +537,10 @@ export function useBusEvent(groupId: string | null) {
           // senderId 用事件携带的 d.sender_id（coordinator_token 的 sender_id=coordinator_id）。
           // Bug A：渲染层据此解析正确头像/名（协调者）；worker 单聊/脑回路走 task_token 分支
           // 各自带 worker sender_id。首个 delta 落定 senderId，后续不覆盖。
+          // conversationId 防串台双保险：后端 emit_coordinator_token 的 data 只含
+          // {reply_id, phase}，无 group_id；故从顶层 d.group_id 取（BusEventData.group_id，
+          // emit 时 = 入参 group_id=conversation_id），runtime 缺失再 fallback 闭包 groupId。
+          // 首个 delta 落定后续不覆盖。
           setCoordStreaming((prev) => {
             const existing = prev[rid]
             return {
@@ -523,6 +548,7 @@ export function useBusEvent(groupId: string | null) {
               [rid]: {
                 content: (existing?.content || '') + d.content,
                 senderId: existing?.senderId || (d.sender_id as string) || '',
+                conversationId: existing?.conversationId || d.group_id || groupId || '',
               },
             }
           })

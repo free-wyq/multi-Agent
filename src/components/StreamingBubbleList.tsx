@@ -47,8 +47,8 @@ export interface StreamingBubbleListProps {
   agentStatuses: Record<string, AgentStatusInfo>
   /** worker 流式缓冲 streaming[task_id]（PL-08 逐字增量拼接）。 */
   streaming: Record<string, string>
-  /** 协调者流式缓冲 coordStreaming[reply_id].{content,senderId}。 */
-  coordStreaming: Record<string, { content: string; senderId: string }>
+  /** 协调者流式缓冲 coordStreaming[reply_id].{content,senderId,conversationId?}。 */
+  coordStreaming: Record<string, { content: string; senderId: string; conversationId?: string }>
   /** 协调者推理缓冲 coordReasoning[reply_id]（推理模型流出的内部思维链）。 */
   coordReasoning: Record<string, string>
   /** 协调者流式统计 coordStats[reply_id]（状态行渲染）。 */
@@ -187,15 +187,24 @@ export default function StreamingBubbleList({
   // 故这里取 toolEventsByTask[replyId]/thinkEventsByTask[replyId] 挂到气泡上——
   // 一个 turn 一个气泡：思考过程 + 执行步骤 + 最终答案全收。
   const coordinatorStreamingBubbles: CoordinatorStreamingBubble[] = chatGroupId
-    ? Object.entries(coordStreaming).map(([replyId, entry]) => ({
-        replyId,
-        content: entry.content,
-        senderId: entry.senderId || group?.coordinator_id || 'coordinator',
-        reasoning: coordReasoning[replyId] || '',
-        stats: coordStats[replyId],
-        toolEvents: toolEventsByTask[replyId] || [],
-        thinkEvents: thinkEventsByTask[replyId] || [],
-      }))
+    ? Object.entries(coordStreaming)
+        // 防串台双保险：切会话清空是根因直击（useBusEvent groupId effect），这里按会话过滤兜底——
+        // 即使 state 残留（未来回归导致 setCoordStreaming 未清干净）也不渲染错会话的气泡。
+        // conversationId 首个 delta 落定、后续不覆盖（同 reply_id 始终属同一会话）；条目无
+        // conversationId 时（陈旧条目，改动1之前落盘的 state）保守不过滤，让根因清空兜底。
+        .filter(([, entry]) => {
+          if (!entry.conversationId) return true
+          return entry.conversationId === chatGroupId
+        })
+        .map(([replyId, entry]) => ({
+          replyId,
+          content: entry.content,
+          senderId: entry.senderId || group?.coordinator_id || 'coordinator',
+          reasoning: coordReasoning[replyId] || '',
+          stats: coordStats[replyId],
+          toolEvents: toolEventsByTask[replyId] || [],
+          thinkEvents: thinkEventsByTask[replyId] || [],
+        }))
     : []
 
   // ST-04：task_complete/failed 时定稿流式气泡——用持久化消息替换缓冲。
