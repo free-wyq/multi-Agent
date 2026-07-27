@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from store.entities import (
     AgentEntity,
+    ConversationEntity,
     GroupEntity,
     MemberEntity,
     MessageEntity,
@@ -287,3 +288,88 @@ async def ensure_platform_assistant(SessionLocal: async_sessionmaker) -> None:
             "[seed] platform_assistant inserted (id=%s) — 侧栏会话默认绑此 agent",
             PLATFORM_ASSISTANT_ID,
         )
+
+
+async def migrate_conversation_titles(SessionLocal: async_sessionmaker) -> None:
+    """T90-1 启动迁移：清理存量单聊会话的 ``name``。
+
+    背景：T86 之前创建的单聊会话，``name`` 常被写成绑定 agent 的名字（如「平台助手」）
+    或留空，侧栏看不出会话内容。T86 引入「首条用户消息前 20 字生成标题」语义后，
+    这些存量会话标题仍是旧值，需要一次性回填。
+
+    迁移逻辑（对每条 ConversationEntity 行）：
+      - ``name`` 已是内容摘要（非空且不等于绑定 agent.name）→ 幂等跳过（已生成）。
+      - ``name`` 为空 或 ``name == 绑定 agent.name``（即标题还停在 agent 名）→
+        查该会话最早一条 ``type='user_input'`` 消息：
+          * 有 → 取其 content，复用 ``api.messages._build_title`` 生成标题写回
+            （``crud.update_conversation_name``）。
+          * 无 → ``name`` 置空（无首条用户输入，无摘要可生成；置空而非留 agent 名）。
+
+    幂等：name 已生成（不等于 agent 名）直接跳过；name 置空后下次启动仍为空，
+    无 user_input 时反复置空也是 no-op。
+    """
+    # 复用 T86 标题生成逻辑（前 20 字 + 省略号），避免逻辑分叉。
+    from api.messages import _build_title
+    from store import crud
+
+    async with SessionLocal() as db:
+        conversations = (
+            await db.execute(select(ConversationEntity))
+        ).scalars().all()
+        if not conversations:
+            return
+
+        # 一次性把所有 agent_id → name 缓存进 dict，避免逐条查 agent。
+        agent_ids = {c.agent_id for c in conversations}
+        agent_name_map: dict[str, str] = {}
+        if agent_ids:
+            agent_rows = (
+                await db.execute(
+                    select(AgentEntity).where(AgentEntity.id.in_(agent_ids))
+                )
+            ).scalars().all()
+            agent_name_map = {a.id: a.name for a in agent_rows}
+
+        migrated = 0
+        cleared = 0
+        for conv in conversations:
+            agent_name = agent_name_map.get(conv.agent_id, "")
+            # 幂等：name 非空且不等于 agent 名 → 已是内容摘要，跳过。
+            if conv.name and conv.name != agent_name:
+                continue
+
+            # 查最早一条 user_input 消息（created_at 升序）。
+            first_user_msg = (
+                await db.execute(
+                    select(MessageEntity)
+                    .where(MessageEntity.conversation_id == conv.id)
+                    .where(MessageEntity.type_ == "user_input")
+                    .order_by(MessageEntity.created_at)
+                    .limit(1)
+                )
+            ).scalars().first()
+
+            if first_user_msg and first_user_msg.content:
+                title = _build_title(first_user_msg.content)
+                if title:
+                    # 复用 crud.update_conversation_name 写回（含 updated_at 刷新）。
+                    # crud 自开新 session，此处 conv 是 detached row，用 id 调用。
+                    await crud.update_conversation_name(conv.id, title)
+                    migrated += 1
+                else:
+                    # content 经 _build_title 后为空（如纯空白）→ 置空 name。
+                    if conv.name:
+                        await crud.update_conversation_name(conv.id, "")
+                        cleared += 1
+            else:
+                # 无 user_input 消息 → name 置空（无摘要可生成）。
+                if conv.name:
+                    await crud.update_conversation_name(conv.id, "")
+                    cleared += 1
+
+        if migrated or cleared:
+            logger.info(
+                "[seed] migrate_conversation_titles: %d titled, %d cleared (legacy agent-name→content-summary)",
+                migrated,
+                cleared,
+            )
