@@ -224,7 +224,11 @@ async def init_db() -> None:
     """
     from store.crud import load_active_provider_into_cache
     from store.entities import Base
-    from store.seed import ensure_platform_assistant, seed_demo_data
+    from store.seed import (
+        ensure_platform_assistant,
+        migrate_conversation_titles,
+        seed_demo_data,
+    )
 
     # Path C: if messages/tasks still have the legacy ``group_id`` column, drop
     # them so create_all rebuilds with ``conversation_id``. Development-period
@@ -246,6 +250,9 @@ async def init_db() -> None:
     await seed_demo_data(SessionLocal)
     # T86 平台助手启动幂等补种（每次启动跑，让存量库也拿到）。
     await ensure_platform_assistant(SessionLocal)
+    # T90-2 存量单聊会话标题清理：把仍停在 agent 名 / 留空的 name 一次性回填为
+    # 首条用户消息前 20 字（无 user_input 则置空）。幂等——已生成（非 agent 名）跳过。
+    await migrate_conversation_titles(SessionLocal)
     # Load the active LLM provider into the sync cache so get_config() returns
     # the DB-backed config (not the env fallback) from the very first call.
     await load_active_provider_into_cache()
