@@ -21,7 +21,7 @@
  */
 import { createContext, useContext, useMemo, type ReactNode } from 'react'
 
-import { useBusEvent, type LogEntry, type TaskStatusEvent } from '../hooks/useBusEvent'
+import { useBusEvent, type ConversationUpdateEntry, type LogEntry, type TaskStatusEvent } from '../hooks/useBusEvent'
 import type { AgentStatusInfo, PlanStep, TraceEvent } from '../services/api'
 
 /** Context 下发的共享状态：绑定的 groupId + useBusEvent 的全部返回字段。 */
@@ -47,6 +47,12 @@ export interface BusEventContextValue {
   coordReasoning: Record<string, string>
   /** 协调者流式统计：reply_id → 最新 { elapsed_ms, tokens, phase, model, reasoning_tokens }（coordinator_stats 节流更新）。 */
   coordStats: Record<string, { elapsed_ms: number; tokens: number; phase: string; model?: string; reasoning_tokens?: number }>
+  /** T86/T91：会话标题更新事件队列（conversation_updated）。
+   *  首条用户消息触发会话 name 写回后由后端 ``emit_conversation_updated`` 推送，
+   *  payload 在 ``data``（{conversation_id, name}），前端按 ``conversationId`` 取最新条目。
+   *  由 ``useBusEvent`` 内部 cap-50 增量追加（B30 同款），消费方（SelectionContext）
+   *  据此本地 patch 侧栏对应会话的 name，省一次 list 请求。 */
+  conversationUpdates: ConversationUpdateEntry[]
   /** 主动从真源拉取驻留计划（对齐后端 _dispatch_plan）。PlanConfirmCard 409 静默刷新、切群首拉复用。 */
   refreshPlan: () => Promise<void>
 }
@@ -90,6 +96,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       coordStreaming: bus.coordStreaming,
       coordReasoning: bus.coordReasoning,
       coordStats: bus.coordStats,
+      conversationUpdates: bus.conversationUpdates,
       refreshPlan: bus.refreshPlan,
     }),
     [
@@ -104,6 +111,7 @@ export function BusEventProvider({ groupId, setGroupId, children }: BusEventProv
       bus.coordStreaming,
       bus.coordReasoning,
       bus.coordStats,
+      bus.conversationUpdates,
       bus.refreshPlan,
     ],
   )
