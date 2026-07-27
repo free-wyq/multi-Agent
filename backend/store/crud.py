@@ -326,6 +326,9 @@ def _conversation_to_model(c: ConversationEntity) -> Conversation:
             # coordinator_id mirrors agent_id so ChatPanel (reads
             # group.coordinator_id) works unchanged for single-chat.
             "coordinator_id": c.coordinator_id or c.agent_id,
+            # T86: transient flag (1=体验会话不进侧栏). 旧库经 _migrate_schema
+            # ALTER 出 NOT NULL DEFAULT 0；防御性 None→0 兜底（极旧库 ALTER 之前）。
+            "transient": c.transient if c.transient is not None else 0,
             "created_at": c.created_at,
             "updated_at": c.updated_at,
         }
@@ -333,12 +336,19 @@ def _conversation_to_model(c: ConversationEntity) -> Conversation:
 
 
 async def list_conversations() -> list[Conversation]:
+    """List non-transient single-chat conversations (T86 豆包式).
+
+    ``transient=1`` 体验会话（智能体广场点 agent 的临时会话）不进侧栏——
+    此处过滤掉，只返 ``transient=0`` 的正式会话（绑平台助手或转正过的会话）。
+    """
     from store.database import SessionLocal
 
     async with SessionLocal() as db:
         rows = (
             await db.execute(
-                select(ConversationEntity).order_by(ConversationEntity.created_at)
+                select(ConversationEntity)
+                .where(ConversationEntity.transient == 0)
+                .order_by(ConversationEntity.created_at)
             )
         ).scalars().all()
         return [_conversation_to_model(r) for r in rows]
@@ -353,15 +363,33 @@ async def get_conversation(conversation_id: str) -> Conversation | None:
 
 
 async def create_conversation(payload: Any) -> Conversation:
+    """Create a new single-chat conversation row (T86 改语义：不再 find-or-create).
+
+    每次调用都新建一个 row：
+      - ``agent_id`` 为空 → 绑平台常驻助手（slug='platform_assistant'）；查不到
+        raise ValueError（启动期 ensure_platform_assistant 应已种）。
+      - ``agent_id`` 非空 → 用该 agent（体验会话场景，transient=1）。
+      - ``transient`` 透传 payload；``name`` 默认空（首条用户消息触发自动生成）。
+    """
     from store.database import SessionLocal
 
     ts = _now_iso()
     agent_id = payload.agent_id
-    # name defaults to the agent's name when omitted.
+    if not agent_id:
+        # 找平台助手（按 slug 查，启动期 ensure_platform_assistant 已种）
+        async with SessionLocal() as db:
+            row = (
+                await db.execute(
+                    select(AgentEntity).where(AgentEntity.slug == "platform_assistant")
+                )
+            ).scalars().first()
+        if not row:
+            raise ValueError(
+                "平台助手未找到——请确认启动期 ensure_platform_assistant 已执行"
+            )
+        agent_id = row.id
     name = getattr(payload, "name", None) or ""
-    if not name:
-        agent = await get_agent(agent_id)
-        name = agent.name if agent else "单聊"
+    transient = int(getattr(payload, "transient", 0) or 0)
     entity = ConversationEntity(
         id=_next_id("conversation"),
         agent_id=agent_id,
@@ -369,6 +397,7 @@ async def create_conversation(payload: Any) -> Conversation:
         # coordinator_id mirrors agent_id so ChatPanel reads group.coordinator_id
         # and gets the right sender for single-chat (C2 shared-UI principle).
         coordinator_id=agent_id,
+        transient=transient,
         created_at=ts,
         updated_at=ts,
     )
@@ -404,13 +433,11 @@ async def delete_conversation(conversation_id: str) -> bool:
 
 
 async def get_or_create_conversation(agent_id: str) -> Conversation:
-    """Find-or-create a single-chat conversation for ``agent_id``.
+    """[DEPRECATED T86] 旧 find-or-create 语义，保留仅向后兼容。
 
-    Used by ``POST /api/conversations`` (find-or-create semantics) and the
-    ``selectAgent`` frontend path. Returns the existing conversation for the
-    agent if one exists, otherwise creates a new one. A future hardening
-    pass could enforce a uniqueness constraint; for now the first match wins
-    (single-user local app, low risk of duplicates).
+    T86 后 ``POST /api/conversations`` 改调 ``create_conversation``（每次新建），
+    平台助手走常驻单聊。本函数保留供未迁移的 caller（如旧测试）使用——
+    新代码请调 ``create_conversation``。
     """
     from store.database import SessionLocal
 
@@ -427,6 +454,47 @@ async def get_or_create_conversation(agent_id: str) -> Conversation:
             return _conversation_to_model(row)
     payload = ConversationCreatePayload(agent_id=agent_id)
     return await create_conversation(payload)
+
+
+async def finalize_conversation(conversation_id: str) -> Conversation | None:
+    """T86 转正端点：体验会话（transient=1）→ 正式（transient=0）。
+
+    UPDATE conversations SET transient=0, updated_at=now WHERE id=conversation_id.
+    返回更新后的 Conversation，或 None 当会话不存在。语义幂等（已是 0 仍返当前行）。
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ConversationEntity, conversation_id)
+        if not row:
+            return None
+        row.transient = 0
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+        return _conversation_to_model(row)
+
+
+async def update_conversation_name(
+    conversation_id: str, name: str
+) -> Conversation | None:
+    """T86 标题自动生成：写回 conversation.name + updated_at。
+
+    首条用户消息触发（见 api/messages.py send_message）：name 为空时取用户消息
+    前 20 字（超 20 加 "…"，strip 换行）写回。已有 name 不覆盖（语义：仅首条触发）。
+    返回更新后的 Conversation，或 None 当会话不存在。
+    """
+    from store.database import SessionLocal
+
+    async with SessionLocal() as db:
+        row = await db.get(ConversationEntity, conversation_id)
+        if not row:
+            return None
+        row.name = name
+        row.updated_at = _now_iso()
+        await db.commit()
+        await db.refresh(row)
+        return _conversation_to_model(row)
 
 
 # ── Member helpers ───────────────────────────────────────────────

@@ -10,7 +10,7 @@ import Layout from './components/Layout'
  * BusEventProvider（全局唯一群组 WS）→ SelectionProvider（左栏选择模型）→ Layout（左右两栏）。
  *
  * 布局重构 2026-07-11：去 react-router。单聊/群聊都收敛到「一个 groupId + ChatPanel」，
- * 左栏 Sidebar 触发选择（selectAgent find-or-create single_chat 群 / selectGroup 直接切群），
+ * 左栏 Sidebar 触发选择（createNewConversation 豆包式新建会话 / selectGroup 直接切群），
  * 两者最终都调 BusEventContext.setGroupId 切换 WS 订阅。SelectionProvider 在
  * BusEventProvider 内（它消费 groupId/setGroupId），Layout 在 SelectionProvider 内
  * （Sidebar/ChatView 消费选择态）。

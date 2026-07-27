@@ -12,6 +12,8 @@ import {
   Tooltip,
   Segmented,
   Space,
+  Drawer,
+  Alert,
 } from 'antd'
 import {
   PlusOutlined,
@@ -30,15 +32,21 @@ import {
   AppstoreOutlined,
   UserAddOutlined,
   SearchOutlined,
+  MessageOutlined,
 } from '@ant-design/icons'
 import {
   agentApi,
   skillApi,
   systemApi,
+  conversationApi,
   type AgentDefinition,
   type AgentTemplate,
   type Skill,
+  type Conversation,
+  type GroupMember,
 } from '../services/api'
+import { useBusEventContext } from '../contexts/BusEventContext'
+import ChatPanel from '../components/ChatPanel'
 import './AgentPage.css'
 
 const ROLES = [
@@ -126,6 +134,9 @@ const STATUS_MAP: Record<AgentStatus, { label: string; color: string; dot: strin
 }
 
 export default function AgentPage() {
+  // 全局 groupId setter：体验试聊要把全局 groupId 切到 transient 会话 id，
+  // ChatPanel（从 BusEventContext 读 chatGroupId）才订阅对的 WS 通道 + 发消息落对会话。
+  const { setGroupId } = useBusEventContext()
   const [agents, setAgents] = useState<AgentDefinition[]>([])
   const [skillNameMap, setSkillNameMap] = useState<Record<string, string>>({})
   const [agentStatusMap, setAgentStatusMap] = useState<Record<string, AgentStatus>>({})
@@ -147,6 +158,16 @@ export default function AgentPage() {
    * 通常秒级完成；用 Set 而非单 bool 以支持多卡各自独立的 loading 态，避免
    * 一卡雇佣时全卡按钮齐刷刷转圈）。 */
   const [hiringTplIds, setHiringTplIds] = useState<Set<string>>(new Set())
+
+  /* 体验/管理 tab 切换：体验=点 agent 卡片开临时试聊面板（transient 会话，不进侧栏）；
+   * 管理=现有 CRUD（新建/编辑/删除 Modal + 角色模板广场）。 */
+  const [tab, setTab] = useState<'experience' | 'manage'>('experience')
+  /* 体验对话面板：trialAgent=被试聊的 agent；trialConversation=该 agent 的 transient 会话；
+   * trialMembers=占位成员（单聊走 route_direct_message，无需真成员，但 ChatPanel 要 GroupMember[]）。 */
+  const [trialAgent, setTrialAgent] = useState<AgentDefinition | null>(null)
+  const [trialConversation, setTrialConversation] = useState<Conversation | null>(null)
+  const [trialCreating, setTrialCreating] = useState(false)
+  const [finalizing, setFinalizing] = useState(false)
 
   const fetchAgents = async () => {
     setLoading(true)
@@ -360,6 +381,55 @@ export default function AgentPage() {
 
   const roleValue = Form.useWatch('role', form)
 
+  /* 开体验对话：为指定 agent 创建一个 transient 会话（后端 transient=1，不进侧栏），
+   * 拉到 trialConversation 后开 Drawer。ChatPanel 读 trialConversation 当 group
+   * （形状兼容：coordinator_id 镜像 agent_id）。
+   *
+   * 串台注意：ChatPanel 内部从 BusEventContext 读全局 groupId 作 chatGroupId（WS 订阅 +
+   * 消息收发 key）。广场页试聊时全局 groupId 可能停在旧会话，需把全局 groupId 设到
+   * trialConversation.id，ChatPanel 才订阅对的 WS 通道、发消息才落到试聊会话。
+   * 代价：全局 state 被体验面板占用，但 transient 会话不在侧栏列表（list 过滤），
+   * 侧栏不高亮，关闭体验面板后用户点侧栏别的会话即恢复，demo 阶段可接受。 */
+  const openTrial = async (agent: AgentDefinition) => {
+    setTrialCreating(true)
+    try {
+      const conv = await conversationApi.create({ agent_id: agent.id, transient: 1 })
+      setTrialConversation(conv)
+      setTrialAgent(agent)
+      setGroupId(conv.id)
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '开启体验对话失败')
+    } finally {
+      setTrialCreating(false)
+    }
+  }
+
+  const closeTrial = () => {
+    setTrialAgent(null)
+    setTrialConversation(null)
+  }
+
+  /* 体验转正：transient 1→0，会话落进左侧【会话】列表。转正后切到对话视图。
+   * 注意：转正后不在此处切 groupId（切了会跳出广场页体验面板），由用户自己点侧栏
+   * 新转正的会话进入。这里只刷新后端 + 提示 + 关体验面板。 */
+  const finalizeTrial = async () => {
+    if (!trialConversation) return
+    setFinalizing(true)
+    try {
+      await conversationApi.finalize(trialConversation.id)
+      message.success('已转为正式会话，可在左侧【会话】继续对话')
+      closeTrial()
+    } catch (e) {
+      message.error(e instanceof Error ? e.message : '转正失败')
+    } finally {
+      setFinalizing(false)
+    }
+  }
+
+  // 体验面板的占位成员（ChatPanel 需要 GroupMember[]，单聊 route_direct_message 不用，
+  // 但 props 类型要求；传空数组即可，@mention 候选为空不影响单聊）。
+  const trialMembers: GroupMember[] = []
+
   return (
     <div
       className="agent-page"
@@ -369,23 +439,23 @@ export default function AgentPage() {
       <div className="agent-hero">
         <div className="agent-hero-content">
           <div className="agent-hero-text">
-            <h1>智能体管理</h1>
-            <p>创建和管理你的 AI 智能体团队，每个智能体都有专属角色和技能</p>
+            <h1>智能体广场</h1>
+            <p>体验各角色智能体的对话能力，或管理你的 AI 智能体团队</p>
           </div>
-          <Button
-            type="primary"
-            size="large"
-            icon={<PlusOutlined />}
-            onClick={openCreate}
-            className="agent-hero-btn"
-          >
-            新建智能体
-          </Button>
+          {/* 体验/管理 tab 切换（右上角）。体验=试聊不进侧栏；管理=CRUD。 */}
+          <Segmented
+            value={tab}
+            onChange={(v) => setTab(v as 'experience' | 'manage')}
+            options={[
+              { label: '体验', value: 'experience' },
+              { label: '管理', value: 'manage' },
+            ]}
+          />
         </div>
       </div>
 
-      {/* ── AG-11 角色模板广场（可折叠面板，展开懒拉取） ── */}
-      {tplPanelOpen && (
+      {/* ── AG-11 角色模板广场（仅管理 tab 显示） ── */}
+      {tab === 'manage' && tplPanelOpen && (
         <div className="agent-templates-panel">
           <div className="agent-templates-header">
             <div className="agent-templates-title">
@@ -471,7 +541,9 @@ export default function AgentPage() {
         </div>
       ) : (
         <>
-        {/* ── 工具栏（搜索 + 角色筛选 + 操作）── */}
+        {/* ── 工具栏（搜索 + 角色筛选 + 操作）──
+            搜索/角色筛选 两个 tab 共用（找 agent 试聊/管理都要）；「自然语言生成」+
+            「角色模板广场」仅管理 tab（是 CRUD 操作）。 */}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 16, flexWrap: 'wrap', gap: 12 }}>
           <Input
             placeholder="搜索智能体名称 / 角色 / 技能"
@@ -488,16 +560,20 @@ export default function AgentPage() {
               onChange={(val) => setRoleFilter(val as string)}
               options={['全部', ...ROLES].map((c) => ({ label: c, value: c }))}
             />
-            <Button icon={<BulbOutlined />} onClick={() => setGenOpen(true)}>
-              自然语言生成
-            </Button>
-            <Button
-              icon={<AppstoreOutlined />}
-              type={tplPanelOpen ? 'primary' : 'default'}
-              onClick={() => toggleTemplates(!tplPanelOpen)}
-            >
-              角色模板广场
-            </Button>
+            {tab === 'manage' && (
+              <>
+                <Button icon={<BulbOutlined />} onClick={() => setGenOpen(true)}>
+                  自然语言生成
+                </Button>
+                <Button
+                  icon={<AppstoreOutlined />}
+                  type={tplPanelOpen ? 'primary' : 'default'}
+                  onClick={() => toggleTemplates(!tplPanelOpen)}
+                >
+                  角色模板广场
+                </Button>
+              </>
+            )}
           </Space>
         </div>
 
@@ -528,24 +604,39 @@ export default function AgentPage() {
                     <span className="agent-template-emoji" aria-hidden>{agent.icon_emoji || theme.emoji}</span>
                   </div>
                 }
-                actions={[
-                  <Tooltip title="编辑" key="edit">
-                    <Button type="text" icon={<EditOutlined />} onClick={() => openEdit(agent)}>编辑</Button>
-                  </Tooltip>,
-                  <Popconfirm
-                    key="delete"
-                    title="确认删除该智能体?"
-                    description="删除后不可恢复"
-                    onConfirm={() => handleDelete(agent.id)}
-                    okText="删除"
-                    cancelText="取消"
-                    okButtonProps={{ danger: true }}
-                  >
-                    <Tooltip title="删除">
-                      <Button type="text" danger icon={<DeleteOutlined />}>删除</Button>
-                    </Tooltip>
-                  </Popconfirm>,
-                ]}
+                actions={
+                  tab === 'experience'
+                    ? [
+                        <Button
+                          key="trial"
+                          type="primary"
+                          size="small"
+                          icon={<MessageOutlined />}
+                          loading={trialCreating && trialAgent?.id === agent.id}
+                          onClick={() => openTrial(agent)}
+                        >
+                          试聊
+                        </Button>,
+                      ]
+                    : [
+                        <Tooltip title="编辑" key="edit">
+                          <Button type="text" icon={<EditOutlined />} onClick={() => openEdit(agent)}>编辑</Button>
+                        </Tooltip>,
+                        <Popconfirm
+                          key="delete"
+                          title="确认删除该智能体?"
+                          description="删除后不可恢复"
+                          onConfirm={() => handleDelete(agent.id)}
+                          okText="删除"
+                          cancelText="取消"
+                          okButtonProps={{ danger: true }}
+                        >
+                          <Tooltip title="删除">
+                            <Button type="text" danger icon={<DeleteOutlined />}>删除</Button>
+                          </Tooltip>
+                        </Popconfirm>,
+                      ]
+                }
               >
                 {/* 名称行 + 状态点 */}
                 <div className="agent-template-card-top">
@@ -602,11 +693,13 @@ export default function AgentPage() {
             )
           })}
 
-          {/* 新建占位卡 */}
-          <div className="agent-card agent-card--new" onClick={openCreate}>
-            <PlusOutlined className="agent-card-new-icon" />
-            <span>新建智能体</span>
-          </div>
+          {/* 新建占位卡（仅管理 tab 显示，体验 tab 不新建） */}
+          {tab === 'manage' && (
+            <div className="agent-card agent-card--new" onClick={openCreate}>
+              <PlusOutlined className="agent-card-new-icon" />
+              <span>新建智能体</span>
+            </div>
+          )}
         </div>
         </>
       )}
@@ -732,6 +825,55 @@ export default function AgentPage() {
           </p>
         </div>
       </Modal>
+
+      {/* ── 体验对话抽屉（点「试聊」打开，transient 会话，不进侧栏） ──
+          复用 ChatPanel（hideHeader，标题区自画）：传 trialConversation 当 group
+          （形状兼容，coordinator_id 镜像 agent_id）。Drawer 宽 720，遮住广场右侧
+          让用户聚焦试聊。关闭即清（transient 会话留库但 list_conversations 过滤掉
+          不进侧栏；用户可选「转为正式会话」落进左侧）。 */}
+      <Drawer
+        open={!!trialConversation}
+        onClose={closeTrial}
+        width={720}
+        title={
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <MessageOutlined style={{ color: 'var(--brand, #F26522)' }} />
+            <span>体验对话 · {trialAgent?.name ?? '智能体'}</span>
+          </div>
+        }
+        styles={{ body: { padding: 0, display: 'flex', flexDirection: 'column', height: '100%' } }}
+        destroyOnClose
+      >
+        {trialConversation && (
+          <>
+            <Alert
+              type="info"
+              showIcon
+              message="这是体验对话，关闭后不保留在左侧【会话】"
+              description="点「转为正式会话」可保存到左侧继续对话。"
+              style={{ borderRadius: 0, flexShrink: 0 }}
+              action={
+                <Button
+                  size="small"
+                  type="primary"
+                  loading={finalizing}
+                  onClick={finalizeTrial}
+                >
+                  转为正式会话
+                </Button>
+              }
+            />
+            <div style={{ flex: 1, minHeight: 0 }}>
+              <ChatPanel
+                group={trialConversation}
+                agents={agents}
+                members={trialMembers}
+                hideHeader
+              />
+            </div>
+          </>
+        )}
+      </Drawer>
     </div>
   )
 }

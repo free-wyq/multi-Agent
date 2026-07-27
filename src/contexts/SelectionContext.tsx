@@ -16,27 +16,29 @@ import { useBusEventContext } from './BusEventContext'
  * SelectionContext — 左右布局的「选择模型」单一真源（布局重构 2026-07-11）。
  *
  * 背景：三栏+路由布局退役后，单聊/群聊都收敛到「一个会话 id + ChatPanel」。
- * 左侧 Sidebar 的智能体列表和多智能体列表点击后都走 setGroupId，但单聊需要
- * find-or-create 一个 ConversationEntity（Path C 后单聊独立实体，不再用
- * config.single_chat===true 的 GroupEntity）。
- * 这个 find-or-create 逻辑 + groups/agents/conversations/status 共享数据的加载，
- * 集中在本 context，Sidebar（触发选择）和 ChatView（消费 groups/agents/members
- * 渲染 ChatPanel）共享。
+ * 左侧 Sidebar 的会话列表和群组列表点击后都走 setGroupId，单聊是独立
+ * ConversationEntity（Path C 后单聊独立实体，不再用 config.single_chat===true
+ * 的 GroupEntity）。
+ * 会话创建逻辑 + groups/agents/conversations/status 共享数据的加载，集中在本
+ * context，Sidebar（触发选择）和 ChatView（消费 groups/agents/members 渲染
+ * ChatPanel）共享。
  *
  * 持有：
- *  - groups / agents / conversations / agentStatusMap：首屏加载一次，selectAgent
+ *  - groups / agents / conversations / agentStatusMap：首屏加载一次，createNewConversation
  *    创建单聊会话后刷新 conversations。
- *  - selectAgent(agentId)：find-or-create 单聊会话 → setConversationId（走 BusEventContext）。
+ *  - createNewConversation()：豆包式新建会话 → setGroupId（走 BusEventContext）。
+ *    后端每次新建一个绑平台助手（slug='platform_assistant'）的 ConversationEntity。
  *  - selectGroup(groupId)：直接 setGroupId。
  *  - activeKind / activeAgentId：从当前 groupId + groups/conversations 派生
  *    （单聊 conversation→agent，多智能体群→group），供 Sidebar 高亮 + ChatView
  *    标题区判断单聊/群聊用——无需额外 state，纯派生避免漂移。
  *
- * Provider 必须在 BusEventProvider 内使用（selectAgent/selectGroup 调 setGroupId）。
+ * Provider 必须在 BusEventProvider 内使用（createNewConversation/selectGroup 调 setGroupId）。
  *
- * Path C（单聊分实体）：single_chat flag 删除，单聊由独立 ConversationEntity 承载。
- * selectAgent 改调 POST /api/conversations（find-or-create），activeKind 从 activeConversation
- * vs activeGroup 派生（不再读 config.single_chat）。
+ * 豆包式重构（2026-07-27）：单聊从「find-or-create per agent」改为「每次新建绑平台助手」。
+ * 平台助手是全平台唯一常驻 agent（slug='platform_assistant'，后端 seed），侧栏【会话】所有
+ * 会话都绑它。新建单聊入口在侧栏「+新对话」（不再走广场点 agent find-or-create）。
+ * 广场点 agent 改为「体验对话」（transient 会话，不进侧栏，独立路径不走本 context）。
  */
 
 /** 智能体运行时状态（从 systemApi.listAllStatus 派生，与 AgentPage STATUS_MAP 对齐）。 */
@@ -53,7 +55,7 @@ export interface SelectionContextValue {
   agentStatusMap: Record<string, AgentStatus>
   /** 数据加载中态。 */
   loading: boolean
-  /** 重新拉取 groups + conversations + agents + 全量状态（selectAgent 创建单聊后调用）。 */
+  /** 重新拉取 groups + conversations + agents + 全量状态（createNewConversation 创建单聊后调用）。 */
   refreshAll: () => Promise<void>
 
   /** 当前选中类型：单聊会话→'agent'，多智能体群→'group'，未选→null。纯派生。 */
@@ -65,8 +67,9 @@ export interface SelectionContextValue {
   /** 当前 conversationId 对应的单聊会话对象（null=未选或当前是群聊）。 */
   activeConversation: Conversation | null
 
-  /** 选智能体进单聊：find-or-create ConversationEntity → setGroupId（conversation id）。 */
-  selectAgent: (agentId: string) => Promise<void>
+  /** 新建一个会话（豆包式）：后端每次新建一个绑平台助手的 ConversationEntity → setGroupId。
+   *  用于侧栏「+新对话」按钮。平台助手是常驻 agent（slug='platform_assistant'），单聊永远绑它。 */
+  createNewConversation: () => Promise<void>
   /** 选多智能体群组进群聊：直接 setGroupId。 */
   selectGroup: (groupId: string) => void
 }
@@ -147,33 +150,23 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
   const activeAgentId = isSingleChat ? activeConversation?.agent_id ?? null : null
 
   /**
-   * 选智能体进单聊：find-or-create ConversationEntity。
+   * 新建一个会话（豆包式）：后端每次新建一个绑平台助手的 ConversationEntity。
    *
-   * Path C：不再 groupApi.create({config:{single_chat:true}})，改调
-   * conversationApi.create({agent_id})（后端 POST /api/conversations find-or-create
-   * 语义：已有该 agent 的单聊则返回，否则新建）。成功后刷新 conversations 列表
-   * → setGroupId(created.id)（conversation id 作 BusEventContext 的 groupId 角色，
-   * WS 通道 bus-event:{conversationId} 机制不变）。
+   * 后端 POST /api/conversations（不再 find-or-create per agent，每次新建；agent_id 省略
+   * → 后端绑 platform_assistant 常驻助手）。成功后刷新 conversations 列表 → setGroupId。
    */
-  const selectAgent = useCallback(
-    async (agentId: string) => {
-      // 先在已加载 conversations 里找该 agent 的单聊
-      const existing = conversations.find((c) => c.agent_id === agentId)
-      if (existing) {
-        setGroupId(existing.id)
-        return
-      }
+  const createNewConversation = useCallback(
+    async () => {
       try {
-        const created = await conversationApi.create({ agent_id: agentId })
-        // 刷新 conversations 列表让新单聊出现在左栏「智能体」分组
+        const created = await conversationApi.create({})
         const cData = await conversationApi.list()
         setConversations(cData)
         setGroupId(created.id)
       } catch {
-        /* 创建失败静默——后续可加 toast。避免阻塞选择交互。 */
+        /* 创建失败静默——后续可加 toast。避免阻塞新建交互。 */
       }
     },
-    [conversations, setGroupId],
+    [setGroupId],
   )
 
   const selectGroup = useCallback(
@@ -195,7 +188,7 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeAgentId,
       activeGroup,
       activeConversation,
-      selectAgent,
+      createNewConversation,
       selectGroup,
     }),
     [
@@ -209,7 +202,7 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeAgentId,
       activeGroup,
       activeConversation,
-      selectAgent,
+      createNewConversation,
       selectGroup,
     ],
   )

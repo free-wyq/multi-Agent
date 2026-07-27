@@ -5,7 +5,9 @@ experience stay identical.
 """
 from __future__ import annotations
 
-from sqlalchemy import select
+import logging
+
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from store.entities import (
@@ -17,7 +19,14 @@ from store.entities import (
     TaskEntity,
 )
 
+logger = logging.getLogger("multi-agent.seed")
+
 _SEED_TS = "2026-07-10T00:00:00Z"
+
+# T86 豆包式常驻助手：全平台唯一一个 platform_assistant agent。
+# 侧栏【会话】列的所有会话都绑它；智能体广场点 agent 是「体验对话」（transient=1）。
+PLATFORM_ASSISTANT_ID = "agent_platform_assistant"
+PLATFORM_ASSISTANT_SLUG = "platform_assistant"
 
 
 async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
@@ -204,3 +213,77 @@ async def seed_demo_data(SessionLocal: async_sessionmaker) -> None:
         db.add(message)
 
         await db.commit()
+
+
+async def ensure_platform_assistant(SessionLocal: async_sessionmaker) -> None:
+    """T86 平台助手种子——启动幂等补种，让存量库也能拿到。
+
+    与 ``seed_demo_data`` 的「首跑才种」不同：本函数每次启动都跑，按
+    ``slug='platform_assistant'`` 查 AgentEntity，无则插入平台助手 row。
+    这样存量库（已有 demo agents 但无平台助手）升级后也能立即用上
+    「侧栏新建会话绑平台助手」语义，无需 drop 库。
+
+    幂等：已有则跳过（不覆盖用户对该 agent 的任何编辑——name/system_prompt 等）。
+
+    兼容存量库的死列：``allowed_tools`` / ``denied_tools`` 在实体已删（死代码清理 ·
+    2026-07-27），但物理列可能仍残留在老库的 ``agents`` 表上（NOT NULL 约束）。
+    本函数检测此情况并 DROP COLUMN，让 INSERT 平台助手不撞 NOT NULL 约束。
+    """
+    # 兼容老库：若 agents 表仍残留 allowed_tools / denied_tools 死列（NOT NULL），
+    # 任何 INSERT 都会撞约束。先 DROP COLUMN 清掉（SQLAlchemy ORM 已不映射它们）。
+    # SQLite 3.35+ 支持 DROP COLUMN；aiosqlite 跑的是 SQLite 3.37.2，OK。
+    # try/except 兜住已不存在 / 不支持的情况，best-effort。
+    async with SessionLocal() as db:
+        for col in ("allowed_tools", "denied_tools"):
+            try:
+                cols = {
+                    row[1]
+                    for row in (await db.execute(text("PRAGMA table_info(agents)"))).all()
+                }
+                if col in cols:
+                    await db.execute(text(f"ALTER TABLE agents DROP COLUMN {col}"))
+                    await db.commit()
+                    logger.info(
+                        "[seed] dropped legacy column agents.%s (dead code, "
+                        "NOT NULL was blocking T86 platform_assistant INSERT)",
+                        col,
+                    )
+            except Exception:
+                # best-effort：列可能已不存在 / SQLite 版本不支持 DROP COLUMN。
+                # 不 raise——失败的话后续 INSERT 若撞约束会以 ValueError 上报。
+                await db.rollback()
+
+    async with SessionLocal() as db:
+        existing = (
+            await db.execute(
+                select(AgentEntity).where(AgentEntity.slug == PLATFORM_ASSISTANT_SLUG)
+            )
+        ).scalars().first()
+        if existing is not None:
+            return
+        platform = AgentEntity(
+            id=PLATFORM_ASSISTANT_ID,
+            name="平台助手",
+            role="platform_assistant",
+            system_prompt=(
+                "你是平台助手，用户的常驻AI助手。帮助用户处理各类问题，"
+                "回答简洁友好，需要时主动追问澄清需求。"
+            ),
+            skills=[],
+            extra_skills=[],
+            mounted_skills=[],
+            startup_strategy="",
+            model="",
+            max_turns=0,
+            description="平台常驻助手，轻度用户的默认对话伙伴",
+            slug=PLATFORM_ASSISTANT_SLUG,
+            icon_emoji=None,
+            created_at=_SEED_TS,
+            updated_at=_SEED_TS,
+        )
+        db.add(platform)
+        await db.commit()
+        logger.info(
+            "[seed] platform_assistant inserted (id=%s) — 侧栏会话默认绑此 agent",
+            PLATFORM_ASSISTANT_ID,
+        )

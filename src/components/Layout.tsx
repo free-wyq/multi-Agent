@@ -38,8 +38,8 @@ type View = 'chat' | 'agent' | 'skill'
  * 符合 VS Code/Cursor/Linear 等开发者工具「用户入口放左下角」的习惯。回调 openUserSettings
  * 下发给 Sidebar 渲染。
  *
- * 侧栏列表项点击（selectAgent/selectGroup）时经 onNavigateChat 自动切回对话视图，
- * 保证「在广场页点侧栏某个智能体 → 立即进入与它的单聊」直觉化。
+ * 侧栏列表项点击（createNewConversation/selectGroup）时经 onNavigateChat 自动切回对话视图，
+ * 保证「在广场页点侧栏某个会话/群组 → 立即进入对话」直觉化。
  *
  * 高度链（[[flex-height-chain-lock]]）：#root{height:100%}（App.css）→
  * 外层 AntLayout{height:100%, display:flex, flexDirection:column} →

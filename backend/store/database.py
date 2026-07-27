@@ -99,6 +99,10 @@ def _migrate_schema() -> None:
         _ensure_column(conn, "skills", "requires_tools", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "skills", "triggers", "JSON NOT NULL DEFAULT '[]'")
         _ensure_column(conn, "skills", "outputs", "JSON NOT NULL DEFAULT '[]'")
+        # T86 豆包式常驻助手：conversations.transient 标记体验会话（1=不进侧栏）。
+        # 旧库缺此列时补上 INTEGER NOT NULL DEFAULT 0——旧行升级行为不变（正式会话）。
+        # 新库 create_all 直接建带此列；此处仅对存量库生效（additive migration）。
+        _ensure_column(conn, "conversations", "transient", "INTEGER NOT NULL DEFAULT 0")
         # Path C (single-chat entity split, strict rename ``group_id`` →
         # ``conversation_id`` on Message/Task): development-period data is
         # disposable (user 拍板: 不写迁移脚本，直接 drop+recreate). When the
@@ -214,10 +218,13 @@ async def init_db() -> None:
     pre-rename schema). ``create_all`` then rebuilds them with the new
     ``conversation_id`` column. A fresh DB simply creates them new. This
     mirrors the user's拍板决策「开发期数据可弃直接 drop+recreate 表，不写迁移脚本」.
+
+    T86 豆包式常驻助手：``ensure_platform_assistant`` 每次启动跑（不只首跑），
+    按 ``slug='platform_assistant'`` 查无则补种，让存量库也拿到平台助手。
     """
     from store.crud import load_active_provider_into_cache
     from store.entities import Base
-    from store.seed import seed_demo_data
+    from store.seed import ensure_platform_assistant, seed_demo_data
 
     # Path C: if messages/tasks still have the legacy ``group_id`` column, drop
     # them so create_all rebuilds with ``conversation_id``. Development-period
@@ -237,6 +244,8 @@ async def init_db() -> None:
         await conn.run_sync(Base.metadata.create_all)
 
     await seed_demo_data(SessionLocal)
+    # T86 平台助手启动幂等补种（每次启动跑，让存量库也拿到）。
+    await ensure_platform_assistant(SessionLocal)
     # Load the active LLM provider into the sync cache so get_config() returns
     # the DB-backed config (not the env fallback) from the very first call.
     await load_active_provider_into_cache()

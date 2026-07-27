@@ -10,7 +10,6 @@ import ChatPanel from './ChatPanel'
 import GroupInfoDrawer from './GroupInfoDrawer'
 import ConversationInfoDrawer from './ConversationInfoDrawer'
 import StopTaskButton from './StopTaskButton'
-import { AgentEditButton } from './AgentDetailPanel'
 
 const { Text } = Typography
 
@@ -111,7 +110,7 @@ export default function ChatView() {
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, overflow: 'hidden' }}>
           <Text strong style={{ fontSize: 15, flexShrink: 0 }}>
-            {isSingleChat ? (singleAgent?.name ?? activeConversation?.name ?? '单聊') : (activeGroup?.name ?? '群聊')}
+            {isSingleChat ? (activeConversation?.name || '新对话') : (activeGroup?.name ?? '群聊')}
           </Text>
           {/* 协作模式 Tag（仅群聊显示，单聊不显）。中心化橙 / 去中心化紫。
               config.collaboration_mode 缺省时兜底 centralized（老群组兼容）。 */}
@@ -129,13 +128,7 @@ export default function ChatView() {
                 : '中心化'}
             </Tag>
           )}
-          {isSingleChat ? (
-            singleAgent?.role && (
-              <Text type="secondary" style={{ fontSize: 12 }}>
-                {singleAgent.role}
-              </Text>
-            )
-          ) : (
+          {!isSingleChat && (
             <Text type="secondary" style={{ fontSize: 13, flexShrink: 0 }}>
               ( {members.length + 1} )
             </Text>
@@ -159,13 +152,6 @@ export default function ChatView() {
             <StopTaskButton
               groupId={groupId}
               agentName={executingAgent.name}
-            />
-          )}
-          {isSingleChat && singleAgent && (
-            <AgentEditButton
-              agent={singleAgent}
-              onUpdated={() => refreshAll()}
-              small
             />
           )}
           {/* 任务14c：单聊会话设置抽屉入口（与群聊 ⚙群信息 对称）。

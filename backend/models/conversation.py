@@ -18,6 +18,10 @@ class Conversation(BaseModel):
     ``group.coordinator_id``) renders the streaming bubble with the right
     sender without code changes. ``name`` defaults to the agent's name when
     unset (filled at creation time by the CRUD layer).
+
+    T86 豆包式常驻助手：``transient`` 标记体验会话（1=不进侧栏，0=正式）。
+    智能体广场点 agent 开的是体验会话（transient=1），侧栏【会话】列的正式会话
+    都绑 platform_assistant（transient=0）。``list_conversations`` 过滤此列。
     """
 
     model_config = ConfigDict(extra="allow")
@@ -26,18 +30,22 @@ class Conversation(BaseModel):
     agent_id: str
     name: str = ""
     coordinator_id: str = ""
+    transient: int = 0
     created_at: str = ""
     updated_at: str = ""
 
 
 class ConversationCreatePayload(BaseModel):
-    """Payload for POST /api/conversations (find-or-create semantics).
+    """Payload for POST /api/conversations.
 
-    Only ``agent_id`` is required; ``name`` is optional and defaults to the
-    agent's name (filled by the CRUD layer when omitted).
+    T86 后语义：``agent_id`` 为空时绑定平台常驻助手（slug='platform_assistant'）。
+    智能体广场点 agent 的体验对话传 ``agent_id=<that_agent>`` + ``transient=1``；
+    侧栏【会话】新建会话不传 ``agent_id``（默认绑平台助手）+ ``transient=0``。
+    ``name`` 默认空，由首条用户消息触发自动生成（见 ``api/messages.py``）。
     """
 
     model_config = ConfigDict(extra="allow")
 
-    agent_id: str
+    agent_id: str | None = None
     name: str | None = None
+    transient: int = 0

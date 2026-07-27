@@ -1,5 +1,5 @@
 import { useState } from 'react'
-import { Avatar, Button, Collapse, Empty, Form, Input, Modal, Select, Spin, Tooltip, message } from 'antd'
+import { Avatar, Button, Collapse, Empty, Spin, Tooltip } from 'antd'
 import {
   PlusOutlined,
   RobotOutlined,
@@ -8,7 +8,6 @@ import {
 } from '@ant-design/icons'
 
 import { useSelection } from '../contexts/SelectionContext'
-import { agentApi, type AgentCreatePayload } from '../services/api'
 import CreateGroupModal from './CreateGroupModal'
 
 /** Sidebar 宽度（固定，flexShrink:0）。 */
@@ -30,7 +29,7 @@ const STATUS_DOT: Record<string, string> = {
 interface SidebarProps {
   /**
    * 选中列表项后切回聊天视图（顶部栏视图切换为 'chat'）。由 Layout 传入——
-   * 广场页（AgentPage/SkillPage）展示时点侧栏智能体/群组应立即进入对应单聊/群聊，
+   * 广场页（AgentPage/SkillPage）展示时点侧栏会话/群组应立即进入对应单聊/群聊，
    * 而非停留在广场页。
    */
   onNavigateChat: () => void
@@ -45,29 +44,48 @@ interface SidebarProps {
  * Sidebar — 左栏导航（顶部栏改版 2026-07-12）。
  *
  * 240px 浅灰侧栏，VS Code/Linear 极简风格。结构：
- *  - 上：两个可折叠分组（antd Collapse）：「智能体」= agent 列表（点选进单聊），
- *    「多智能体」= 群组列表（点选进群聊，过滤掉 config.single_chat===true 的单聊群）。
- *    每组底部带 +新建入口。
+ *  - 上：两个可折叠分组（antd Collapse）：
+ *    「会话」= 单聊会话列表（点选进单聊）；
+ *    「智能体群」= 群组列表（点选进群聊）。
+ *    会话分组底部不带 +新建——新建单聊的入口在智能体广场（点 agent find-or-create），
+ *    这是产品决策：侧栏承载「最近会话」浏览，不承担新建职能。
+ *    智能体群分组底部带 +新建群组（CreateGroupModal）。
  *  - 下：用户入口条（头像 + 「用户信息」），点击打开 SettingsModal 并默认落在用户信息项。
  *    2026-07-12 从顶栏右上角移来——顶栏是品牌+视图切换语义区，用户/登录入口混入语义杂；
  *    侧栏底部符合 VS Code/Cursor/Linear 等工具习惯。
- *  - 品牌区与设置入口已上移至全局顶部栏（见 Layout），本组件不再渲染头部。
+ *    品牌区与设置入口已上移至全局顶部栏（见 Layout），本组件不再渲染头部。
  *
- * 选择态走 SelectionContext：selectAgent（find-or-create 单聊群）/ selectGroup（直接切群）。
- * 数据（groups/agents/agentStatusMap）由 SelectionContext 集中加载，Sidebar 只消费渲染。
+ * 选择态走 SelectionContext：
+ *  - selectGroup（直接 setGroupId）：用于单聊会话（conversation id 作 groupId
+ *    订阅 WS，机制不变）和群组切换。
+ * 数据（groups/conversations/agents/agentStatusMap）由 SelectionContext 集中加载，
+ * Sidebar 只消费渲染。
  * 选中项时同步调 onNavigateChat 把顶部栏视图切回聊天。
  *
- * 高亮：多智能体选中 = activeGroupId===g.id；智能体选中 = activeAgentId===agent.id。
+ * 重构说明（2026-07-27）：侧栏不再列 agent（原「智能体」分组退役），agent 创建/
+ * 管理归智能体广场页（AgentPage）。侧栏改为列「会话」（单聊 ConversationEntity 列表），
+ * 让用户聚焦「最近聊过的会话」而非「全部 agent 实体」。「平台助手」即指这些会话本身——
+ * 轻度用户在广场点 agent 开一个会话就当助手用，侧栏只列「最近会话」，无独立常驻条。
  */
 export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarProps) {
-  const { groups, agents, agentStatusMap, loading, activeAgentId, activeGroup, selectAgent, selectGroup, refreshAll } =
-    useSelection()
+  const {
+    groups,
+    conversations,
+    agents,
+    agentStatusMap,
+    loading,
+    activeConversation,
+    activeGroup,
+    createNewConversation,
+    selectGroup,
+    refreshAll,
+  } = useSelection()
 
   // Collapse 展开态：默认两个分组都展开（首屏即见列表）。
-  const [openKeys, setOpenKeys] = useState<string[]>(['agents', 'groups'])
+  const [openKeys, setOpenKeys] = useState<string[]>(['conversations', 'groups'])
 
   // Path C：单聊是独立 ConversationEntity（不在 groups 里），groups 列表天然不含单聊，
-  // 无需再过滤 config.single_chat。单聊在「智能体」分组以单聊会话形式进入（selectAgent）。
+  // 无需再过滤 config.single_chat。单聊在「会话」分组以单聊会话形式进入（selectGroup 选已有会话）。
   const multiAgentGroups = groups
 
   // 选中任一列表项后切回聊天视图（广场页 → 聊天的直觉切换）。
@@ -107,25 +125,31 @@ export default function Sidebar({ onNavigateChat, onOpenUserSettings }: SidebarP
             style={{ background: 'transparent' }}
             items={[
               {
-                key: 'agents',
-                label: <GroupLabel title="智能体" count={agents.length} />,
-                children: <AgentsPanel
-                  agents={agents}
-                  agentStatusMap={agentStatusMap}
-                  activeAgentId={activeAgentId}
-                  onSelect={wrapSelect(selectAgent)}
-                />,
+                key: 'conversations',
+                label: <GroupLabel title="会话" count={conversations.length} />,
+                children: (
+                  <ConversationsPanel
+                    conversations={conversations}
+                    agents={agents}
+                    agentStatusMap={agentStatusMap}
+                    activeConversation={activeConversation}
+                    onSelectConversation={wrapSelect(selectGroup)}
+                    onCreateConversation={createNewConversation}
+                  />
+                ),
               },
               {
                 key: 'groups',
-                label: <GroupLabel title="多智能体" count={multiAgentGroups.length} />,
-                children: <GroupsPanel
-                  groups={multiAgentGroups}
-                  activeGroupId={activeGroup ? activeGroup.id : null}
-                  onSelect={wrapSelect(selectGroup)}
-                  agents={agents}
-                  onCreated={refreshAll}
-                />,
+                label: <GroupLabel title="智能体群" count={multiAgentGroups.length} />,
+                children: (
+                  <GroupsPanel
+                    groups={multiAgentGroups}
+                    activeGroupId={activeGroup ? activeGroup.id : null}
+                    onSelect={wrapSelect(selectGroup)}
+                    agents={agents}
+                    onCreated={refreshAll}
+                  />
+                ),
               },
             ]}
           />
@@ -173,117 +197,82 @@ function GroupLabel({ title, count }: { title: string; count: number }) {
   )
 }
 
-/** 智能体分组列表内容。 */
-function AgentsPanel({
+/**
+ * 会话分组列表内容。
+ *
+ * 单聊会话列表——按 updated_at 倒序，图标 RobotOutlined。点击走 onSelectConversation
+ * （selectGroup 用 conversation id 订阅 WS，与群组切换同机制）。
+ *
+ * 底部「+新对话」按钮——豆包式新建会话入口，后端每次新建一个绑平台助手的
+ * ConversationEntity。平台助手是全平台唯一常驻 agent（slug='platform_assistant'），
+ * 侧栏所有会话都绑它。
+ */
+function ConversationsPanel({
+  conversations,
   agents,
   agentStatusMap,
-  activeAgentId,
-  onSelect,
+  activeConversation,
+  onSelectConversation,
+  onCreateConversation,
 }: {
+  conversations: ReturnType<typeof useSelection>['conversations']
   agents: ReturnType<typeof useSelection>['agents']
   agentStatusMap: Record<string, string>
-  activeAgentId: string | null
-  onSelect: (agentId: string) => void
+  activeConversation: ReturnType<typeof useSelection>['activeConversation']
+  /** 常规会话：走 selectGroup（conversation id 作 groupId 订阅 WS）。 */
+  onSelectConversation: (conversationId: string) => void
+  /** 新建会话：豆包式，后端新建一个绑平台助手的 ConversationEntity。 */
+  onCreateConversation: () => Promise<void>
 }) {
-  const [createOpen, setCreateOpen] = useState(false)
-  const [form] = Form.useForm<AgentCreatePayload>()
-
-  const handleCreate = async () => {
-    try {
-      const values = await form.validateFields()
-      await agentApi.create({
-        name: values.name,
-        role: values.role || '自定义',
-        system_prompt: values.system_prompt,
-        extra_skills: values.extra_skills ?? [],
-      })
-      message.success('智能体已创建')
-      setCreateOpen(false)
-      form.resetFields()
-      // 刷新由 SelectionContext.refreshAll 负责——但此处简单复用：selectAgent 不会触发刷新，
-      // 故创建后提示用户。后续可接 refreshAll。
-    } catch {
-      /* 校验失败 Form 已标红 */
-    }
-  }
+  // 单聊会话：按 updated_at 倒序排（最近聊过的在最上）。
+  const sortedConversations = conversations
+    .slice()
+    .sort((a, b) => b.updated_at.localeCompare(a.updated_at))
 
   return (
     <div style={{ paddingBottom: 4 }}>
-      {agents.length === 0 ? (
-        <Empty image={Empty.PRESENTED_IMAGE_SIMPLE} description="暂无智能体" style={{ margin: '12px 0' }} />
+      {/* 单聊会话列表。 */}
+      {sortedConversations.length === 0 ? (
+        <Empty
+          image={Empty.PRESENTED_IMAGE_SIMPLE}
+          description="暂无会话"
+          style={{ margin: '12px 0' }}
+        />
       ) : (
-        agents.map((agent) => {
-          const active = activeAgentId === agent.id
-          const status = agentStatusMap[agent.id] ?? 'offline'
+        sortedConversations.map((c) => {
+          const agent = agents.find((a) => a.id === c.agent_id)
+          const status = agent ? agentStatusMap[agent.id] ?? 'offline' : 'offline'
+          const active = !!activeConversation && activeConversation.id === c.id
           return (
             <SidebarItem
-              key={agent.id}
+              key={c.id}
               active={active}
-              onClick={() => onSelect(agent.id)}
+              onClick={() => onSelectConversation(c.id)}
+              title={c.name || '新对话'}
               dotColor={STATUS_DOT[status] ?? STATUS_DOT.offline}
-              title={agent.name}
-              subtitle={agent.role}
               icon={<RobotOutlined />}
             />
           )
         })
       )}
+      {/* 新建会话入口——豆包式，底部固定。 */}
       <div style={{ padding: '4px 8px' }}>
         <Button
           block
           size="small"
           type="text"
           icon={<PlusOutlined />}
-          onClick={() => setCreateOpen(true)}
+          onClick={() => onCreateConversation()}
           style={{ textAlign: 'left' }}
         >
-          新建
+          新对话
         </Button>
       </div>
-
-      {/* 新建智能体 Modal（极简：名+角色+prompt+技能，复用 agentApi.create） */}
-      <Modal
-        open={createOpen}
-        title="新建智能体"
-        onCancel={() => {
-          setCreateOpen(false)
-          form.resetFields()
-        }}
-        onOk={handleCreate}
-        destroyOnClose
-        okText="创建"
-        width={480}
-      >
-        <Form form={form} layout="vertical" style={{ marginTop: 12 }}>
-          <Form.Item name="name" label="名称" rules={[{ required: true, message: '请输入名称' }]}>
-            <Input placeholder="如：后端小新" autoComplete="off" />
-          </Form.Item>
-          <Form.Item name="role" label="角色">
-            <Select
-              placeholder="选择角色"
-              options={[
-                '后端开发工程师',
-                '前端开发工程师',
-                '测试工程师',
-                'DevOps 工程师',
-                '产品经理',
-                '自定义',
-              ].map((r) => ({ value: r, label: r }))}
-            />
-          </Form.Item>
-          <Form.Item name="system_prompt" label="角色描述">
-            <Input.TextArea rows={3} placeholder="自定义角色描述（system prompt）" />
-          </Form.Item>
-          <Form.Item name="extra_skills" label="额外技能">
-            <Select mode="tags" placeholder="输入技能名后回车" tokenSeparators={[',']} allowClear />
-          </Form.Item>
-        </Form>
-      </Modal>
     </div>
   )
 }
 
-/** 多智能体分组列表内容。 */
+/** 智能体群分组列表内容。 */
 function GroupsPanel({
   groups,
   activeGroupId,

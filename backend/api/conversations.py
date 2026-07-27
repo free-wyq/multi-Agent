@@ -1,18 +1,18 @@
-"""Conversation routes (Path C single-chat entity split).
+"""Conversation routes (Path C single-chat entity split, T86 豆包式常驻助手).
 
 Routes map to frontend `conversationApi`:
-  GET    /api/conversations                  → list_conversations
-  POST   /api/conversations                  → create_conversation (find-or-create)
+  GET    /api/conversations                  → list_conversations (transient=0 only)
+  POST   /api/conversations                  → create_conversation (每次新建)
   GET    /api/conversations/{id}             → get_conversation
   DELETE /api/conversations/{id}             → delete_conversation
+  POST   /api/conversations/{id}/finalize    → finalize_conversation (体验→正式)
   GET    /api/conversations/{id}/files      → list_files        (任务14a·单聊文件列表)
   GET    /api/conversations/{id}/files/{name} → download_file  (任务14a·单聊产物下载)
 
-The single-chat conversation is its own entity (``ConversationEntity``) — no
-longer a degenerate ``GroupEntity`` row with ``config.single_chat=True``.
-Messages and tasks reference the conversation via ``conversation_id`` (the
-renamed ``group_id``). The WS channel ``bus-event:{conversationId}`` reuses
-the same BusManager (one id one channel, no protocol change).
+T86 改语义：``POST /api/conversations`` 不再 find-or-create——每次都新建一个 row。
+- 不传 ``agent_id`` → 绑平台常驻助手（slug='platform_assistant'），transient=0 进侧栏。
+- 传 ``agent_id`` → 体验会话，transient=1 不进侧栏（智能体广场点 agent 场景）。
+- ``finalize`` 端点把体验会话转正（transient=0），让用户可保留感兴趣的体验对话。
 
 任务14a：单聊文件操作走 ``/api/conversations`` 命名空间，不滥用 group 路由。工作区按
 ``conversation_id`` 在磁盘落盘（``DATA_DIR/workspaces/{conversation_id}/``）——单聊驻留
@@ -37,18 +37,26 @@ router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 @router.get("")
 async def list_conversations() -> list[Conversation]:
+    """List non-transient single-chat conversations (T86 豆包式).
+
+    体验会话（transient=1）不进侧栏——``crud.list_conversations`` 已过滤。
+    """
     return await crud.list_conversations()
 
 
 @router.post("")
 async def create_conversation(payload: ConversationCreatePayload) -> Conversation:
-    """Find-or-create a single-chat conversation for ``agent_id``.
+    """Create a new single-chat conversation (T86 改语义：每次新建).
 
-    Idempotent: returns the existing conversation for the agent if one exists,
-    otherwise creates a new one. Used by the frontend ``selectAgent`` path
-    (clicking an agent in the sidebar opens a single-chat with that agent).
+    - 不传 ``agent_id`` → 绑平台常驻助手（slug='platform_assistant'）。
+    - 传 ``agent_id`` → 体验会话，caller 应同时传 ``transient=1``。
+
+    平台助手未种时返 503（启动期 ``ensure_platform_assistant`` 应已执行）。
     """
-    return await crud.get_or_create_conversation(payload.agent_id)
+    try:
+        return await crud.create_conversation(payload)
+    except ValueError as e:
+        raise HTTPException(status_code=503, detail=str(e)) from e
 
 
 @router.get("/{conversation_id}")
@@ -59,6 +67,22 @@ async def get_conversation(conversation_id: str) -> Conversation | None:
 @router.delete("/{conversation_id}")
 async def delete_conversation(conversation_id: str) -> bool:
     return await crud.delete_conversation(conversation_id)
+
+
+@router.post("/{conversation_id}/finalize")
+async def finalize_conversation(conversation_id: str) -> Conversation:
+    """T86 转正端点：体验会话（transient=1）→ 正式（transient=0）。
+
+    智能体广场点 agent 的体验对话用户想保留时，调此端点转正——之后会出现在侧栏
+    【会话】列。语义幂等（已是正式仍返当前行）。404 当会话不存在。
+    """
+    conv = await crud.finalize_conversation(conversation_id)
+    if conv is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"会话不存在: {conversation_id}",
+        )
+    return conv
 
 
 @router.get("/{conversation_id}/files")

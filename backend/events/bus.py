@@ -491,3 +491,36 @@ async def emit_coordinator_stats(
             "timestamp": _ts(),
         },
     )
+
+
+async def emit_conversation_updated(
+    conversation_id: str, name: str
+) -> None:
+    """T86 标题自动生成会话更新事件——首条用户消息触发写回 name 后 emit。
+
+    复用现有 BusManager + ``bus-event:{conversationId}`` 通道（与
+    ``emit_message_added`` 同一 emit 路径），让前端侧栏订阅了该会话通道
+    的组件刷新标题。事件 payload 含 ``conversation_id`` + 新 ``name``，
+    type=``conversation_updated``（新事件类型，前端 useBusEvent 按 type 分流）。
+
+    语义：仅在 conversation.name 为空时由首条用户消息触发（见
+    ``api/messages.py send_message``），已有 name 不覆盖。所以这个事件
+    在会话生命周期里通常只发一次（除非用户手改 name 后又删——目前无此路径）。
+    """
+    await bus_manager.emit(
+        conversation_id,
+        {
+            "id": f"evt_{uuid.uuid4().hex}",
+            "group_id": conversation_id,
+            "task_id": None,
+            "sender_id": "system",
+            "receiver_id": "broadcast",
+            "type": "conversation_updated",
+            "content": None,
+            "data": {
+                "conversation_id": conversation_id,
+                "name": name,
+            },
+            "timestamp": _ts(),
+        },
+    )

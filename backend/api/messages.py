@@ -14,6 +14,12 @@ single-chat conversations (conversation_id is a conversation_id) this is
 ``route_direct_message`` (resident worker engine, no group graph) — see
 ``engine/direct.py``.
 
+T86 豆包式常驻助手——标题自动生成：单聊会话（非群聊）首条用户消息发出后，
+若 ``conversation.name`` 为空，取用户消息 content 前 20 字（超 20 加「…」，
+strip 换行）写回 conversation.name + 更新 updated_at，并 emit
+``conversation_updated`` 事件让前端刷新侧栏标题。仅首条触发（name 已有不覆盖）。
+群聊会话跳过（群聊 name 由群组管理路径负责）。
+
 Path C strict rename: ``group_id`` → ``conversation_id`` on Message + payload.
 The ``conversationId`` query param is used by the GET/DELETE endpoints
 (holds either a group_id or a conversation_id).
@@ -31,11 +37,48 @@ from fastapi import APIRouter, HTTPException, Query
 
 from engine.direct import route_direct_message
 from engine.mention import route_user_message
-from events import emit_message_added
+from events import emit_conversation_updated, emit_message_added
 from models import Message, MessageCreatePayload
 from store import crud
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
+
+# T86 标题自动生成：截断长度 + 省略后缀
+_TITLE_MAX_LEN = 20
+_TITLE_ELLIPSIS = "…"
+
+
+def _build_title(content: str) -> str:
+    """T86 标题生成：取 content 前 20 字（strip 换行），超 20 加「…」。"""
+    cleaned = (content or "").replace("\n", " ").replace("\r", " ").strip()
+    if not cleaned:
+        return ""
+    if len(cleaned) <= _TITLE_MAX_LEN:
+        return cleaned
+    return cleaned[:_TITLE_MAX_LEN] + _TITLE_ELLIPSIS
+
+
+async def _maybe_autotitle_conversation(
+    conversation_id: str, user_content: str
+) -> None:
+    """T86 首条用户消息触发——conversation.name 为空则写回前 20 字 + emit 事件.
+
+    群聊会话跳过（name 由群组路径负责）；会话不存在跳过；name 已有跳过（仅首条触发）。
+    单聊会话（transient 与否都生成）——标题语义对所有单聊统一适用。
+    """
+    conv = await crud.get_conversation(conversation_id)
+    if conv is None:
+        # 群聊会话走 get_group，无 ConversationEntity 行——标题由群组路径负责，跳过
+        return
+    if conv.name:
+        # 已有 name 不覆盖（语义：仅首条触发）
+        return
+    title = _build_title(user_content)
+    if not title:
+        return
+    updated = await crud.update_conversation_name(conversation_id, title)
+    if updated is not None:
+        await emit_conversation_updated(conversation_id, title)
 
 
 @router.get("")
@@ -53,6 +96,15 @@ async def send_message(payload: MessageCreatePayload) -> Message:
     msg = await crud.create_message(payload)
     # push the user message over the WS bus
     await emit_message_added(msg.model_dump())
+    # T86 单聊首条用户消息触发标题自动生成（群聊跳过——name 由群组路径负责）。
+    # 仅当 conversation.name 为空时写回（已有 name 不覆盖）。失败不影响主流程。
+    try:
+        await _maybe_autotitle_conversation(msg.conversation_id, msg.content or "")
+    except Exception:
+        # 标题生成 best-effort：失败不阻塞发消息主流程（用户仍能收到回复）。
+        # 此处不记日志以避免流式路径污染——前端 GET /api/conversations 时会
+        # 拿到 name（无论是否被写回），最坏情况是侧栏显示空标题直到下次发消息。
+        pass
     # Route by conversation kind. If the conversation_id matches a Group row →
     # group-chat path (route_user_message + group graph + @mention routing).
     # Otherwise → single-chat path (route_direct_message → resident worker

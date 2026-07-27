@@ -4,6 +4,7 @@ from __future__ import annotations
 from .bus import (
     bus_manager,
     emit_agent_status,
+    emit_conversation_updated,
     emit_coordinator_plan,
     emit_coordinator_reasoning,
     emit_coordinator_stats,
@@ -33,4 +34,5 @@ __all__ = [
     "emit_coordinator_token",
     "emit_coordinator_reasoning",
     "emit_coordinator_stats",
+    "emit_conversation_updated",
 ]

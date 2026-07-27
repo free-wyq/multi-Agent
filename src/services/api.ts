@@ -103,24 +103,33 @@ export interface Conversation {
   name: string
   /** 镜像 agent_id，让 ChatPanel 读 group.coordinator_id 的代码零改（C2 共享该共享的）。 */
   coordinator_id: string
+  /** 1=体验会话（transient，不进侧栏）；0=正式会话。 */
+  transient: number
   created_at: string
   updated_at: string
 }
 
-/** POST /api/conversations body（find-or-create 语义）。 */
+/** POST /api/conversations body（豆包式每次新建）。
+ *
+ * agent_id 省略 → 后端绑平台助手（slug='platform_assistant'，常驻 agent）。
+ * 传 agent_id 则绑指定 agent（广场「体验对话」用，transient 临时会话）。 */
 export interface ConversationCreatePayload {
-  agent_id: string
+  agent_id?: string
   name?: string
+  /** 1=体验会话（transient，不进侧栏，可转正）；0=正式会话（默认）。 */
+  transient?: number
 }
 
 // ── Conversation API ───────────────────────────────────────
 export const conversationApi = {
   list: () => http<Conversation[]>('GET', '/api/conversations'),
-  /** find-or-create：已有该 agent 的单聊则返回，否则新建。 */
+  /** 豆包式每次新建一个会话；agent_id 省略→绑平台助手，传值→绑指定 agent（体验用）。 */
   create: (body: ConversationCreatePayload) =>
     http<Conversation>('POST', '/api/conversations', body),
   get: (id: string) => http<Conversation | null>('GET', `/api/conversations/${id}`),
   delete: (id: string) => http<boolean>('DELETE', `/api/conversations/${id}`),
+  /** 体验会话转正：transient 1→0，落进左侧【会话】列表。 */
+  finalize: (id: string) => http<Conversation>('POST', `/api/conversations/${id}/finalize`),
   /**
    * 任务14c：单聊会话工作区产物文件列表（GET /api/conversations/{id}/files）。
    *

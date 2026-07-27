@@ -103,6 +103,10 @@ class ConversationEntity(Base):
     # coordinator_id mirrors agent_id so ChatPanel (reads group.coordinator_id)
     # works unchanged for single-chat conversations (C2 shared-UI principle).
     coordinator_id: Mapped[str] = mapped_column(String, nullable=False, default="")
+    # T86 豆包式常驻助手：1=体验会话不进侧栏（点智能体广场 agent 临时会话），
+    # 0=正式会话（侧栏列出）。list_conversations 过滤此列，只返非体验会话。
+    # 默认 0——存量库行为不变；新建会话默认进侧栏，体验会话由 caller 显式传 1。
+    transient: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
     created_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
     updated_at: Mapped[str] = mapped_column(String, nullable=False, default=_now_iso)
 
