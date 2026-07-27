@@ -41,6 +41,17 @@ export interface TaskStatusEvent {
   updatedAt: string
 }
 
+/** T86/T91：会话标题更新事件 payload（emit_conversation_updated 推送）。
+ *  首条用户消息触发写回 name 后 emit，前端侧栏据此本地 patch 会话 name（省一次 list 请求）。
+ *  - conversationId：被更新的会话 id（emit 时 group_id=conversation_id）。
+ *  - name：新标题（首条用户消息前 20 字 / 空内容置空）。
+ *  - ts：事件时间戳（parseTs 后的 epoch ms）。 */
+export interface ConversationUpdateEntry {
+  conversationId: string
+  name: string
+  ts: number
+}
+
 /** Map BusEventData.type → TraceEvent.kind */
 function mapKind(type: string): string {
   switch (type) {
@@ -54,6 +65,7 @@ function mapKind(type: string): string {
     case 'agent_status': return 'status'
     case 'coordinator_plan': return 'plan'
     case 'coordinator_think': return 'coord_think'
+    case 'conversation_updated': return 'conversation_updated'
     case 'agent_reply':
     case 'user_input': return 'reply'
     default: return type
@@ -74,6 +86,8 @@ function parseTs(ts: string): number {
  * - agentStatuses: 从 systemApi.listStatus 播种 + agent_status 事件实时更新
  * - plan: coordinator_plan 事件 → PlanStep[]
  * - streaming: task_token 增量按 task_id 拼接的「正在生成」缓冲区（PL-08 逐字流式）
+ * - conversationUpdates: conversation_updated 事件队列（{conversationId,name,ts}[]），
+ *   T86 首条消息触发会话标题写回后 emit，供侧栏（SelectionContext）本地 patch 会话 name。
  *
  * PL-10 重连重拉：onBusEvent 第三参 onReconnect 回调，连接曾中断重连后触发，
  * 按消息/计划/状态真源重新拉取——断线期间漏掉的事件（agent_status、coordinator_plan、
@@ -102,6 +116,7 @@ export function useBusEvent(groupId: string | null) {
       coordStreaming: ctx.coordStreaming,
       coordReasoning: ctx.coordReasoning,
       coordStats: ctx.coordStats,
+      conversationUpdates: ctx.conversationUpdates,
       refreshPlan: ctx.refreshPlan,
     }
   }
@@ -130,6 +145,10 @@ export function useBusEvent(groupId: string | null) {
   >({})
   const [coordReasoning, setCoordReasoning] = useState<Record<string, string>>({})
   const [coordStats, setCoordStats] = useState<Record<string, CoordStats>>({})
+  // T86/T91：会话标题更新事件队列（conversation_updated）。
+  // 首条用户消息触发会话 name 写回后 emit，供侧栏本地 patch 会话 name（省一次 list 请求）。
+  // 多次更新按事件到达顺序累积（cap 50，B30 同款增量追加），消费方按 conversationId 取最新。
+  const [conversationUpdates, setConversationUpdates] = useState<ConversationUpdateEntry[]>([])
 
   // 推理链逐字 delta 节流缓冲（思考流式优化）：
   // 推理模型思考阶段 chunk 极密（kimi 写 200 字实测 820 delta），逐条 setState 会触发
@@ -304,6 +323,7 @@ export function useBusEvent(groupId: string | null) {
     setStreaming({})
     setEvents([])
     setLogs([])
+    setConversationUpdates([])
 
     // 切群首拉：清旧群残留 plan，再主动从真源拉新群当前驻留计划。
     // 覆盖两个缺口：①引擎重启但 WS 未断连（onReconnect 不触发，真源已变但
@@ -631,6 +651,27 @@ export function useBusEvent(groupId: string | null) {
           })
         }
       }
+
+      // → conversation_updated（T86 会话标题自动生成后端 emit_conversation_updated）：
+      // 首条用户消息触发会话 name 写回后推送，供侧栏（SelectionContext）本地 patch 会话
+      // name，省一次 list 请求。payload 在 d.data（{conversation_id, name}）。增量追加 + cap 50
+      // （B30 同款：常态 O(1) 追加，超 cap 才 slice），消费方按 conversationId 取最新条目。
+      if (d.type === 'conversation_updated' && d.data && typeof d.data === 'object') {
+        const dd = d.data as Record<string, unknown>
+        const cid = dd['conversation_id']
+        const name = dd['name']
+        if (typeof cid === 'string' && cid && typeof name === 'string') {
+          const entry: ConversationUpdateEntry = {
+            conversationId: cid,
+            name,
+            ts,
+          }
+          setConversationUpdates((prev) => {
+            const next = [...prev, entry]
+            return next.length > 50 ? next.slice(next.length - 50) : next
+          })
+        }
+      }
     }, handleReconnect).then((fn) => {
       if (cancelled) {
         fn()
@@ -669,5 +710,5 @@ export function useBusEvent(groupId: string | null) {
     }
   }, [groupId, handleReconnect, refreshPlan, flushReasoning, flushEvents, flushLogs])
 
-  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, refreshPlan }
+  return { logs, statusEvents, events, agentStatuses, plan, streaming, coordStreaming, coordReasoning, coordStats, conversationUpdates, refreshPlan }
 }
