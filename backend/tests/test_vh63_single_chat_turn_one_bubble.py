@@ -51,7 +51,10 @@ os.environ.setdefault("MULTI_AGENT_DATA_DIR", str(BACKEND / "_test_data_vh63"))
 WORKER = (BACKEND / "engine" / "worker.py").read_text(encoding="utf-8")
 REGISTRY = (BACKEND / "engine" / "registry.py").read_text(encoding="utf-8")
 STATE = (BACKEND / "engine" / "state.py").read_text(encoding="utf-8")
-FRONTEND_CHATPANEL = (BACKEND.parent / "src" / "components" / "ChatPanel.tsx").read_text(encoding="utf-8")
+# vh63 锁的 coordinatorStreamingBubbles/toolEventsByTask/coord-streaming 渲染在 ChatPanel
+# 9a/9b 拆分（commit 80dc7d8）后迁到 StreamingBubbleList.tsx，业务逻辑逐字不变，
+# 断言目标在新文件里完整存在。FRONTEND_CHATPANEL 指向新文件（保持原变量名以免改测试体引用）。
+FRONTEND_CHATPANEL = (BACKEND.parent / "src" / "components" / "StreamingBubbleList.tsx").read_text(encoding="utf-8")
 
 
 def test_A1_brain_return_carries_reply_id():
