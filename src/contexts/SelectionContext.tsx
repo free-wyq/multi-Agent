@@ -84,7 +84,7 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
   // setGroupId 来自 BusEventContext（App 层 state 经 provider 下发）。
   // Path C：setGroupId 接收的 id 可能是 group_id（群聊）或 conversation_id（单聊），
   // ChatPanel/BusEventContext 按 id 订阅 WS 通道，机制不变。
-  const { groupId, setGroupId } = useBusEventContext()
+  const { groupId, setGroupId, conversationUpdates } = useBusEventContext()
 
   const [groups, setGroups] = useState<Group[]>([])
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -127,6 +127,27 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
   useEffect(() => {
     void refreshAll()
   }, [refreshAll])
+
+  // T86/T91-3：会话标题写回本地 patch。
+  // 首条用户消息后后端 emit_conversation_updated 推 {conversation_id, name}，
+  // useBusEvent 收敛成 conversationUpdates（cap-50 增量追加）。这里监听该队列，
+  // 对侧栏已持有的会话本地改 name——省一次 conversationApi.list() 全量拉取。
+  // 仅 patch 已存在于本地列表的会话（未知 id 忽略，等下次 refreshAll 兜底）；
+  // name 未变则不换引用，避免无谓重渲染。
+  useEffect(() => {
+    if (conversationUpdates.length === 0) return
+    // 取队列里最新一条（队尾）作为本轮要消费的更新。历史条目已在之前 render 消费过，
+    // 但因 setConversations 幂等（name 相同不换引用），重复消费无副作用。
+    const latest = conversationUpdates[conversationUpdates.length - 1]
+    setConversations((prev) => {
+      const idx = prev.findIndex((c) => c.id === latest.conversationId)
+      if (idx === -1) return prev // 未知会话——本地无此条，等下次 refreshAll
+      if (prev[idx].name === latest.name) return prev // name 未变，保持引用稳定
+      const next = prev.slice()
+      next[idx] = { ...next[idx], name: latest.name }
+      return next
+    })
+  }, [conversationUpdates])
 
   // 当前 groupId 对应的群组对象（群聊场景）。
   const activeGroup = useMemo(
