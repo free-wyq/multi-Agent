@@ -49,3 +49,17 @@ class ConversationCreatePayload(BaseModel):
     agent_id: str | None = None
     name: str | None = None
     transient: int = 0
+
+
+class ConversationUpdatePayload(BaseModel):
+    """Payload for PUT /api/conversations/{id}（会话管理·重命名）。
+
+    部分更新语义（仅传字段被写）。目前后端只支持改 ``name``——``crud.update_conversation_name``
+    覆写 name + updated_at。``extra="allow"`` 容忍未来扩展字段（pin/置顶等）而不破现有 caller。
+    侧栏「管理」重命名入口走此端点；写回后 emit ``conversation_updated`` 让前端订阅了该通道
+    的组件刷新标题（与首条消息自动命名的 emit 同一通道复用）。
+    """
+
+    model_config = ConfigDict(extra="allow")
+
+    name: str | None = None

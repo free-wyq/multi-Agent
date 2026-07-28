@@ -70,6 +70,12 @@ export interface SelectionContextValue {
   /** 新建一个会话（豆包式）：后端每次新建一个绑平台助手的 ConversationEntity → setGroupId。
    *  用于侧栏「+新对话」按钮。平台助手是常驻 agent（slug='platform_assistant'），单聊永远绑它。 */
   createNewConversation: () => Promise<void>
+  /** 重命名会话（会话管理·改）。PUT /api/conversations/{id} 写回 name + 本地 patch。 */
+  renameConversation: (conversationId: string, name: string) => Promise<void>
+  /** 删除单个会话（含级联消息/任务）。删当前选中会话时清空选中。 */
+  deleteConversation: (conversationId: string) => Promise<void>
+  /** 批量删除会话（会话管理·批量删）。串行调 delete；删到当前选中则清空选中。 */
+  deleteConversations: (conversationIds: string[]) => Promise<void>
   /** 选多智能体群组进群聊：直接 setGroupId。 */
   selectGroup: (groupId: string) => void
 }
@@ -197,6 +203,72 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
     [setGroupId],
   )
 
+  /**
+   * 重命名会话（会话管理·改）：PUT /api/conversations/{id} 写回 name。
+   *
+   * 后端写回后 emit conversation_updated（与首条消息自动命名同通道），但本地列表
+   * 已持有该会话——这里写回成功后直接本地 patch（乐观更新，不依赖事件回环），
+   * 省一次 conversationApi.list() 全量拉取。
+   */
+  const renameConversation = useCallback(
+    async (conversationId: string, name: string) => {
+      const prev = conversations
+      // 乐观本地 patch（先更新 UI，失败再回滚）。
+      setConversations((cur) =>
+        cur.map((c) => (c.id === conversationId ? { ...c, name } : c)),
+      )
+      try {
+        await conversationApi.update(conversationId, { name })
+      } catch {
+        // 写回失败回滚到旧值（用户侧可重试）。
+        setConversations(prev)
+      }
+    },
+    [conversations],
+  )
+
+  /**
+   * 删除单个会话（级联清消息/任务，后端 delete_conversation 已做 cascade）。
+   * 删的是当前选中会话时清空选中（setGroupId('')）——否则侧栏高亮一条已删项。
+   */
+  const deleteConversation = useCallback(
+    async (conversationId: string) => {
+      try {
+        await conversationApi.delete(conversationId)
+      } catch {
+        /* 删除失败静默——后续可加 toast。避免阻塞批量删除中段。 */
+      }
+      setConversations((cur) => cur.filter((c) => c.id !== conversationId))
+      if (groupId === conversationId) {
+        setGroupId('')
+      }
+    },
+    [groupId, setGroupId],
+  )
+
+  /**
+   * 批量删除会话（会话管理·批量删）。串行调 delete（避免并发风暴后端 SessionLocal）。
+   * 删到当前选中会话时清空选中。全部删完后一次性本地过滤，而非逐条 filter（少 N 次重渲染）。
+   */
+  const deleteConversations = useCallback(
+    async (conversationIds: string[]) => {
+      if (conversationIds.length === 0) return
+      for (const id of conversationIds) {
+        try {
+          await conversationApi.delete(id)
+        } catch {
+          /* 单条失败不中断批量（其余仍删）——失败的条目保留在列表。 */
+        }
+      }
+      const deleted = new Set(conversationIds)
+      setConversations((cur) => cur.filter((c) => !deleted.has(c.id)))
+      if (groupId && deleted.has(groupId)) {
+        setGroupId('')
+      }
+    },
+    [groupId, setGroupId],
+  )
+
   const value = useMemo<SelectionContextValue>(
     () => ({
       groups,
@@ -210,6 +282,9 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeGroup,
       activeConversation,
       createNewConversation,
+      renameConversation,
+      deleteConversation,
+      deleteConversations,
       selectGroup,
     }),
     [
@@ -224,6 +299,9 @@ export function SelectionProvider({ children }: SelectionProviderProps) {
       activeGroup,
       activeConversation,
       createNewConversation,
+      renameConversation,
+      deleteConversation,
+      deleteConversations,
       selectGroup,
     ],
   )

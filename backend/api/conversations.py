@@ -4,6 +4,7 @@ Routes map to frontend `conversationApi`:
   GET    /api/conversations                  → list_conversations (transient=0 only)
   POST   /api/conversations                  → create_conversation (每次新建)
   GET    /api/conversations/{id}             → get_conversation
+  PUT    /api/conversations/{id}             → update_conversation (重命名·会话管理)
   DELETE /api/conversations/{id}             → delete_conversation
   POST   /api/conversations/{id}/finalize    → finalize_conversation (体验→正式)
   GET    /api/conversations/{id}/files      → list_files        (任务14a·单聊文件列表)
@@ -29,7 +30,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import FileResponse
 
 from engine.workspace import safe_path
-from models import Conversation, ConversationCreatePayload, GroupFile
+from models import Conversation, ConversationCreatePayload, ConversationUpdatePayload, GroupFile
 from store import crud
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
@@ -62,6 +63,31 @@ async def create_conversation(payload: ConversationCreatePayload) -> Conversatio
 @router.get("/{conversation_id}")
 async def get_conversation(conversation_id: str) -> Conversation | None:
     return await crud.get_conversation(conversation_id)
+
+
+@router.put("/{conversation_id}")
+async def update_conversation(
+    conversation_id: str, payload: ConversationUpdatePayload
+) -> Conversation:
+    """重命名会话（会话管理·改）。部分更新——目前只支持改 ``name``。
+
+    侧栏「管理」模式重命名入口走此端点。``crud.update_conversation_name`` 覆写
+    name + updated_at。写回后 emit ``conversation_updated`` 让前端订阅了该会话
+    通道的组件刷新标题（与首条消息自动命名的 emit 同一通道复用——前端 useBusEvent
+    按 type 分流，本地 patch 已有会话的 name，无需全量 list）。
+    404 当会话不存在。
+    """
+    conv = await crud.update_conversation_name(conversation_id, payload.name or "")
+    if conv is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"会话不存在: {conversation_id}",
+        )
+    # 复用首条消息自动命名的 emit 通道刷新前端标题（本地 patch，省一次全量 list）。
+    from events.bus import emit_conversation_updated
+
+    await emit_conversation_updated(conversation_id, conv.name)
+    return conv
 
 
 @router.delete("/{conversation_id}")

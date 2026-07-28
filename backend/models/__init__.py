@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .agent import AgentCreatePayload, AgentDefinition
-from .conversation import Conversation, ConversationCreatePayload
+from .conversation import Conversation, ConversationCreatePayload, ConversationUpdatePayload
 from .group import (
     Group,
     GroupConfig,
@@ -41,6 +41,7 @@ __all__ = [
     "AgentCreatePayload",
     "Conversation",
     "ConversationCreatePayload",
+    "ConversationUpdatePayload",
     "Group",
     "GroupConfig",
     "GroupCreatePayload",

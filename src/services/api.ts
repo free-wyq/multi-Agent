@@ -127,6 +127,9 @@ export const conversationApi = {
   create: (body: ConversationCreatePayload) =>
     http<Conversation>('POST', '/api/conversations', body),
   get: (id: string) => http<Conversation | null>('GET', `/api/conversations/${id}`),
+  /** 重命名会话（会话管理·改）。PUT /api/conversations/{id} 部分更新——目前只改 name。 */
+  update: (id: string, body: { name?: string }) =>
+    http<Conversation>('PUT', `/api/conversations/${id}`, body),
   delete: (id: string) => http<boolean>('DELETE', `/api/conversations/${id}`),
   /** 体验会话转正：transient 1→0，落进左侧【会话】列表。 */
   finalize: (id: string) => http<Conversation>('POST', `/api/conversations/${id}/finalize`),

@@ -1,7 +1,6 @@
 import { useState } from 'react'
 import { Layout as AntLayout, Segmented } from 'antd'
 import {
-  MessageOutlined,
   AppstoreOutlined,
   ShopOutlined,
 } from '@ant-design/icons'
@@ -95,7 +94,6 @@ export default function Layout() {
           value={view}
           onChange={(val) => setView(val as View)}
           options={[
-            { value: 'chat', label: <ViewLabel icon={<MessageOutlined />} text="对话" /> },
             { value: 'agent', label: <ViewLabel icon={<AppstoreOutlined />} text="智能体广场" /> },
             { value: 'skill', label: <ViewLabel icon={<ShopOutlined />} text="skill广场" /> },
           ]}
