@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { Button, Empty, Input, Spin, Tooltip, Typography, Upload, message } from 'antd'
 import type { UploadProps } from 'antd'
 import type { ComponentRef } from 'react'
-import { CompressOutlined, PaperClipOutlined, RobotOutlined, SendOutlined, SettingOutlined, VerticalAlignBottomOutlined } from '@ant-design/icons'
+import { CompressOutlined, PaperClipOutlined, RobotOutlined, SendOutlined, SettingOutlined, VerticalAlignBottomOutlined, AudioOutlined, AudioMutedOutlined } from '@ant-design/icons'
 import {
   messageApi,
   groupApi,
@@ -16,6 +16,7 @@ import {
 import { useBusEventContext } from '../contexts/BusEventContext'
 import { useSettings } from '../contexts/SettingsContext'
 import { useTts } from '../hooks/useTts'
+import { useStt } from '../hooks/useStt'
 import { useBubbleRetire } from '../hooks/useBubbleRetire'
 import {
   getSlashCommand,
@@ -237,6 +238,35 @@ export default function ChatPanel({
   // 不解析消息内容——不重蹈停关键词的语义歧义。纯加性，converge=false 时一切照旧。
   // 切群时复位（收束是当前群一次性意图，跨群不应残留）。
   const [convergeActive, setConvergeActive] = useState(false)
+
+  // ── 麦克风语音输入（STT，与 TTS 对称）──────────────────────────────
+  // 纯前端 Web Speech API：识别结果 finalText 追加到 chatInput（填入输入框待发，不自动发送），
+  // 与追问 chip / insertMention 一致——给用户确认机会。interim 实时拼到输入框末尾预览。
+  const { supported: sttSupported, listening, interim, start: startStt, stop: stopStt, onResult: onSttResult } = useStt()
+  // 注册识别结果回调：final 定稿文本追加到 chatInput 末尾（保留已有内容 + 空格分隔）。
+  useEffect(() => {
+    return onSttResult((finalText) => {
+      if (!finalText) return
+      setChatInput((prev) => {
+        const base = prev.replace(/\s+$/, '') // 去掉末尾 interim 残留空白
+        const sep = base && !base.endsWith('\n') ? ' ' : ''
+        return `${base}${sep}${finalText}`
+      })
+      // 识别完聚焦回输入框末尾，便于用户继续编辑/发送。
+      requestAnimationFrame(() => {
+        const ta = inputRef.current?.resizableTextArea?.textArea
+        if (ta) {
+          ta.focus()
+          const len = ta.value.length
+          ta.setSelectionRange(len, len)
+        }
+      })
+    })
+  }, [onSttResult])
+  // 麦克风录音中时，输入框显示值 = 已输入内容 + interim 实时预览（不改 chatInput 状态本身，
+  // interim 是临时的，final 回调里才真正 setChatInput 追加）。
+  const displayInput = listening ? `${chatInput.replace(/\s+$/, '')}${chatInput && !chatInput.endsWith('\n') ? ' ' : ''}${interim}` : chatInput
+  const canSend = chatInput.trim().length > 0 && !sending
   useEffect(() => {
     setConvergeActive(false)
   }, [chatGroupId])
@@ -973,23 +1003,19 @@ export default function ChatPanel({
               ))}
             </div>
           )}
-          <div style={{ display: 'flex', gap: 8, alignItems: 'flex-end' }}>
-            <Input.TextArea
-              ref={inputRef}
-              value={chatInput}
-              onChange={handleInputChange}
-              onKeyDown={handleInputKeyDown}
-              placeholder={
-                convergeActive
-                  ? '收束模式：@ 某成员让其回一句即收束（回复后不再 handoff）。再点「收束」取消'
-                  : '输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行（智能体忙碌时回车会先打断当前任务）'
-              }
-              disabled={sending}
-              autoSize={{ minRows: 1, maxRows: 6 }}
-              style={{ flex: 1, resize: 'none' }}
-            />
-            {/* @收束 一次性开关（converge-turn-design）：点亮后下条消息以收束回合发，
-                @某 agent → 回一句即 END 不 handoff。发完自动灭。仅去中心化柔性收口。 */}
+          <div
+            className="chat-composer"
+            style={{
+              display: 'flex',
+              alignItems: 'flex-end',
+              gap: 4,
+              background: '#fff',
+              border: '1px solid #f0f0f0',
+              borderRadius: 24,
+              padding: '6px 6px 6px 10px',
+            }}
+          >
+            {/* 左段：收束开关（icon-only，省空间）+ 文件上传 */}
             <Tooltip
               title={
                 convergeActive
@@ -998,18 +1024,18 @@ export default function ChatPanel({
               }
             >
               <Button
-                type={convergeActive ? 'primary' : 'default'}
-                ghost={convergeActive}
+                type="text"
+                shape="circle"
                 icon={<CompressOutlined />}
                 onClick={() => setConvergeActive((v) => !v)}
                 disabled={sending}
                 aria-pressed={convergeActive}
-              >
-                收束
-              </Button>
+                aria-label="收束开关"
+                style={{ color: convergeActive ? '#F26522' : undefined, flexShrink: 0 }}
+              />
             </Tooltip>
             {/* 任务8：文件上传（方案 A 零后端端点）——antd Upload beforeUpload 读 File.text()
-                拼进 chatInput 直接发送。accept=".md,.txt"+<100KB 校验，非法 toast。
+                拼进 chatInput 直接发送。accept=".md/.txt"+<100KB 校验，非法 toast。
                 showUploadList=false 不显示文件列表（上传即发送，无文件列表 UI）。
                 disabled=sending 与收束/发送按钮一致——发送中禁用避免并发。 */}
             <Upload
@@ -1019,17 +1045,60 @@ export default function ChatPanel({
               disabled={sending}
             >
               <Tooltip title="上传 .md/.txt 文件作为消息发送（<100KB，方案A 零后端端点）">
-                <Button icon={<PaperClipOutlined />} disabled={sending} aria-label="上传文件" />
+                <Button type="text" shape="circle" icon={<PaperClipOutlined />} disabled={sending} aria-label="上传文件" style={{ flexShrink: 0 }} />
               </Tooltip>
             </Upload>
+            {/* 中段：无边框 TextArea，融入胶囊。displayInput 含 interim 实时预览（录音中）。 */}
+            <Input.TextArea
+              ref={inputRef}
+              value={displayInput}
+              onChange={handleInputChange}
+              onKeyDown={handleInputKeyDown}
+              placeholder={
+                convergeActive
+                  ? '收束模式：@ 某成员让其回一句即收束（回复后不再 handoff）。再点「收束」取消'
+                  : listening
+                    ? '正在聆听…识别结果将填入此处（说完可编辑后发送）'
+                    : '输入消息... @ 点名成员，/ 触发命令，Enter 发送，Shift+Enter 换行（智能体忙碌时回车会先打断当前任务）'
+              }
+              disabled={sending}
+              readOnly={listening}
+              autoSize={{ minRows: 1, maxRows: 6 }}
+              variant="borderless"
+              style={{ flex: 1, resize: 'none', padding: '6px 8px' }}
+            />
+            {/* 右段：麦克风 + 圆形发送 */}
+            <Tooltip
+              title={
+                !sttSupported
+                  ? '当前环境不支持语音输入（Web Speech API 不可用）'
+                  : listening
+                    ? '停止录音（识别结果填入输入框待发）'
+                    : '语音输入：点击开始说话，识别结果填入输入框（不自动发送）'
+              }
+            >
+              <Button
+                type="text"
+                shape="circle"
+                icon={listening ? <AudioMutedOutlined /> : <AudioOutlined />}
+                onClick={() => (listening ? stopStt() : startStt())}
+                disabled={!sttSupported || sending}
+                aria-label={listening ? '停止录音' : '开始语音输入'}
+                aria-pressed={listening}
+                style={{ color: listening ? '#F26522' : undefined, flexShrink: 0 }}
+                className={listening ? 'chat-composer__mic--listening' : undefined}
+              />
+            </Tooltip>
             <Button
               type="primary"
+              shape="circle"
               icon={<SendOutlined />}
               onClick={() => void handleSendMessage()}
               loading={sending}
-            >
-              发送
-            </Button>
+              disabled={!canSend}
+              aria-label="发送消息"
+              style={{ flexShrink: 0 }}
+            />
           </div>
         </div>
       )}

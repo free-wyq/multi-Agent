@@ -197,6 +197,33 @@
   background: #fff7e6;
 }
 
+/* ── 胶囊输入框（对话框重构）──
+ * 白底大圆角胶囊容器。聚焦时描边变橙，呼应发送按钮激活态。
+ * 麦克风录音中脉冲提示（chat-composer__mic--listening）——轻量 box-shadow 呼吸，
+ * 不用 per-frame transform（避免流式期 GPU 合成层抖动，与 chat-lag-jitter-fix 同理）。 */
+.chat-composer:focus-within {
+  border-color: #F26522;
+}
+
+.chat-composer__mic--listening {
+  animation: chat-composer-mic-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes chat-composer-mic-pulse {
+  0%, 100% {
+    box-shadow: 0 0 0 0 rgba(242, 101, 34, 0.4);
+  }
+  50% {
+    box-shadow: 0 0 0 5px rgba(242, 101, 34, 0);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .chat-composer__mic--listening {
+    animation: none;
+  }
+}
+
 /* ── 日期分组分隔条 ──
  * 居中淡灰标签，两端不用横线（横线在窄屏会顶到气泡），微信/钉钉同款。
  * margin 上下留白与气泡间距协调（上 8 下 4，让分隔条更贴近它之后的当天消息组）。 */
